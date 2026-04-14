@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "./data/documents"
+      ],
+      "description": "文件系统 MCP Server：管理知识库 PDF 文件"
+    }
+  }
+}

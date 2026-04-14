@@ -1,0 +1,33 @@
+# ── LangChain 核心 ──────────────────────────────────────────────
+langchain
+langchain-core
+langchain-community
+langchain-openai
+langchain-anthropic
+langchain-chroma
+langchain-text-splitters
+
+# ── 向量数据库 ───────────────────────────────────────────────────
+chromadb
+
+# ── PDF 解析 ─────────────────────────────────────────────────────
+pymupdf
+pypdf
+
+# ── BM25 关键词检索 ──────────────────────────────────────────────
+rank-bm25
+jieba
+
+# ── UI ───────────────────────────────────────────────────────────
+streamlit
+streamlit-extras
+
+# ── PDF 生成（示例文档） ──────────────────────────────────────────
+reportlab
+
+# ── 工具库 ───────────────────────────────────────────────────────
+python-dotenv
+pydantic
+httpx
+tenacity
+tiktoken
