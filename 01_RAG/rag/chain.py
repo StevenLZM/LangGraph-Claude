@@ -9,7 +9,8 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.documents import Document
 
-from config import llm_config, DASHSCOPE_BASE_URL
+from config import llm_config, rag_config, DASHSCOPE_BASE_URL
+from rag.retriever import get_hybrid_retriever, retrieve_with_hybrid
 from rag.vectorstore import get_vectorstore, similarity_search_with_threshold
 
 
@@ -120,6 +121,7 @@ def create_rag_chain():
     llm = _get_llm()
     rewrite_llm = _get_rewrite_llm()
     vs = get_vectorstore()
+    hybrid_retriever = get_hybrid_retriever()
 
     # Step 1: 问题改写
     question_rewriter = (
@@ -134,7 +136,17 @@ def create_rag_chain():
         q = input_dict.get("standalone_question") or input_dict.get("question", "")
         if not q:
             return []
-        return similarity_search_with_threshold(query=q, k=4, vectorstore=vs)
+        if hybrid_retriever is not None:
+            return retrieve_with_hybrid(
+                query=q,
+                top_k=rag_config.FINAL_TOP_K,
+                ensemble_retriever=hybrid_retriever,
+            )
+        return similarity_search_with_threshold(
+            query=q,
+            k=rag_config.FINAL_TOP_K,
+            vectorstore=vs,
+        )
 
     # Step 3: RAG Prompt
     rag_prompt = ChatPromptTemplate.from_messages([

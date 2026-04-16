@@ -24,10 +24,9 @@ def build_hybrid_retriever(all_chunks: List[Document]):
     # ── 语义检索器（向量库） ──────────────────────────────────────
     semantic_retriever = vs.as_retriever(
         search_type="similarity",
-        search_kwargs={
-            "k": rag_config.SEMANTIC_TOP_K,
-            "score_threshold": 0  # 语义阶段不过滤，让 RRF 决定
-        }
+        # similarity 模式下不能传 score_threshold；
+        # 这里先全量召回，让后续融合排序决定最终结果。
+        search_kwargs={"k": rag_config.SEMANTIC_TOP_K},
     )
 
     # ── BM25 检索器（关键词） ────────────────────────────────────
@@ -79,8 +78,7 @@ def retrieve_with_hybrid(
         ensemble_retriever = get_hybrid_retriever()
         if ensemble_retriever is None:
             return []
-
     top_k = top_k or rag_config.FINAL_TOP_K
-    results = ensemble_retriever.invoke({"query": query})
+    results = ensemble_retriever.invoke(query)
 
     return results[:top_k]
