@@ -102,11 +102,13 @@ def format_docs_for_context(docs: list[Document]) -> str:
     parts = []
     for i, doc in enumerate(docs, 1):
         source = doc.metadata.get("source", "未知")
-        page = doc.metadata.get("page", "?")
-        score = doc.metadata.get("similarity_score", "")
-        score_str = f" | 相似度: {score}" if score else ""
+        page = doc.metadata.get("page_range") or doc.metadata.get("page", "?")
+        section = doc.metadata.get("section_path")
+        score = doc.metadata.get("best_child_score", doc.metadata.get("similarity_score", ""))
+        score_str = f" | 分数: {score}" if score else ""
+        section_str = f" | 章节: {section}" if section else ""
         parts.append(
-            f"【文档{i} | 来源: {source} | 第{page}页{score_str}】\n"
+            f"【文档{i} | 来源: {source} | 第{page}页{section_str}{score_str}】\n"
             f"{doc.page_content}"
         )
 

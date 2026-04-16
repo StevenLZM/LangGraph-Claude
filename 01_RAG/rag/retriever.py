@@ -1,84 +1,154 @@
 """
-rag/retriever.py — 混合检索器（语义 + BM25 + RRF）
+rag/retriever.py — parent-child 混合检索器
 """
 from __future__ import annotations
+
+from dataclasses import dataclass
 from typing import List
 
-from langchain_core.documents import Document
-from langchain_community.retrievers import BM25Retriever
 from langchain.retrievers import EnsembleRetriever
+from langchain_community.retrievers import BM25Retriever
+from langchain_core.documents import Document
 
 from config import rag_config
+from rag.docstore import ParentDocStore, get_parent_docstore
 from rag.vectorstore import get_vectorstore
 
 
-def build_hybrid_retriever(all_chunks: List[Document]):
+@dataclass
+class ParentChildHybridRetriever:
+    ensemble_retriever: object
+    parent_docstore: ParentDocStore
+
+    def invoke(self, query: str) -> List[Document]:
+        child_hits = self.ensemble_retriever.invoke(query)
+        return hydrate_parent_results(
+            child_hits,
+            parent_docstore=self.parent_docstore,
+            limit=rag_config.MAX_HYDRATED_PARENTS,
+        )
+
+
+def build_hybrid_retriever(
+    all_chunks: List[Document],
+    parent_docstore: ParentDocStore | None = None,
+):
     """
-    构建混合检索器：
-    - 语义检索（Dense）：向量相似度
-    - BM25 检索（Sparse）：关键词匹配
-    - RRF 融合：Reciprocal Rank Fusion
+    构建 child 级混合检索器，并在最终阶段回填 parent 文档。
     """
     vs = get_vectorstore()
+    docstore = parent_docstore or get_parent_docstore()
 
-    # ── 语义检索器（向量库） ──────────────────────────────────────
     semantic_retriever = vs.as_retriever(
         search_type="similarity",
-        # similarity 模式下不能传 score_threshold；
-        # 这里先全量召回，让后续融合排序决定最终结果。
         search_kwargs={"k": rag_config.SEMANTIC_TOP_K},
     )
 
-    # ── BM25 检索器（关键词） ────────────────────────────────────
     bm25_retriever = BM25Retriever.from_documents(all_chunks)
     bm25_retriever.k = rag_config.BM25_TOP_K
 
-    # ── RRF 融合：加权融合两个检索器的排序 ───────────────────────
-    # RRF 算法：
-    #   score = 1/(k + rank)，其中 k 通常为 60
-    #   多个排序器的 RRF score 加权求和
-    ensemble_retriever = EnsembleRetriever(
+    ensemble = EnsembleRetriever(
         retrievers=[semantic_retriever, bm25_retriever],
         weights=[rag_config.SEMANTIC_WEIGHT, 1 - rag_config.SEMANTIC_WEIGHT],
     )
-
-    return ensemble_retriever
+    return ParentChildHybridRetriever(ensemble, docstore)
 
 
 def get_hybrid_retriever():
-    """获取混合检索器（需要先加载文档到向量库）"""
+    """获取混合检索器（需要先加载 children 到向量库）"""
     vs = get_vectorstore()
     try:
-        # 从向量库获取所有 chunks
-        result = vs.get(include=["documents", "metadatas", "embeddings"])
+        result = vs.get(include=["documents", "metadatas"])
         if not result.get("documents"):
             return None
 
-        # 重构 Document 对象
         all_chunks = [
-            Document(
-                page_content=doc,
-                metadata=meta or {}
-            )
+            Document(page_content=doc, metadata=meta or {})
             for doc, meta in zip(result["documents"], result.get("metadatas", []))
         ]
-
         return build_hybrid_retriever(all_chunks)
     except Exception:
         return None
 
 
+def hydrate_parent_results(
+    child_hits: List[Document],
+    parent_docstore: ParentDocStore,
+    limit: int | None = None,
+) -> List[Document]:
+    """
+    将 child 级命中聚合为 parent 级结果。
+    """
+    if not child_hits:
+        return []
+
+    scores: dict[str, float] = {}
+    matched_child_ids: dict[str, list[str]] = {}
+    best_meta: dict[str, dict] = {}
+
+    for rank, child in enumerate(child_hits):
+        parent_id = child.metadata.get("parent_id")
+        child_id = child.metadata.get("child_id")
+        if not parent_id:
+            continue
+
+        score = child.metadata.get("similarity_score") or 1 / (60 + rank + 1)
+        scores[parent_id] = scores.get(parent_id, 0.0) + score
+        matched_child_ids.setdefault(parent_id, [])
+        if child_id and child_id not in matched_child_ids[parent_id]:
+            matched_child_ids[parent_id].append(child_id)
+
+        current_best = best_meta.get(parent_id)
+        if current_best is None or score > current_best["score"]:
+            best_meta[parent_id] = {
+                "score": score,
+                "metadata": child.metadata,
+            }
+
+    ranked_parent_ids = sorted(
+        scores,
+        key=lambda parent_id: (-scores[parent_id], -len(matched_child_ids.get(parent_id, []))),
+    )
+    if limit is not None:
+        ranked_parent_ids = ranked_parent_ids[:limit]
+
+    parents = parent_docstore.get_parents(ranked_parent_ids)
+    results: list[Document] = []
+    for parent_id in ranked_parent_ids:
+        parent_doc = parents.get(parent_id)
+        if parent_doc is None:
+            continue
+
+        best = best_meta[parent_id]
+        metadata = {
+            **parent_doc.metadata,
+            "matched_child_ids": matched_child_ids.get(parent_id, []),
+            "best_child_score": round(best["score"], 4),
+            "section_path": parent_doc.metadata.get(
+                "section_path",
+                best["metadata"].get("section_path", "未命名章节"),
+            ),
+            "page_range": parent_doc.metadata.get(
+                "page_range",
+                best["metadata"].get("page_range", "?"),
+            ),
+        }
+        results.append(Document(page_content=parent_doc.page_content, metadata=metadata))
+
+    return results
+
+
 def retrieve_with_hybrid(
     query: str,
     top_k: int | None = None,
-    ensemble_retriever = None
+    ensemble_retriever=None,
 ) -> List[Document]:
-    """使用混合检索器检索相关文档"""
+    """使用混合检索器检索相关 parent 文档。"""
     if ensemble_retriever is None:
         ensemble_retriever = get_hybrid_retriever()
         if ensemble_retriever is None:
             return []
+
     top_k = top_k or rag_config.FINAL_TOP_K
     results = ensemble_retriever.invoke(query)
-
     return results[:top_k]

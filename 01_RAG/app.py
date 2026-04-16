@@ -126,8 +126,6 @@ def init_session_state():
         # 配置
         "top_k": rag_config.FINAL_TOP_K,
         "threshold": rag_config.SIMILARITY_THRESHOLD,
-        "chunk_size": rag_config.CHUNK_SIZE,
-        "chunking_strategy": "recursive",
         "show_sources": True,
         "show_debug": False,
     }
@@ -168,7 +166,7 @@ def render_sidebar():
         <div style="text-align:center; padding:10px 0 20px;">
             <div style="font-size:2.5rem;">🧠</div>
             <div style="font-size:1.2rem; font-weight:700; color:#6C63FF;">智能知识库</div>
-            <div style="font-size:0.75rem; color:#888; margin-top:4px;">RAG Knowledge Base v1.0</div>
+            <div style="font-size:0.75rem; color:#888; margin-top:4px;">RAG Knowledge Base v2.0</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -195,7 +193,9 @@ def render_sidebar():
                     st.markdown(
                         f"📄 **{doc['source']}**  \n"
                         f"<span style='color:#888;font-size:0.75rem;'>"
-                        f"{doc['total_chunks']} 块 · {doc['total_pages']} 页</span>",
+                        f"{doc.get('child_count', doc['total_chunks'])} 子块 · "
+                        f"{doc.get('parent_count', 0)} 父块 · "
+                        f"{doc['total_pages']} 页</span>",
                         unsafe_allow_html=True
                     )
                 with col2:
@@ -241,7 +241,10 @@ def render_sidebar():
         st.divider()
         st.caption("📊 系统状态")
         stats = get_collection_stats()
-        st.caption(f"向量库: {stats.get('total_chunks', 0)} 个文档块")
+        st.caption(
+            f"索引: {stats.get('total_children', 0)} 个子块 / "
+            f"{stats.get('total_parents', 0)} 个父块"
+        )
         st.caption(f"对话轮次: {len(st.session_state.chat_history)}")
         st.caption(f"会话 ID: {st.session_state.session_id}")
 
@@ -270,11 +273,7 @@ def _handle_document_upload(uploaded_files):
 
         # 3. 分块
         progress.progress((i / total) * 0.5 + 0.3, text=f"分块 {uploaded_file.name}...")
-        chunks = chunk_documents(
-            pages,
-            chunk_size=st.session_state.chunk_size,
-            strategy=st.session_state.chunking_strategy,
-        )
+        chunks = chunk_documents(pages)
 
         # 4. 向量化并存入 ChromaDB
         progress.progress((i / total) * 0.9 + 0.1, text=f"向量化 {uploaded_file.name}...")

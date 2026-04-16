@@ -1,20 +1,20 @@
 """
-rag/vectorstore.py — ChromaDB 向量库管理
-支持：文档增量添加、删除、查询、持久化
+rag/vectorstore.py — child chunk 向量库管理
+支持：文档增量添加、删除、查询、持久化，并与 parent docstore 协同工作。
 """
 from __future__ import annotations
-import json
-from pathlib import Path
+
 from typing import List, Optional
 
-from langchain_core.documents import Document
 from langchain_chroma import Chroma
+from langchain_core.documents import Document
 
 from config import chroma_config, rag_config
+from rag.chunker import ChunkingResult
+from rag.docstore import ParentDocStore, get_parent_docstore
 from rag.embedder import get_embeddings
 
 
-# ── 单例管理 ──────────────────────────────────────────────────────
 _vectorstore_instance: Optional[Chroma] = None
 
 
@@ -30,81 +30,107 @@ def get_vectorstore(reset: bool = False) -> Chroma:
         collection_name=chroma_config.COLLECTION_NAME,
         embedding_function=embeddings,
         persist_directory=chroma_config.PERSIST_DIRECTORY,
-        collection_metadata={"hnsw:space": "cosine"},  # 使用余弦相似度
+        collection_metadata={"hnsw:space": "cosine"},
     )
     return _vectorstore_instance
 
 
 def add_documents(
-    chunks: List[Document],
+    chunks: ChunkingResult | List[Document],
     doc_id: str,
     vectorstore: Optional[Chroma] = None,
+    parent_docstore: Optional[ParentDocStore] = None,
 ) -> int:
     """
-    增量添加文档块到向量库
-    先删除同 doc_id 的旧数据，再插入新数据（幂等操作）
-
-    Returns:
-        成功添加的 chunk 数量
+    增量添加 child chunks 到向量库，并将 parent chunks 写入 docstore。
+    失败时执行文档级回滚，避免 child / parent 半成功。
     """
     vs = vectorstore or get_vectorstore()
+    docstore = parent_docstore or get_parent_docstore()
 
-    # 删除旧版本（如果存在）
-    delete_document(doc_id, vs)
+    delete_document(doc_id, vs, docstore)
 
-    if not chunks:
+    if isinstance(chunks, ChunkingResult):
+        parents = chunks.parents
+        children = chunks.children
+    else:
+        parents = []
+        children = chunks
+
+    if not children:
         return 0
 
-    # 为每个 chunk 生成唯一 ID（doc_id + chunk_index）
-    ids = [
-        f"{doc_id}_{chunk.metadata.get('chunk_index', i)}"
-        for i, chunk in enumerate(chunks)
-    ]
-
-    # 批量添加（ChromaDB 每次最多 5461 条）
-    batch_size = 500
-    added = 0
-    for i in range(0, len(chunks), batch_size):
-        batch_chunks = chunks[i: i + batch_size]
-        batch_ids = ids[i: i + batch_size]
-        vs.add_documents(documents=batch_chunks, ids=batch_ids)
-        added += len(batch_chunks)
-
-    return added
-
-
-def delete_document(doc_id: str, vectorstore: Optional[Chroma] = None) -> int:
-    """删除指定 doc_id 的所有向量数据"""
-    vs = vectorstore or get_vectorstore()
-
     try:
-        # 查找该文档的所有 chunk
+        if parents:
+            docstore.upsert_parents(parents)
+
+        ids = [
+            child.metadata.get("child_id")
+            or child.metadata.get("parent_id")
+            or f"{doc_id}_{child.metadata.get('chunk_index', i)}"
+            for i, child in enumerate(children)
+        ]
+
+        batch_size = 500
+        added = 0
+        for i in range(0, len(children), batch_size):
+            batch_docs = children[i: i + batch_size]
+            batch_ids = ids[i: i + batch_size]
+            vs.add_documents(documents=batch_docs, ids=batch_ids)
+            added += len(batch_docs)
+        return added
+    except Exception:
+        delete_document(doc_id, vs, docstore)
+        raise
+
+
+def delete_document(
+    doc_id: str,
+    vectorstore: Optional[Chroma] = None,
+    parent_docstore: Optional[ParentDocStore] = None,
+) -> int:
+    """删除指定 doc_id 的 child 向量和 parent 文档。"""
+    vs = vectorstore or get_vectorstore()
+    docstore = parent_docstore or get_parent_docstore()
+
+    deleted_children = 0
+    try:
         existing = vs.get(where={"doc_id": doc_id})
         if existing and existing.get("ids"):
             vs.delete(ids=existing["ids"])
-            return len(existing["ids"])
+            deleted_children = len(existing["ids"])
     except Exception:
         pass
-    return 0
+
+    try:
+        docstore.delete_document(doc_id)
+    except Exception:
+        pass
+
+    return deleted_children
 
 
-def list_documents(vectorstore: Optional[Chroma] = None) -> List[dict]:
+def list_documents(
+    vectorstore: Optional[Chroma] = None,
+    parent_docstore: Optional[ParentDocStore] = None,
+) -> List[dict]:
     """
-    列出向量库中的所有文档（去重，按文件名聚合）
+    列出索引中的所有文档，按 doc_id 聚合 parent / child 数量。
 
     Returns:
-        [{"doc_id": ..., "source": ..., "total_chunks": ..., "pages": ...}]
+        [{"doc_id": ..., "source": ..., "parent_count": ..., "child_count": ...}]
     """
     vs = vectorstore or get_vectorstore()
+    docstore = parent_docstore or get_parent_docstore()
+
+    docs: dict[str, dict] = {}
 
     try:
         result = vs.get(include=["metadatas"])
         metadatas = result.get("metadatas", [])
     except Exception:
-        return []
+        metadatas = []
 
-    # 按 doc_id 聚合
-    docs: dict[str, dict] = {}
     for meta in metadatas:
         if not meta:
             continue
@@ -115,32 +141,68 @@ def list_documents(vectorstore: Optional[Chroma] = None) -> List[dict]:
                 "source": meta.get("source", "未知"),
                 "total_pages": meta.get("total_pages", 0),
                 "total_chunks": 0,
+                "child_count": 0,
+                "parent_count": 0,
+                "doc_version": meta.get("doc_version", ""),
                 "pages": set(),
             }
         docs[doc_id]["total_chunks"] += 1
+        docs[doc_id]["child_count"] += 1
         page = meta.get("page")
         if page:
             docs[doc_id]["pages"].add(page)
 
-    # 序列化（set → sorted list）
-    return [
-        {**v, "pages": sorted(v["pages"])}
-        for v in docs.values()
-    ]
-
-
-def get_collection_stats(vectorstore: Optional[Chroma] = None) -> dict:
-    """返回向量库统计信息"""
-    vs = vectorstore or get_vectorstore()
     try:
-        count = vs._collection.count()
-        return {
-            "total_chunks": count,
-            "collection_name": chroma_config.COLLECTION_NAME,
-            "persist_dir": chroma_config.PERSIST_DIRECTORY,
-        }
+        parent_docs = docstore.list_documents()
     except Exception:
-        return {"total_chunks": 0, "collection_name": chroma_config.COLLECTION_NAME}
+        parent_docs = []
+
+    for parent_doc in parent_docs:
+        doc_id = parent_doc["doc_id"]
+        if doc_id not in docs:
+            docs[doc_id] = {
+                "doc_id": doc_id,
+                "source": parent_doc.get("source", "未知"),
+                "total_pages": 0,
+                "total_chunks": 0,
+                "child_count": 0,
+                "parent_count": 0,
+                "doc_version": parent_doc.get("doc_version", ""),
+                "pages": set(),
+            }
+        docs[doc_id]["parent_count"] = parent_doc.get("parent_count", 0)
+        docs[doc_id]["doc_version"] = parent_doc.get("doc_version", docs[doc_id]["doc_version"])
+        if not docs[doc_id]["source"] or docs[doc_id]["source"] == "未知":
+            docs[doc_id]["source"] = parent_doc.get("source", "未知")
+
+    return [{**doc, "pages": sorted(doc["pages"])} for doc in docs.values()]
+
+
+def get_collection_stats(
+    vectorstore: Optional[Chroma] = None,
+    parent_docstore: Optional[ParentDocStore] = None,
+) -> dict:
+    """返回 child collection 与 parent docstore 统计信息。"""
+    vs = vectorstore or get_vectorstore()
+    docstore = parent_docstore or get_parent_docstore()
+
+    try:
+        child_count = vs._collection.count()
+    except Exception:
+        child_count = 0
+
+    try:
+        parent_count = docstore.count()
+    except Exception:
+        parent_count = 0
+
+    return {
+        "total_chunks": child_count,
+        "total_children": child_count,
+        "total_parents": parent_count,
+        "collection_name": chroma_config.COLLECTION_NAME,
+        "persist_dir": chroma_config.PERSIST_DIRECTORY,
+    }
 
 
 def similarity_search_with_threshold(
@@ -151,26 +213,20 @@ def similarity_search_with_threshold(
     filter_doc_ids: Optional[List[str]] = None,
 ) -> List[Document]:
     """
-    带相似度阈值过滤的语义检索
-
-    Args:
-        query: 查询字符串
-        k: 返回数量
-        threshold: 相似度阈值（0-1），低于此值的结果过滤掉
-        filter_doc_ids: 只在指定文档内检索（None=全库检索）
+    带相似度阈值过滤的 child 级语义检索。
     """
     vs = vectorstore or get_vectorstore()
     threshold = threshold if threshold is not None else rag_config.SIMILARITY_THRESHOLD
 
-    # 检索 + 相似度分数（不传 where 避免版本兼容问题）
     results_with_scores = vs.similarity_search_with_relevance_scores(
         query=query,
         k=k,
     )
 
-    # 过滤低分结果，并将 score 写入 metadata
     filtered = []
     for doc, score in results_with_scores:
+        if filter_doc_ids and doc.metadata.get("doc_id") not in filter_doc_ids:
+            continue
         if score >= threshold:
             doc.metadata["similarity_score"] = round(score, 4)
             filtered.append(doc)
