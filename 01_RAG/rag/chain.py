@@ -185,6 +185,7 @@ def create_chain_with_history():
     rag_chain = create_rag_chain()
     session_store: dict[str, ChatMessageHistory] = {}
 
+    # 入参通过 config["configurable"]["session_id"] 传给 RunnableWithMessageHistory
     def get_session_history(session_id: str) -> ChatMessageHistory:
         if session_id not in session_store:
             session_store[session_id] = ChatMessageHistory()
