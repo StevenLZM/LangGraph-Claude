@@ -1,0 +1,33 @@
+# ── LangGraph 编排 ──────────────────────────────────────────────
+langgraph>=1.0
+langgraph-checkpoint-sqlite
+
+# ── LangChain 核心（与 01_RAG 共享） ──────────────────────────
+langchain
+langchain-core
+langchain-community
+langchain-openai
+
+# ── Pydantic / 配置 ─────────────────────────────────────────────
+pydantic>=2
+pydantic-settings
+
+# ── API + 流式 ──────────────────────────────────────────────────
+fastapi
+uvicorn[standard]
+sse-starlette
+
+# ── MCP（官方 SDK，需 Python ≥ 3.10） ──────────────────────────
+mcp
+
+# ── HTTP / 重试 / 异步 DB ───────────────────────────────────────
+httpx
+tenacity
+aiosqlite
+
+# ── 配置 ────────────────────────────────────────────────────────
+python-dotenv
+
+# ── 测试 ────────────────────────────────────────────────────────
+pytest
+pytest-asyncio
