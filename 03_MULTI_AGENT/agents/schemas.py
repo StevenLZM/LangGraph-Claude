@@ -26,6 +26,10 @@ class Evidence(BaseModel):
     relevance_score: float = 0.0
     fetched_at: str = ""
 
+    # 定义数据结构的序列化输出，继承BaseModel里本身也有，不写也行，写了就覆盖
+    def __repr__(self):
+        return f"Evidence(sub_question_id={self.sub_question_id}, source_type={self.source_type}, url={self.source_url}, score={self.relevance_score}, content={self.fetched_at})"
+
 
 class ReflectionResult(BaseModel):
     coverage_by_subq: dict[str, int] = Field(default_factory=dict)

@@ -33,6 +33,7 @@ def merge_evidence(old: list[Any] | None, new: list[Any] | None) -> list[Evidenc
     """Reducer：按 source_url 去重 + 按 relevance_score 倒序。"""
     pool = list(old or []) + list(new or [])
     by_url: dict[str, dict] = {}
+    print(f"merge evidence 前：{pool}")
     for raw in pool:
         try:
             d = _to_dict(raw)
@@ -46,6 +47,7 @@ def merge_evidence(old: list[Any] | None, new: list[Any] | None) -> list[Evidenc
             by_url[url] = d
     merged = [_from_dict(d) for d in by_url.values()]
     merged.sort(key=lambda e: -float(e.relevance_score or 0.0))
+    print(f"merge evidence + sort 后：{merged}")
     return merged
 
 

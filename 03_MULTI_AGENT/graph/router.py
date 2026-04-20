@@ -28,11 +28,16 @@ def supervisor_route(state: ResearchState) -> Any:
     if state.get("revision_count", 0) >= 3:
         return "writer"
 
-    # 首轮 or 反思后触发补查 → fan-out 派发
+    # 已经有plan但还没收集到evidence(首轮)
+    # or 
+    # 反思后触发补查 
+    # → fan-out 派发
     plan = state.get("plan") or []
-    if plan and not state.get("evidence") or state.get("next_action") == "need_more_research":
+    if (plan and not state.get("evidence")) or (state.get("next_action") == "need_more_research"):
         sends: list[Send] = []
         for sq in plan:
+            print(f"子问题：{sq}")
+            # 取 sq.status 如果没有 status 属性，默认 "pending"
             if getattr(sq, "status", "pending") == "done":
                 continue
             sources = getattr(sq, "recommended_sources", []) or ["web"]

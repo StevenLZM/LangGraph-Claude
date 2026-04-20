@@ -35,55 +35,153 @@
 
 ---
 
-## 三、完整流程流转
+## 三、完整流程流转（代码对照版）
 
 ### 首轮研究（Turn 1）
 
+**Step 1 — 用户启动研究**
+```python
+# app/api.py
+@app.post("/research")
+async def start_research(req: StartReq):
+    tid = uuid.uuid4().hex[:12]                      # 新会话的 thread_id
+    cfg = {"configurable": {"thread_id": tid}}       # 喂给 checkpointer
+    payload = {"research_query": req.research_query, "audience": req.audience,
+               "messages": [], "evidence": []}
+    result = await bootstrap.app_state.graph.ainvoke(payload, config=cfg)
+    interrupt_val = _extract_interrupt(result)        # 命中 interrupt 就返回
 ```
- 用户 POST /research
-   ↓
- graph.ainvoke(payload, cfg={thread_id})
-   ↓
- [planner]  LLM 拆子问题 → interrupt() 暂停
-   ↓                        (返回 Interrupt 给 API → HTTP 响应)
- 用户编辑 plan
-   ↓
- POST /research/{tid}/resume  →  Command(resume={plan:...})
-   ↓
- [planner 从 interrupt 恢复] plan_confirmed=True
-   ↓
- [supervisor] iteration++, current_node="supervisor"
-   ↓
- supervisor_route(state) → [Send('researcher_web', sq1),
-                            Send('researcher_academic', sq2), ...]
-   ↓ 并行
- [researcher_web] [researcher_academic] [researcher_code] [researcher_kb]
-   每个节点通过 registry.get_chain(source_type) 拿降级链，顺序尝试，首个非空即返回
-   返回 evidence 列表 → merge_evidence reducer 按 URL 去重 + 按 score 倒序
-   ↓ 汇聚
- [reflector]  LLM 打覆盖度分
-    if score >= 0.75 → next_action="sufficient"
-    elif rc >= 3     → "force_complete"  （硬兜底不调 LLM）
-    else             → "need_more_research" → 回 supervisor
-   ↓ (sufficient / force_complete)
- [writer]  qwen-max 生成 Markdown + 补充引用章节 + 归档 data/reports/
-   ↓
- END → final_report / report_path 回到 API 响应
+*关键点*：`thread_id` 是跨会话复用状态的唯一钥匙；`payload` 是 State 的初始 patch。
+
+**Step 2 — Planner LLM 拆子问题 + `interrupt()` 暂停**
+```python
+# agents/planner.py
+async def planner_node(state):
+    llm = get_llm("max", temperature=0.3)
+    structured = llm.with_structured_output(ResearchPlan, method="function_calling")
+    plan = await structured.ainvoke([SystemMessage(...), HumanMessage(...)])
+    decision = interrupt({"phase": "plan_review", "plan": plan.model_dump()})  # ← 暂停
+    confirmed = _coerce_plan(decision, fallback=plan)
+    return {"plan": confirmed.sub_questions, "plan_confirmed": True, ...}
 ```
+*关键点*：`interrupt()` 抛出特殊异常，LangGraph runtime 捕获后把图挂起，payload 写进 `__interrupt__`。
+
+**Step 3 — API 把 interrupt 回传给前端**
+```python
+# app/api.py
+def _extract_interrupt(result):
+    intr = result.get("__interrupt__") if isinstance(result, dict) else None
+    item = intr[0] if isinstance(intr, list) else intr          # LangGraph 0.6+ 是 list
+    return getattr(item, "value", None)
+```
+
+**Step 4 — 用户编辑后 resume**
+```python
+# app/api.py
+@app.post("/research/{thread_id}/resume")
+async def resume_research(thread_id, req):
+    cfg = {"configurable": {"thread_id": thread_id}}
+    result = await graph.ainvoke(Command(resume={"plan": req.plan.model_dump()}), cfg)
+```
+*关键点*：`Command(resume=...)` 会变成 `interrupt()` 的返回值；checkpointer 按 `thread_id` 自动加载暂停态。
+
+**Step 5 — Supervisor fan-out 派发 4 路 researcher**
+```python
+# graph/router.py
+def supervisor_route(state):
+    if not state.get("plan_confirmed"):  return "planner"
+    if state.get("revision_count", 0) >= 3:  return "writer"    # 硬兜底
+    if plan and not state.get("evidence") or state.get("next_action") == "need_more_research":
+        sends = []
+        for sq in state["plan"]:
+            if sq.status == "done": continue                     # 已答过的 sub-q 跳过
+            for src in sq.recommended_sources or ["web"]:
+                node = _SOURCE_TO_NODE[src]                      # web→web_researcher 等
+                sends.append(Send(node, {"sub_question": sq,
+                                          "research_query": state["research_query"]}))
+        return sends or "writer"
+```
+*关键点*：返回 `list[Send]` = 并行调度；payload 只喂给被派发的子节点，不污染主 state。
+
+**Step 6 — 4 个 Researcher 并行取证 + merge_evidence 聚合**
+```python
+# agents/researcher_web.py
+@with_tags("web_researcher")
+@safe_node
+async def web_researcher_node(payload):
+    sq_id, question = extract_sq_and_query(payload)
+    evidence = await run_research_chain(source_type="web", query=question,
+                                         sub_question_id=sq_id,
+                                         registry=app_state.registry, top_k=5)
+    return {"evidence": evidence, ...}
+```
+*关键点*：4 个节点返回的 `evidence` 在 fan-in 时自动走 `merge_evidence` reducer —— 按 URL 去重 + 按 score 倒序。
+
+**Step 7 — Reflector 打分 + 决定补查/收敛**
+```python
+# agents/reflector.py
+async def reflector_node(state):
+    rc = state.get("revision_count", 0) + 1
+    if rc >= MAX_REVISION:                                       # 硬兜底：不调 LLM
+        return {"next_action": "force_complete", "revision_count": rc, ...}
+    # 按 sub_question_id 分组 + 截断前 5 条，控制 LLM 输入 token
+    by_sq = {}
+    for ev in state["evidence"]:
+        by_sq.setdefault(ev.sub_question_id, []).append(...)
+    result = await llm.with_structured_output(ReflectionResult, method="function_calling") \
+                    .ainvoke([SystemMessage(...), HumanMessage(...)])
+    return {"next_action": result.next_action, "coverage_by_subq": ...,
+            "revision_count": rc, ...}
+```
+
+**Step 8 — reflector_route 决定走向**
+```python
+# graph/router.py
+def reflector_route(state):
+    if state.get("revision_count", 0) >= 3:                      # 双重兜底
+        return "writer"
+    return "supervisor" if state["next_action"] == "need_more_research" else "writer"
+```
+
+**Step 9 — Writer 生成 Markdown + 引用 + 落盘**
+```python
+# agents/writer.py
+numbered, citations = [], []
+for i, ev in enumerate(evidence, 1):                             # 后端编号 ↔ url 一一对应
+    numbered.append(f"[{i}] ({ev.source_type}) {ev.source_url}\n    {ev.snippet[:400]}")
+    citations.append(Citation(idx=i, source_url=ev.source_url, title=ev.snippet[:80]))
+resp = await llm.ainvoke([SystemMessage(WRITER_SYSTEM), HumanMessage(...)])  # 要求用 [^N] 引用
+report_md = resp.content.strip()
+if not _has_citation_section(report_md):                         # LLM 漏写就自动补
+    report_md += "\n\n## 引用\n" + "\n".join(f"[^{c.idx}]: {c.source_url}" for c in citations)
+path = report_store.save(query, thread_id, report_md)            # 归档到 data/reports/
+```
+*关键点*：**编号由后端生成**，LLM 只负责在正文用 `[^1] [^2]`；即使 LLM 漏写引用章节，后端也会兜底补上。
 
 ### 追问（Turn 2，同 thread_id）
 
+```python
+# app/api.py
+@app.post("/research/{thread_id}/turn")
+async def turn_research(thread_id, req):
+    patch = reset_per_turn({}, req.research_query)   # 重置 revision_count/next_action/...
+    patch["plan_confirmed"] = False                  # 强制回到 planner 重拆
+    result = await graph.ainvoke(patch, config=cfg)  # checkpointer 自动合并历史 state
 ```
- POST /research/{tid}/turn
-   ↓
- reset_per_turn(patch, new_query)   # 保留 evidence/plan/messages；重置 revision_count/next_action
- patch["plan_confirmed"] = False    # 强制回到 planner
-   ↓
- graph.ainvoke(patch, cfg={thread_id})  # checkpointer 自动加载历史 state
-   ↓
- 走同样的 planner → supervisor → ... → writer 流程
- 但 evidence 中已有历史证据 → Writer 可复用
+
+```python
+# app/turn_init.py
+PER_TURN_RESET_FIELDS = ("revision_count", "iteration", "next_node",
+                          "coverage_by_subq", "missing_aspects", "next_action")
+def reset_per_turn(state, new_query):
+    patch = {"research_query": new_query}
+    for k in PER_TURN_RESET_FIELDS:
+        patch[k] = 0 if k in {"revision_count", "iteration"} else None
+    patch["coverage_by_subq"] = {}; patch["missing_aspects"] = []
+    return patch
 ```
+
+*关键点*：`evidence / plan / messages / final_report` 都**保留**。新一轮 Planner 拆出来的 sub_question 如果 URL 在历史 evidence 里命中，`merge_evidence` 会自动复用；没命中的才触发新检索。这是"多轮追问证据复用"的核心机制。
 
 ---
 
@@ -110,89 +208,179 @@
 ### 1. State 契约 —— `graph/state.py`
 
 ```python
-class ResearchState(TypedDict):
+class ResearchState(TypedDict, total=False):
     research_query: str
+    audience: str
+
     plan: list[SubQuestion]
     plan_confirmed: bool
+
     evidence: Annotated[list[Evidence], merge_evidence]   # ← 自定义 reducer
     revision_count: int
-    next_action: Literal["sufficient","need_more_research","force_complete"]
+
+    coverage_by_subq: dict[str, int]
+    missing_aspects: list[str]
+    next_action: str                     # sufficient / need_more_research / force_complete
+    additional_queries: list[str]
+
     final_report: str
-    ...
+    citations: list[Citation]
+    report_path: str
+
+    messages: Annotated[list[BaseMessage], add_messages]   # 官方 reducer，追加不覆盖
+    iteration: int
+    current_node: str
 ```
 
-**关键点**：`Annotated[list, merge_evidence]` 让 LangGraph 在每次 fan-in 时调用 reducer 合并多个并行节点返回的 evidence。
+```python
+def merge_evidence(old, new) -> list[Evidence]:
+    """按 source_url 去重 + 按 relevance_score 倒序。兼容 Pydantic / dict 互转。"""
+    pool = list(old or []) + list(new or [])
+    by_url: dict[str, dict] = {}
+    for raw in pool:
+        d = _to_dict(raw)                       # Pydantic.model_dump() 或 dict()
+        url = d.get("source_url") or ""
+        if not url: continue
+        cur = by_url.get(url)
+        if cur is None or d["relevance_score"] > cur["relevance_score"]:
+            by_url[url] = d                     # 同 URL 留 score 最高
+    merged = [Evidence(**d) for d in by_url.values()]
+    merged.sort(key=lambda e: -float(e.relevance_score or 0.0))
+    return merged
+```
+
+**关键点**：`Annotated[list, merge_evidence]` 让 LangGraph 在每次 fan-in 时调用 reducer 合并多个并行节点返回的 evidence。`total=False` 表示所有字段可选（节点只返增量 patch）。
 
 **为什么自定义 reducer 而不是 `operator.add`？**
-- 4 个 researcher 可能爬到同 URL，简单拼接留重复
-- `merge_evidence(old, new)`：按 URL 聚合 → 同 URL 保留 score 最高 → 按 score 倒序输出
-- 兼容 Pydantic 对象和 dict（LangGraph 序列化/反序列化会互转）
+- 4 个 researcher 可能爬到同 URL（如 Tavily + DashScope 同时命中同一篇博文），`operator.add` 只会简单拼接留重复。
+- `merge_evidence` 三步语义：**按 URL 聚合 → 同 URL 保留 score 最高 → 按 score 倒序输出**，给 Writer 的是一张干净的高质量证据表。
+- 必须兼容 Pydantic 对象和 dict —— LangGraph checkpointer 序列化为 JSON 再反序列化时会变成 dict，reducer 两种形态都要能处理。
 
 ### 2. Graph 装配 —— `graph/workflow.py`
 
 ```python
-g = StateGraph(ResearchState)
-g.add_node("planner", planner_node)
-g.add_node("supervisor", supervisor_node)
-g.add_node("researcher_web", ...)
-...
-g.add_conditional_edges("supervisor", supervisor_route, [...])
-g.add_conditional_edges("reflector", reflector_route, ["supervisor","writer"])
-return g.compile(checkpointer=checkpointer)
+wf = StateGraph(ResearchState)
+wf.add_node("planner", planner_node)
+wf.add_node("supervisor", supervisor_node)
+wf.add_node("web_researcher", web_researcher_node)
+wf.add_node("academic_researcher", academic_researcher_node)
+wf.add_node("code_researcher", code_researcher_node)
+wf.add_node("kb_researcher", kb_researcher_node)
+wf.add_node("reflector", reflector_node)
+wf.add_node("writer", writer_node)
+
+wf.add_edge(START, "planner")
+wf.add_edge("planner", "supervisor")
+
+wf.add_conditional_edges("supervisor", supervisor_route,
+    {"planner":"planner", "writer":"writer",
+     "web_researcher":"web_researcher", "academic_researcher":"academic_researcher",
+     "code_researcher":"code_researcher", "kb_researcher":"kb_researcher"})
+
+# 4→1 fan-in：所有 researcher 都收敛到 reflector
+for r in ("web_researcher", "academic_researcher", "code_researcher", "kb_researcher"):
+    wf.add_edge(r, "reflector")
+
+wf.add_conditional_edges("reflector", reflector_route,
+    {"supervisor":"supervisor", "writer":"writer"})
+wf.add_edge("writer", END)
+return wf.compile(checkpointer=checkpointer)
 ```
 
-**关键点**：`supervisor` 和 `reflector` 走条件边；并行 researchers 由 router 返回 `list[Send]` 触发。
+**关键点**：
+- `add_conditional_edges` 的第 3 个参数是 **target 白名单 dict** —— 必须显式列出 router 可能返回的所有名字，否则 LangGraph 不放行。
+- `supervisor → researchers` 的"显式列出 4 个 target"是为了让 Send 派发能命中；fan-in 端用静态 `add_edge` 即可，无需 router。
+- `reflector` 虽然只有两个出口，也必须用 `add_conditional_edges`（不是 `add_edge`），否则无法根据 state 动态选。
 
-### 3. 路由 —— `graph/router.py`
+### 3. 路由 —— `graph/router.py`（真实三分支）
 
 ```python
+_SOURCE_TO_NODE = {"web":"web_researcher", "academic":"academic_researcher",
+                   "code":"code_researcher", "kb":"kb_researcher"}
+
 def supervisor_route(state):
-    if not state["plan_confirmed"]:
+    # 分支 1：计划未确认 → 回 planner（HITL 恢复后重入）
+    if not state.get("plan_confirmed"):
         return "planner"
-    return [
-        Send("researcher_web",      {"_sq": sq, "_query": sq.question})
-        for sq in state["plan"] if sq.source_type=="web"
-    ] + [...]   # academic/code/kb 同理
+    # 分支 2：revision_count 超限 → 直接 writer（硬兜底防死循环）
+    if state.get("revision_count", 0) >= 3:
+        return "writer"
+    # 分支 3：首轮 or Reflector 要求补查 → fan-out
+    plan = state.get("plan") or []
+    if plan and not state.get("evidence") or state.get("next_action") == "need_more_research":
+        sends = []
+        for sq in plan:
+            if getattr(sq, "status", "pending") == "done":  continue
+            for src in (sq.recommended_sources or ["web"]):
+                node = _SOURCE_TO_NODE.get(src)
+                if not node:  continue
+                sends.append(Send(node, {"sub_question": sq,
+                                          "research_query": state["research_query"]}))
+        return sends or "writer"
+    return "writer"
 
 def reflector_route(state):
-    if state["next_action"] in ("sufficient","force_complete"):
-        return "writer"
-    return "supervisor"
+    if state.get("revision_count", 0) >= 3:  return "writer"      # 双重兜底
+    action = state.get("next_action", "sufficient")
+    return "supervisor" if action == "need_more_research" else "writer"
 ```
 
-**关键点**：`Send(target, payload)` 是 LangGraph 的 fan-out 原语；payload 是该子节点的局部 state patch（不会污染主 state）。
+**关键点**：
+- `Send(target, payload)` 是 LangGraph 的 fan-out 原语；**payload 只喂被派发的子节点**，不污染主 state。
+- `sq.recommended_sources` 是 Planner 在拆子问题时就决定的（如 `["web","academic"]`），路由按此派发到对应 researcher；一个 sub-q 可以同时派给多个 source。
+- **双重兜底**：`supervisor_route` 和 `reflector_route` 都检查 `rc>=3`，任何一端触发都会收敛到 writer。
 
 ### 4. Planner + HITL —— `agents/planner.py`
 
 ```python
-async def planner_node(state, config=None):
-    if state.get("plan_confirmed"):      # resume 后不再拆
-        return {...}
-    llm = get_llm("plus").with_structured_output(ResearchPlan, method="function_calling")
-    plan = await llm.ainvoke([SystemMessage(...), HumanMessage(...)])
-    edited = interrupt({"plan": plan.model_dump(), "hint": "可编辑后 resume"})
-    final_plan = edited.get("plan") or plan.model_dump()
-    return {"plan": final_plan["sub_questions"], "plan_confirmed": True, ...}
+async def planner_node(state):
+    query = state.get("research_query", "")
+    audience = state.get("audience", "intermediate")
+    llm = get_llm("max", temperature=0.3)
+    structured = llm.with_structured_output(ResearchPlan, method="function_calling")
+    plan = await structured.ainvoke(
+        [SystemMessage(content=PLANNER_SYSTEM), HumanMessage(content=planner_user(query, audience))]
+    )
+    decision = interrupt({"phase": "plan_review", "plan": plan.model_dump()})
+    confirmed = _coerce_plan(decision, fallback=plan)
+    return {"plan": confirmed.sub_questions, "plan_confirmed": True,
+            "iteration": 0, "revision_count": 0, "current_node": "planner", "messages": [...]}
+
+def _coerce_plan(decision, *, fallback):
+    """resume 的数据形态兼容：None / ResearchPlan / {"plan": {...}} / dict。"""
+    if decision is None:  return fallback                    # 用户直接 resume 不改
+    if isinstance(decision, ResearchPlan):  return decision
+    if isinstance(decision, dict):
+        payload = decision.get("plan", decision)
+        if isinstance(payload, dict) and "sub_questions" in payload:
+            try: return ResearchPlan.model_validate(payload)
+            except Exception as e:  logger.warning("resume 解析失败: %s", e)
+    return fallback
 ```
 
-**踩坑**：`method="function_calling"` 必须显式传。DashScope compat 端点的默认 `json_object` 模式要求 prompt 含 "json" 字样，否则报错。
+**关键点**：
+- 节点执行到 `interrupt()` 会**挂起**，首次运行到此终止；resume 时 LangGraph **重新跑整个节点**，但 `interrupt()` 直接返回 `Command(resume=...)` 里的值。所以 `_coerce_plan` 必须能认多种形态。
+- `plan_confirmed=True` 是 resume 后才设的 —— 不需要在节点开头检查"已确认就跳过"，因为 LangGraph 保证一个 interrupt 点只会对应一次 resume。
 
-### 5. safe_node 装饰器 —— `agents/_safe.py`
+**踩坑**：`method="function_calling"` 必须显式传。DashScope compat 端点的默认 `json_object` 模式要求 prompt 含 "json" 字样，否则报 `'messages' must contain 'json'`。
+
+### 5. safe_node 装饰器 —— `agents/_safe.py`（真实版本）
 
 ```python
-def safe_node(default_patch):
-    def deco(fn):
-        @wraps(fn)
-        async def wrapped(state, config=None):
-            try: return await fn(state, config)
-            except Exception as e:
-                logger.exception(...)
-                return default_patch
-        return wrapped
-    return deco
+def safe_node(fn):
+    @functools.wraps(fn)
+    async def wrapper(state, *args, **kwargs):
+        try:
+            return await fn(state, *args, **kwargs)
+        except Exception as e:
+            logger.warning("node %s failed: %s", fn.__name__, e, exc_info=True)
+            return {"evidence": [], "messages": [AIMessage(content=f"[skip] {fn.__name__}: {e}")]}
+    return wrapper
 ```
 
-**作用**：单个 researcher 挂掉不影响整图；返回空 evidence 即可，reflector 看到覆盖度低自动补查。
+**作用**：单个 researcher 挂掉返回**空 evidence + 警告消息**，不中断主图；reflector 看到某 sub_q 覆盖度为 0 会自动触发补查。
+
+**注意**：默认 patch 是**写死**的（空 evidence），不接受参数。这是刻意简化：所有 researcher 的失败态语义一致，没必要让每个节点自定义。
 
 ### 6. Researcher 降级链 —— `agents/_researcher_base.py`
 
@@ -229,19 +417,34 @@ async def reflector_node(state, config=None):
 
 ```python
 async def startup():
+    # 1. 工具注册（顺序即 web 降级链：Tavily 主 → Brave MCP → DashScope 兜底）
     registry = ToolRegistry()
-    registry.register(TavilyTool(...))                      # ← 注册顺序即降级顺序
-    for t in await load_external_mcp(...): registry.register(t)   # Brave MCP
-    registry.register(DashScopeSearchTool())                # 国内兜底
-    registry.register(ArxivTool()); registry.register(GitHubTool(...)); registry.register(KBRetriever())
+    registry.register(TavilyTool(api_key=settings.tavily_api_key))
+    for tool in await load_external_mcp(settings.mcp_config_path):
+        registry.register(tool)                              # Brave MCP
+    registry.register(DashScopeSearchTool())                 # 国内兜底
+    registry.register(ArxivTool())                           # academic
+    registry.register(GitHubTool(token=settings.github_token))  # code
+    registry.register(KBRetriever())                         # kb（01_RAG 复用）
+    app_state.registry = registry
 
+    # 2. AsyncSqliteSaver 是 async context manager，必须走 enter_async_context
     app_state._exit_stack = AsyncExitStack()
-    cm = AsyncSqliteSaver.from_conn_string(db_path)
+    cm = AsyncSqliteSaver.from_conn_string(str(db_path))
     checkpointer = await app_state._exit_stack.enter_async_context(cm)
+
+    # 3. 编译图（checkpointer 传进去，所有节点完成后自动 snapshot）
     app_state.graph = build_graph(checkpointer=checkpointer)
+
+async def shutdown():
+    await app_state.registry.close_all()                     # 关 HTTP client / MCP 子进程
+    await app_state._exit_stack.aclose()                     # 关 checkpointer 的 sqlite 连接
 ```
 
-**关键点**：`AsyncExitStack` 统一管理 async context manager 的生命周期 —— `shutdown()` 一次 `aclose()` 关闭所有资源。
+**关键点**：
+- **每个工具的 register 都用 `try/except` 包裹**（省略未写），单个工具初始化失败不阻止启动 —— 降级链里少一环也能跑。
+- `AsyncExitStack.aclose()` 会**逆序**调用所有已注册的 `__aexit__`，把底层 aiosqlite 连接、文件句柄全部关干净。
+- 注册顺序 = 降级顺序，这是 `ToolRegistry._tools[source].append` 的副作用。**改变顺序就改变降级行为**，这是个隐式契约，新人接手容易踩。
 
 ### 9. FastAPI 三端点 —— `app/api.py`
 
@@ -251,7 +454,82 @@ async def startup():
 | `POST /research/{tid}/resume` | 恢复 | `ainvoke(Command(resume={"plan":...}), cfg)` |
 | `POST /research/{tid}/turn` | 追问 | `reset_per_turn + plan_confirmed=False` |
 
-**interrupt 提取**：`result["__interrupt__"][0].value` —— LangGraph 0.6+ 把 interrupt payload 以这个键放进 ainvoke 结果。
+**interrupt 真实提取**（LangGraph 0.6+ 返回的是 `list[Interrupt]`，要兼容两种形态）：
+```python
+def _extract_interrupt(result):
+    intr = result.get("__interrupt__") if isinstance(result, dict) else None
+    if not intr:  return None
+    item = intr[0] if isinstance(intr, list) else intr
+    return getattr(item, "value", None) or (item.get("value") if isinstance(item, dict) else None)
+```
+
+**lifespan 装配**（FastAPI 0.100+ 推荐方式，替代旧的 `on_event`）：
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await bootstrap.startup()
+    yield                              # ← 应用运行期
+    await bootstrap.shutdown()
+
+app = FastAPI(title="InsightLoop", version="0.1.0", lifespan=lifespan)
+```
+
+### 10. Writer 引用机制 —— 后端编号 + `[^N]` 回填
+
+**目的**：LLM 写长文本时引用编号容易错位（漏引、乱编）。这里用"后端发号，LLM 只负责回填"的契约。
+
+```python
+# agents/writer.py
+numbered, citations = [], []
+for i, ev in enumerate(evidence, 1):            # ← 编号由后端分配
+    numbered.append(f"[{i}] ({ev.source_type}) {ev.source_url}\n    {ev.snippet[:400]}")
+    citations.append(Citation(idx=i, source_url=ev.source_url, title=...))
+
+# 把编号好的 evidence 喂给 LLM，prompt 里明确要求用 [^N] 引用
+resp = await llm.ainvoke([SystemMessage(WRITER_SYSTEM),
+                          HumanMessage(writer_user(query, audience, plan_summary, numbered_evidence))])
+report_md = resp.content.strip()
+
+# 兜底：LLM 如果漏写引用章节，后端从 citations 自动补
+_CITATION_HEADER = re.compile(r"^##\s*(引用|参考(文献)?|references?)", re.IGNORECASE | re.MULTILINE)
+if not _CITATION_HEADER.search(report_md) and citations:
+    report_md += "\n\n## 引用\n" + "\n".join(f"[^{c.idx}]: {c.source_url}" for c in citations)
+```
+
+**关键点**：**`citations` 数组从 evidence 直接构建**，编号 ↔ URL 严格一一对应；LLM 只负责在正文写 `[^1][^2]`，不参与编号分配。即使 LLM 把 `[^5]` 写错成 `[^15]`，后端的引用章节也是正确的（提供人工核对线索）。
+
+### 11. MCP Brave —— stdio 子进程会话常驻
+
+```python
+# tools/mcp_brave_tool.py
+class MCPBraveSearchTool:
+    async def _ensure_session(self):
+        if self._session is not None:  return self._session   # 复用
+        stack = AsyncExitStack()
+        try:
+            read, write = await stack.enter_async_context(stdio_client(self._params))
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+            self._stack, self._session = stack, session
+            return session
+        except Exception:
+            await stack.aclose();  raise
+
+    async def search(self, query, *, top_k=5):
+        session = await self._ensure_session()
+        result = await session.call_tool("brave_web_search", {"query": query, "count": top_k})
+        return _parse_brave_text(_extract_text(result), top_k)
+
+    async def close(self):
+        if self._stack: await self._stack.aclose()
+```
+
+**为什么 session 常驻而不是每次重建**：
+- `stdio_client` 冷启动要 `npx` 下载 + Node 启动，耗时 1-3 秒；高频搜索时这个代价分摊不值。
+- MCP SDK 的 `ClientSession` 内部有请求锁，并发 `call_tool` 安全。
+- `AsyncExitStack` 绑在实例上，`close()` 时一次性关闭 stdio 管道 + 杀子进程。
+
+**国内可达性**：代码里会把 `HTTPS_PROXY` 传给子进程的 `env`，让 Node 的 fetch 走代理；不配代理时 Brave MCP 调用会超时，降级到下一个工具（DashScope 内置搜索）。
 
 ---
 
@@ -331,7 +609,19 @@ class SearchTool(Protocol):
 
 ### Q8：Reflector 死循环怎么防？
 
-"三层兜底。第一层：state 里 `revision_count` 计数器；第二层：`MAX_REVISION=3` 硬上限，reflector 检测到立刻返 `force_complete` 不调 LLM；第三层：reflector_route 检测 `next_action in ('sufficient','force_complete')` 直接到 writer。即使 evidence 不足也会出报告 —— 让 LLM 在报告里注明'信息有限'比无限循环强。生产系统里硬兜底永远比模型判断稳。"
+"三层兜底。第一层：state 里 `revision_count` 计数器；第二层：`MAX_REVISION=3` 硬上限，reflector 检测到立刻返 `force_complete` 不调 LLM；第三层：`supervisor_route` 和 `reflector_route` 都有 `if rc>=3: return 'writer'`，**两端都卡**。即使 evidence 不足也会出报告 —— 让 LLM 在报告里注明'信息有限'比无限循环强。生产系统里硬兜底永远比模型判断稳。"
+
+### Q9：Writer 的引用编号怎么保证不乱？
+
+"契约是'后端发号，LLM 只回填'。Writer 先遍历 `evidence` 数组，按顺序给每条分配编号 `i=1,2,...`，同时构建 `Citation(idx=i, source_url=...)` 列表。喂给 LLM 的 prompt 里 evidence 已带编号 `[1] [2] ...`，系统提示要求正文用 `[^N]` 引用。即使 LLM 漏写引用章节，后端用正则 `^##\s*(引用|参考|references?)` 检测，没找到就自动从 `citations` 生成 `## 引用\n[^1]: url\n[^2]: url\n...`。编号 ↔ URL 的一致性由后端保证，LLM 只负责语义层引用。"
+
+### Q10：MCP Brave 的 stdio 子进程怎么管？
+
+"用官方 mcp SDK 的 `AsyncExitStack` + `ClientSession`。第一次 `search()` 时 `_ensure_session()` 启动 `npx @modelcontextprotocol/server-brave-search` 子进程，建立 stdio 管道，创建 ClientSession 并 `initialize()`，整个栈绑在实例 `self._stack` 上。后续 `search()` 直接复用 session —— stdio 冷启动要 1-3 秒，每次重建太贵。并发安全由 SDK 内部的请求锁保证。`close()` 时一次 `aclose()` 关管道 + 杀子进程。`registry.close_all()` 会调到它，和 FastAPI lifespan 的 shutdown 钩上。"
+
+### Q11：同源 URL 在多个 researcher 里命中怎么办？
+
+"`merge_evidence` reducer 处理。fan-in 时 LangGraph 把 4 路 researcher 返回的 evidence 列表合并，reducer 按 `source_url` 分组，同 URL 多次命中**保留 `relevance_score` 最高**的一条，最终按 score 倒序输出。这是 `Annotated[list[Evidence], merge_evidence]` 的 reducer 契约。用 `operator.add` 也能合并，但会保留重复 —— Writer 就会看到同篇博文两次引用，引用编号会重复。所以必须自定义。"
 
 ---
 
@@ -345,16 +635,20 @@ PYTHONPATH=. python -m scripts.run_local "研究问题"
 ```
 
 **关键文件导航**：
-- State 契约：`graph/state.py` L10-30
-- 图装配：`graph/workflow.py` build_graph
-- 并行路由：`graph/router.py` supervisor_route
-- HITL：`agents/planner.py` interrupt 调用
-- 降级链：`agents/_researcher_base.py` run_research_chain
-- 硬兜底：`agents/reflector.py` MAX_REVISION=3
-- 生命周期：`app/bootstrap.py` startup/shutdown
-- API：`app/api.py` /research /resume /turn
+- State 契约 / reducer：`graph/state.py` `merge_evidence` L32-49
+- 图装配 / fan-in：`graph/workflow.py` `build_graph`
+- 三分支路由：`graph/router.py` `supervisor_route` L22-54
+- HITL + resume 兼容：`agents/planner.py` `_coerce_plan` L44-58
+- 安全装饰器：`agents/_safe.py` `safe_node`（默认返回空 evidence）
+- 降级链：`agents/_researcher_base.py` `run_research_chain` L19-52
+- 双重硬兜底：`agents/reflector.py` `MAX_REVISION=3` + `reflector_route` 的 rc 检查
+- Writer 引用回填：`agents/writer.py` `_has_citation_section` + 兜底补引用
+- 生命周期：`app/bootstrap.py` `AsyncExitStack.enter_async_context`
+- FastAPI：`app/api.py` `_extract_interrupt` + `Command(resume=...)`
+- MCP stdio 会话：`tools/mcp_brave_tool.py` `_ensure_session`
+- KB 复用手术：`tools/kb_retriever.py` `_load_01rag_get_hybrid_retriever`
 
 **记住三个数字**：
 - **7** 个 Agent（Planner/Supervisor/4 Researchers/Reflector/Writer）
-- **3** 轮 Reflexion 硬上限
-- **5** 个 Internal MCP 工具对外暴露
+- **3** 轮 Reflexion 硬上限（supervisor_route + reflector_route 双重卡点）
+- **5** 个 Internal MCP 工具对外暴露（kb_search / list_reports / read_report / list_evidence / trigger_research）
