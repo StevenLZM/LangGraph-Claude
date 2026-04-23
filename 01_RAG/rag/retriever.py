@@ -74,6 +74,7 @@ def get_hybrid_retriever():
             Document(page_content=doc, metadata=meta or {})
             for doc, meta in zip(result["documents"], result.get("metadatas", []))
         ]
+        # print(f"chroma中取出的所有数据：{all_chunks}")
         return build_hybrid_retriever(all_chunks)
     except Exception:
         return None
@@ -186,6 +187,8 @@ def retrieve_with_hybrid(
     results = ensemble_retriever.invoke(query)
     return results[:top_k]
 
+# 回调函数：调用反转，langchain调用而不是我调用handler
+# langchain调用我的函数并决定调用handler的时机
 class RetrievalLoggingHandler(BaseCallbackHandler):
     """兼容 LangChain 回调签名的检索日志处理器"""
 

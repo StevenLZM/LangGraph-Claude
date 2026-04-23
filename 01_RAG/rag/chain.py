@@ -157,10 +157,21 @@ def create_rag_chain():
         ("human", "{question}"),
     ])
 
+    def print_standalone_question(x):
+        """打印 standalone_question 并返回原数据"""
+        print("\n" + "="*60)
+        print(f"Standalone Question: {x['standalone_question']}")
+        print("="*60 + "\n")
+        return x
+
     # Step 4: 完整 LCEL Chain
     rag_chain = (
         RunnablePassthrough.assign(
             standalone_question=question_rewriter
+        )
+        |
+        RunnableLambda(
+            print_standalone_question
         )
         | RunnablePassthrough.assign(
             docs=RunnableLambda(retrieve_docs)

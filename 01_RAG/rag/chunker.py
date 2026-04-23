@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import re
+import time
 from typing import Iterable, Iterator, List, Sequence
 
 import tiktoken
@@ -111,6 +112,7 @@ def chunk_documents(
                 parent_hash = _stable_hash(normalized_parent, length=12)
                 parent_id = f"{section.metadata['doc_id']}:p:{parent_hash}"
                 parent_metadata = {
+                    # 将 section.metadata 字典中的所有键值对展开，合并到新字典中
                     **section.metadata,
                     "doc_version": doc_version,
                     "chunk_role": "parent",
@@ -147,6 +149,8 @@ def chunk_documents(
                             section.metadata.get("page_start"),
                             section.metadata.get("page_end"),
                         ),
+                        # 当前年月，int类型 -> 202604
+                        "upload_time": int(time.strftime("%Y%m"))
                     }
                     all_children.append(Document(page_content=normalized_child, metadata=child_metadata))
 
