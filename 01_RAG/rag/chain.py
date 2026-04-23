@@ -10,6 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.documents import Document
 
 from config import llm_config, rag_config, DASHSCOPE_BASE_URL
+from rag.query_rewriter import rewrite_query
 from rag.retriever import get_hybrid_retriever, retrieve_with_hybrid
 from rag.vectorstore import get_vectorstore, similarity_search_with_threshold
 
@@ -119,23 +120,37 @@ def format_docs_for_context(docs: list[Document]) -> str:
 # Chain 构建
 # ────────────────────────────────────────────────────────────────
 def create_rag_chain():
-    """构建完整 RAG LCEL Chain（问题改写 → 检索 → 生成）"""
+    """构建完整 RAG LCEL Chain（问题改写 + 时间意图识别 → 检索 → 生成）"""
     llm = _get_llm()
-    rewrite_llm = _get_rewrite_llm()
     vs = get_vectorstore()
     hybrid_retriever = get_hybrid_retriever()
 
-    # Step 1: 问题改写
-    question_rewriter = (
-        ChatPromptTemplate.from_template(REWRITE_PROMPT)
-        | rewrite_llm
-        | StrOutputParser()
-        | (lambda x: x.strip())
-    )
+    # Step 1: 问题改写 + 时间意图识别（合并为一次 LLM 调用）
+    def rewrite_with_intent(input_dict: dict) -> dict:
+        history_msgs = input_dict.get("chat_history") or []
+        # 把 messages 简单序列化为文本喂给 rewriter
+        if history_msgs:
+            try:
+                history_text = "\n".join(
+                    f"{getattr(m, 'type', 'msg')}: {getattr(m, 'content', '')}"
+                    for m in history_msgs
+                )
+            except Exception:
+                history_text = str(history_msgs)
+        else:
+            history_text = ""
+
+        result = rewrite_query(
+            question=input_dict["question"],
+            chat_history=history_text,
+        )
+        return result  # {"rewritten_query": ..., "time_intent": {...}}
 
     # Step 2: 检索函数
     def retrieve_docs(input_dict: dict) -> list[Document]:
-        q = input_dict.get("standalone_question") or input_dict.get("question", "")
+        rewrite = input_dict.get("rewrite_result") or {}
+        q = rewrite.get("rewritten_query") or input_dict.get("question", "")
+        time_intent = rewrite.get("time_intent")
         if not q:
             return []
         if hybrid_retriever is not None:
@@ -143,6 +158,7 @@ def create_rag_chain():
                 query=q,
                 top_k=rag_config.FINAL_TOP_K,
                 ensemble_retriever=hybrid_retriever,
+                time_intent=time_intent,
             )
         return similarity_search_with_threshold(
             query=q,
@@ -158,21 +174,20 @@ def create_rag_chain():
     ])
 
     def print_standalone_question(x):
-        """打印 standalone_question 并返回原数据"""
+        """打印改写后的查询和时间意图"""
+        rw = x["rewrite_result"]
         print("\n" + "="*60)
-        print(f"Standalone Question: {x['standalone_question']}")
+        print(f"Standalone Question: {rw.get('rewritten_query')}")
+        print(f"Time Intent: {rw.get('time_intent')}")
         print("="*60 + "\n")
         return x
 
     # Step 4: 完整 LCEL Chain
     rag_chain = (
         RunnablePassthrough.assign(
-            standalone_question=question_rewriter
+            rewrite_result=RunnableLambda(rewrite_with_intent)
         )
-        |
-        RunnableLambda(
-            print_standalone_question
-        )
+        | RunnableLambda(print_standalone_question)
         | RunnablePassthrough.assign(
             docs=RunnableLambda(retrieve_docs)
         )

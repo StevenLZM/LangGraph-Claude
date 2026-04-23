@@ -205,23 +205,64 @@ def get_collection_stats(
     }
 
 
+def build_time_filter(time_intent: Optional[dict]) -> Optional[dict]:
+    """
+    把 query_rewriter 输出的 time_intent 转为 ChromaDB `where` 语法。
+
+    规则：
+      - type in {year, before, after, range} → 硬过滤
+      - type in {latest, none} → 返回 None（由 retriever 层做软排序 / 不处理）
+      - field=upload_date → 单值字段直接 gte/lte
+      - field=doc_date → 区间字段 [doc_date_min, doc_date_max]，并排除 has_doc_date=False
+    """
+    if not time_intent:
+        return None
+    t = time_intent.get("type")
+    if t not in {"year", "before", "after", "range"}:
+        return None
+
+    rng = time_intent.get("range") or {}
+    gte = rng.get("gte")
+    lte = rng.get("lte")
+    if gte is None or lte is None:
+        return None
+
+    field = time_intent.get("field", "doc_date")
+    if field == "upload_date":
+        return {"upload_date": {"$gte": gte, "$lte": lte}}
+
+    # doc_date：存为 [min, max] 区间，判断两区间是否相交
+    # 相交条件：min ≤ lte 且 max ≥ gte
+    return {
+        "$and": [
+            {"has_doc_date": True},
+            {"doc_date_min": {"$lte": lte}},
+            {"doc_date_max": {"$gte": gte}},
+        ]
+    }
+
+
 def similarity_search_with_threshold(
     query: str,
     k: int = 4,
     threshold: float | None = None,
     vectorstore: Optional[Chroma] = None,
     filter_doc_ids: Optional[List[str]] = None,
+    metadata_filter: Optional[dict] = None,
 ) -> List[Document]:
     """
     带相似度阈值过滤的 child 级语义检索。
+
+    metadata_filter: 直接传给 ChromaDB 的 where 语法，用于时间等硬过滤。
     """
     vs = vectorstore or get_vectorstore()
     threshold = threshold if threshold is not None else rag_config.SIMILARITY_THRESHOLD
 
-    results_with_scores = vs.similarity_search_with_relevance_scores(
-        query=query,
-        k=k,
-    )
+    kwargs = {"query": query, "k": k}
+    if metadata_filter:
+        kwargs["filter"] = metadata_filter
+
+    results_with_scores = vs.similarity_search_with_relevance_scores(**kwargs)
 
     filtered = []
     for doc, score in results_with_scores:

@@ -95,6 +95,13 @@ class RAGConfig:
     # 对话记忆
     MAX_HISTORY_MESSAGES: int = int(os.getenv("MAX_HISTORY_MESSAGES", "10"))
 
+    # ── 日期感知检索 ──
+    DATE_EXTRACTION_ENABLED: bool = os.getenv("DATE_EXTRACTION_ENABLED", "true").lower() == "true"
+    DATE_EXTRACTION_LLM_FALLBACK: bool = os.getenv("DATE_EXTRACTION_LLM_FALLBACK", "true").lower() == "true"
+    DATE_CACHE_PATH: str = os.getenv("DATE_CACHE_PATH", "data/date_cache.sqlite")
+    HARD_FILTER_K_MULTIPLIER: int = int(os.getenv("HARD_FILTER_K_MULTIPLIER", "2"))
+    BM25_FILTER_K_MULTIPLIER: int = int(os.getenv("BM25_FILTER_K_MULTIPLIER", "3"))
+
 
 # ── 路径配置 ─────────────────────────────────────────────────────
 class PathConfig:

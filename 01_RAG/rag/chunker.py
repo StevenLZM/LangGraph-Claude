@@ -19,6 +19,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from config import rag_config
+from rag.date_extractor import DateExtractionResult, extract_dates
 
 
 DEFAULT_PARENT_TARGET_TOKENS = 900
@@ -111,6 +112,18 @@ def chunk_documents(
                 normalized_parent = _normalize_text(parent_text)
                 parent_hash = _stable_hash(normalized_parent, length=12)
                 parent_id = f"{section.metadata['doc_id']}:p:{parent_hash}"
+
+                # 日期抽取：parent 级一次，child 继承，避免重复调用 LLM
+                doc_id = section.metadata.get("doc_id", "anonymous")
+                dates = extract_dates(normalized_parent, doc_id=doc_id)
+                upload_date = int(time.strftime("%Y%m%d"))
+                date_fields = {
+                    "upload_date": upload_date,
+                    "doc_date_min": dates.min,
+                    "doc_date_max": dates.max,
+                    "has_doc_date": dates.found,
+                }
+
                 parent_metadata = {
                     # 将 section.metadata 字典中的所有键值对展开，合并到新字典中
                     **section.metadata,
@@ -125,6 +138,7 @@ def chunk_documents(
                         section.metadata.get("page_start"),
                         section.metadata.get("page_end"),
                     ),
+                    **date_fields,
                 }
                 parent_doc = Document(page_content=normalized_parent, metadata=parent_metadata)
                 all_parents.append(parent_doc)
@@ -149,8 +163,7 @@ def chunk_documents(
                             section.metadata.get("page_start"),
                             section.metadata.get("page_end"),
                         ),
-                        # 当前年月，int类型 -> 202604
-                        "upload_time": int(time.strftime("%Y%m"))
+                        **date_fields,
                     }
                     all_children.append(Document(page_content=normalized_child, metadata=child_metadata))
 
