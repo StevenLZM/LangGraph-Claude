@@ -1,11 +1,15 @@
 # ── LangChain 核心 ──────────────────────────────────────────────
 langchain
 langchain-core
-langchain-community
+langchain-community>=0.4.0
 langchain-openai
 langchain-anthropic
 langchain-chroma
 langchain-text-splitters
+langchain-classic
+
+# ── LLM ─────────────────────────────────────────────────────────
+dashscope>=1.14.0
 
 # ── 向量数据库 ───────────────────────────────────────────────────
 chromadb

@@ -280,7 +280,7 @@ class TestFilesystemClient:
 
     def test_save_and_read_file(self, tmp_path):
         """保存文件后应能读取到相同内容"""
-        from mcp.filesystem_client import FilesystemClient
+        from mcp_local.filesystem_client import FilesystemClient
         client = FilesystemClient(str(tmp_path))
         content = b"Hello, RAG World!"
         client.save_file("test.pdf", content)
@@ -289,7 +289,7 @@ class TestFilesystemClient:
 
     def test_delete_file(self, tmp_path):
         """删除文件后 file_exists 应返回 False"""
-        from mcp.filesystem_client import FilesystemClient
+        from mcp_local.filesystem_client import FilesystemClient
         client = FilesystemClient(str(tmp_path))
         client.save_file("to_delete.pdf", b"content")
         assert client.file_exists("to_delete.pdf")
@@ -298,7 +298,7 @@ class TestFilesystemClient:
 
     def test_list_files(self, tmp_path):
         """list_files 应返回正确数量的文件"""
-        from mcp.filesystem_client import FilesystemClient
+        from mcp_local.filesystem_client import FilesystemClient
         client = FilesystemClient(str(tmp_path))
         for i in range(3):
             client.save_file(f"doc_{i}.pdf", b"content")
@@ -307,7 +307,7 @@ class TestFilesystemClient:
 
     def test_path_traversal_prevention(self, tmp_path):
         """路径穿越攻击应被阻止"""
-        from mcp.filesystem_client import FilesystemClient
+        from mcp_local.filesystem_client import FilesystemClient
         client = FilesystemClient(str(tmp_path))
         # 恶意文件名
         client.save_file("../../malicious.txt", b"hack")

@@ -24,7 +24,7 @@ st.set_page_config(
 
 # ── 延迟导入（避免启动时崩溃） ───────────────────────────────────
 from config import llm_config, rag_config, path_config
-from mcp.filesystem_client import get_filesystem_client
+from mcp_local.filesystem_client import get_filesystem_client
 from rag.loader import load_pdf, get_doc_metadata
 from rag.chunker import chunk_documents
 from rag.vectorstore import (
