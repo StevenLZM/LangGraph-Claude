@@ -9,6 +9,9 @@ from typing import List
 from langchain_classic.retrievers import EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
+from langchain_core.callbacks import StdOutCallbackHandler
+from langchain_core.callbacks.base import BaseCallbackHandler
+from typing import Any, Dict, List
 
 from config import rag_config
 from rag.docstore import ParentDocStore, get_parent_docstore
@@ -21,7 +24,7 @@ class ParentChildHybridRetriever:
     parent_docstore: ParentDocStore
 
     def invoke(self, query: str) -> List[Document]:
-        child_hits = self.ensemble_retriever.invoke(query)
+        child_hits = self.ensemble_retriever.invoke(query, config={"callbacks": [RetrievalLoggingHandler()]})
         return hydrate_parent_results(
             child_hits,
             parent_docstore=self.parent_docstore,
@@ -43,9 +46,11 @@ def build_hybrid_retriever(
         search_type="similarity",
         search_kwargs={"k": rag_config.SEMANTIC_TOP_K},
     )
+    semantic_retriever.tags = ["retriever:SemanticRetriever向量检索"]
 
     bm25_retriever = BM25Retriever.from_documents(all_chunks)
     bm25_retriever.k = rag_config.BM25_TOP_K
+    bm25_retriever.tags = ["retriever:BM25Retriever关键词检索"]
 
     # ensemble对象
     # retrievers=[VectorStoreRetriever(tags=['Chroma', 'DashScopeEmbeddings'], vectorstore=<langchain_chroma.vectorstores.Chroma object at 0x107956eb0>, search_kwargs={'k': 6}), BM25Retriever(vectorizer=<rank_bm25.BM25Okapi object at 0x115b215e0>, k=6)] weights=[0.6, 0.4]
@@ -53,6 +58,7 @@ def build_hybrid_retriever(
         retrievers=[semantic_retriever, bm25_retriever],
         weights=[rag_config.SEMANTIC_WEIGHT, 1 - rag_config.SEMANTIC_WEIGHT],
     )
+    ensemble.tags = ["retriever:Ensemble混合结果"]
     return ParentChildHybridRetriever(ensemble, docstore)
 
 
@@ -179,3 +185,55 @@ def retrieve_with_hybrid(
     top_k = top_k or rag_config.FINAL_TOP_K
     results = ensemble_retriever.invoke(query)
     return results[:top_k]
+
+class RetrievalLoggingHandler(BaseCallbackHandler):
+    """兼容 LangChain 回调签名的检索日志处理器"""
+
+    def __init__(self):
+        self._current_query: str = ""
+        self._current_name: str = "Unknown"
+        self._name_stack: list[str] = []  # 栈：处理嵌套回调
+
+    def on_retriever_start(self, serialized, query, *, run_id=None, parent_run_id=None, **kwargs):
+        """检索开始"""
+        name = "Unknown"
+        if serialized and isinstance(serialized, dict):
+            name = serialized.get("name", "Unknown")
+
+        # 桥接到 on_retriever_end
+        name = self._extract_name(serialized, kwargs)
+        self._current_query = query
+        self._current_name = name
+
+        indent = "  " * len(self._name_stack)  # 缩进表示嵌套层级
+        self._name_stack.append(name)
+        print(f"\n{indent}🔍 [{name}] 开始检索: {query[:80]}...")
+
+    def on_retriever_end(self, response, *, run_id=None, parent_run_id=None, **kwargs):
+        """检索结束 — 出栈"""
+        name = self._name_stack.pop() if self._name_stack else "Unknown"
+        documents = response  # response 就是 List[Document]
+        indent = "  " * len(self._name_stack)
+
+        print(f"{indent}✅ [{name}] 完成，返回 {len(documents)} 个文档")
+
+        for i, doc in enumerate(documents[:3], 1):
+            preview = doc.page_content[:80].replace('\n', ' ')
+            print(f"{indent}   {i}. {preview}...")
+        print()
+
+    def _extract_name(self, serialized, kwargs) -> str:
+        """从 tags 或 serialized 中提取检索器名称"""
+        # 优先从 tags 中取自定义名称
+        tags = kwargs.get("tags") or []
+        for tag in tags:
+            if tag.startswith("retriever:"):
+                return tag.split(":", 1)[1]
+
+        # 其次从 serialized 取类名
+        if serialized and isinstance(serialized, dict):
+            cls_name = serialized.get("name")
+            if cls_name:
+                return cls_name
+
+        return "Unknown"
