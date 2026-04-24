@@ -60,6 +60,7 @@ class DashScopeSearchTool:
             "Content-Type": "application/json",
         }
         data = await safe_post_json(self._client, DASHSCOPE_GEN_URL, headers=headers, json=payload)
+        print(f"dashscope原始结果:{str(data)[:100]}")
         if not data or not isinstance(data, dict):
             return []
 
@@ -85,6 +86,7 @@ class DashScopeSearchTool:
                     extra={"title": title, "site_name": site, "index": r.get("index")},
                 )
             )
+        print(f"dashscope处理后结果:{str(out)[:100]}")
         return out
 
     async def close(self) -> None:

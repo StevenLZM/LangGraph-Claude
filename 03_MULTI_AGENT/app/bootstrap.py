@@ -79,6 +79,8 @@ async def startup() -> None:
     logger.info("[bootstrap] 工具注册完成: %s", registry)
 
     # 2. 异步 Checkpointer（AsyncSqliteSaver 是 async context manager）
+    # 这段代码是在初始化 LangGraph 的异步持久化检查点（Checkpointer），用于保存和恢复智能体（Agent）的执行状态。
+    # 创建 SQLite 数据库连接，用于自动保存 LangGraph 工作流的每一步执行状态。
     app_state._exit_stack = AsyncExitStack()
     checkpointer = None
     try:

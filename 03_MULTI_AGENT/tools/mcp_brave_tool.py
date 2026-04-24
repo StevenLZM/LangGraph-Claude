@@ -75,12 +75,15 @@ class MCPBraveSearchTool:
         try:
             session = await self._ensure_session()
             result = await session.call_tool(self._tool_name, {"query": query, "count": top_k})
+            print(f"brave原始结果:{str(result)[:100]}")
         except Exception as e:
             logger.warning("[mcp-brave] 调用失败: %s", e)
             return []
 
         text = _extract_text(result)
-        return _parse_brave_text(text, top_k)
+        final_result = _parse_brave_text(text, top_k)
+        print(f"brave处理后结果:{str(final_result)[:100]}")
+        return final_result
 
     async def close(self) -> None:
         if self._stack is not None:

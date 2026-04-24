@@ -35,6 +35,7 @@ class TavilyTool:
             "include_raw_content": False,
         }
         data = await safe_post_json(self._client, TAVILY_URL, json=payload)
+        print(f"Tavily原始结果:{str(data)[:100]}")
         if not data or not isinstance(data, dict):
             return []
         results = []
@@ -47,6 +48,7 @@ class TavilyTool:
                     extra={"title": r.get("title", "")},
                 )
             )
+        print(f"Tavily处理后结果:{str(results)[:100]}")
         return results
 
     async def close(self) -> None:

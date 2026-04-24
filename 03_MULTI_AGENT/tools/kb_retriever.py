@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 _RAG_PATH = Path(__file__).resolve().parent.parent.parent / "01_RAG"
 
 
-def _load_01rag_get_hybrid_retriever():
+def  _load_01rag_get_hybrid_retriever():
     """surgical import：把 rag.retriever 加载进来又不污染本项目的 sys.modules。"""
     if not _RAG_PATH.is_dir():
         return None
@@ -104,7 +104,10 @@ class KBRetriever:
         if self._impl is None:
             return []
         try:
+            # 同步的数据库查询等需要放到线程池执行
+            # await/async不需要放线程池
             docs = await asyncio.to_thread(self._impl.invoke, query)
+            print(f"01_RAG原始结果:{str(docs)[:100]}")
         except Exception as e:
             logger.warning("[kb_retriever] 检索失败: %s", e)
             return []

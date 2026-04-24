@@ -39,6 +39,7 @@ class ArxivTool:
             return []
         try:
             root = ET.fromstring(text)
+            print(f"arxiv原始结果:{str(root)[:100]}")
         except ET.ParseError as e:
             logger.warning("[arxiv] XML parse failed: %s", e)
             return []
@@ -60,6 +61,7 @@ class ArxivTool:
                     extra={"title": title, "authors": authors},
                 )
             )
+        print(f"arxiv处理后结果:{str(results)[:100]}")
         return results
 
     async def close(self) -> None:

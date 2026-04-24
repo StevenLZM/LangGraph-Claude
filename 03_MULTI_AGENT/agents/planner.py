@@ -25,7 +25,7 @@ async def planner_node(state: ResearchState) -> dict[str, Any]:
         [SystemMessage(content=PLANNER_SYSTEM), HumanMessage(content=planner_user(query, audience))]
     )
     logger.info("[planner] 生成 %d 个子问题", len(plan.sub_questions))
-    print(f"生成子问题：{plan.sub_questions}")
+    print(f"llm生成plan：{plan}")
 
     decision = interrupt({"phase": "plan_review", "plan": plan.model_dump()})
     print(f"用户的输入:{decision}")
