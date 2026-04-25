@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from config import BASE_DIR, DASHSCOPE_BASE_URL, llm_config, rag_config
+from config import BASE_DIR, DEEPSEEK_BASE_URL, DASHSCOPE_BASE_URL, llm_config, rag_config
 
 
 # ────────────────────────────────────────────────────────────────
@@ -112,7 +112,14 @@ def _llm_extract(text: str) -> list[int]:
 
         provider = llm_config.provider()
         model = llm_config.REWRITE_MODEL  # 复用轻量模型
-        if provider == "dashscope":
+        if provider == "deepseek":
+            from langchain_openai import ChatOpenAI
+            llm = ChatOpenAI(
+                model=model, temperature=0.0,
+                api_key=llm_config.DEEPSEEK_API_KEY,
+                base_url=DEEPSEEK_BASE_URL, max_retries=2,
+            )
+        elif provider == "dashscope":
             from langchain_openai import ChatOpenAI
             llm = ChatOpenAI(
                 model=model, temperature=0.0,

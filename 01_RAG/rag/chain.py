@@ -1,6 +1,6 @@
 """
 rag/chain.py — RAG Chain 构建（LCEL）
-支持：DashScope (千问) > Anthropic > OpenAI
+支持：DeepSeek > DashScope (千问) > Anthropic > OpenAI
 流程：问题改写 → 混合检索 → 上下文构建 → LLM 生成
 """
 from __future__ import annotations
@@ -9,21 +9,30 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.documents import Document
 
-from config import llm_config, rag_config, DASHSCOPE_BASE_URL
+from config import DEEPSEEK_BASE_URL, DASHSCOPE_BASE_URL, llm_config, rag_config
 from rag.query_rewriter import rewrite_query
 from rag.retriever import get_hybrid_retriever, retrieve_with_hybrid
 from rag.vectorstore import get_vectorstore, similarity_search_with_threshold
 
 
 # ────────────────────────────────────────────────────────────────
-# LLM 工厂（优先 DashScope）
+# LLM 工厂（优先 DeepSeek）
 # ────────────────────────────────────────────────────────────────
 def _get_llm(model_name: str | None = None):
-    """获取对话 LLM，按 DashScope > Anthropic > OpenAI 优先级"""
+    """获取对话 LLM，按 DeepSeek > DashScope > Anthropic > OpenAI 优先级"""
     provider = llm_config.provider()
     model = model_name or llm_config.CHAT_MODEL
 
-    if provider == "dashscope":
+    if provider == "deepseek":
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(
+            model=model,
+            temperature=0.3,
+            api_key=llm_config.DEEPSEEK_API_KEY,
+            base_url=DEEPSEEK_BASE_URL,
+            max_retries=3,
+        )
+    elif provider == "dashscope":
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
             model=model,
@@ -48,7 +57,7 @@ def _get_llm(model_name: str | None = None):
         )
     else:
         raise EnvironmentError(
-            "未配置可用的 API Key，请在 .env 中设置 DASHSCOPE_API_KEY"
+            "未配置可用的 API Key，请在 .env 中设置 DEEPSEEK_API_KEY"
         )
 
 

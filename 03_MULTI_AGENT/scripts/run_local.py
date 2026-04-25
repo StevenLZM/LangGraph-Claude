@@ -84,7 +84,7 @@ async def run(query: str) -> None:
             decision = {"plan": proposed["plan"], "action": "accept"}
         # ==================================
 
-        print("\n=== 自动接受计划（CLI 场景，真实 UI 处由用户编辑）===")
+        # print("\n=== 自动接受计划（CLI 场景，真实 UI 处由用户编辑）===")
         resumed = await g.ainvoke(Command(resume={"plan": proposed["plan"]}), config=cfg)
 
         report = resumed.get("final_report", "")

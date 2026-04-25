@@ -3,9 +3,10 @@ config.py — 全局配置中心
 从环境变量加载，提供合理默认值，所有模块均从此处导入配置
 
 支持的 LLM 提供商（优先级从高到低）：
-  1. DashScope (千问/Qwen) — DASHSCOPE_API_KEY
-  2. Anthropic (Claude)    — ANTHROPIC_API_KEY
-  3. OpenAI (GPT)          — OPENAI_API_KEY
+  1. DeepSeek              — DEEPSEEK_API_KEY
+  2. DashScope (千问/Qwen) — DASHSCOPE_API_KEY
+  3. Anthropic (Claude)    — ANTHROPIC_API_KEY
+  4. OpenAI (GPT)          — OPENAI_API_KEY
 """
 import os
 from pathlib import Path
@@ -17,20 +18,26 @@ load_dotenv()
 # ── 项目根目录 ────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
 
-# DashScope OpenAI 兼容接口地址
+# OpenAI 兼容接口地址
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
 # ── LLM 配置 ─────────────────────────────────────────────────────
 class LLMConfig:
+    DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
     DASHSCOPE_API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
-    # 模型（DashScope 默认值）
-    CHAT_MODEL: str = os.getenv("CHAT_MODEL", "qwen-plus")
-    REWRITE_MODEL: str = os.getenv("REWRITE_MODEL", "qwen-turbo")
+    # 模型（DeepSeek 默认值）
+    CHAT_MODEL: str = os.getenv("CHAT_MODEL", "deepseek-v4-pro")
+    REWRITE_MODEL: str = os.getenv("REWRITE_MODEL", "deepseek-v4-flash")
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
+
+    @classmethod
+    def has_deepseek(cls) -> bool:
+        return bool(cls.DEEPSEEK_API_KEY and cls.DEEPSEEK_API_KEY.startswith("sk-"))
 
     @classmethod
     def has_dashscope(cls) -> bool:
@@ -47,6 +54,8 @@ class LLMConfig:
     @classmethod
     def provider(cls) -> str:
         """返回当前生效的 LLM 提供商"""
+        if cls.has_deepseek():
+            return "deepseek"
         if cls.has_dashscope():
             return "dashscope"
         if cls.has_anthropic():
@@ -61,7 +70,8 @@ class LLMConfig:
             raise EnvironmentError(
                 "未找到有效的 API Key。\n"
                 "请在 .env 文件中设置以下任一项：\n"
-                "  DASHSCOPE_API_KEY=sk-xxx  (千问，推荐)\n"
+                "  DEEPSEEK_API_KEY=sk-xxx  (DeepSeek，推荐)\n"
+                "  DASHSCOPE_API_KEY=sk-xxx  (千问，可用于 Embedding)\n"
                 "  ANTHROPIC_API_KEY=sk-ant-xxx  (Claude)\n"
                 "  OPENAI_API_KEY=sk-xxx  (GPT)\n"
                 "参考 .env.example 文件。"

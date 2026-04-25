@@ -16,7 +16,13 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # LLM (DashScope)
+    # LLM (DeepSeek)
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_max_model: str = "deepseek-v4-pro"
+    deepseek_light_model: str = "deepseek-v4-flash"
+
+    # DashScope (search / embeddings)
     dashscope_api_key: str = ""
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     qwen_max_model: str = "qwen-max"

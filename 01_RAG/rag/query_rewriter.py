@@ -23,7 +23,7 @@ from typing import Any
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
-from config import DASHSCOPE_BASE_URL, llm_config
+from config import DEEPSEEK_BASE_URL, DASHSCOPE_BASE_URL, llm_config
 
 
 # ────────────────────────────────────────────────────────────────
@@ -41,6 +41,15 @@ def _get_rewrite_llm(temperature: float = 0.0):
     provider = llm_config.provider()
     model = llm_config.REWRITE_MODEL
 
+    if provider == "deepseek":
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(
+            model=model,
+            temperature=temperature,
+            api_key=llm_config.DEEPSEEK_API_KEY,
+            base_url=DEEPSEEK_BASE_URL,
+            max_retries=2,
+        )
     if provider == "dashscope":
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(

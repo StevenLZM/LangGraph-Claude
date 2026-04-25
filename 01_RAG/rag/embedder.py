@@ -12,13 +12,11 @@ from config import llm_config
 
 
 def get_embeddings() -> Embeddings:
-    provider = llm_config.provider()
-    if provider == "dashscope":
+    if llm_config.has_dashscope():
         return _get_dashscope_embeddings()
-    elif provider == "openai":
+    if llm_config.has_openai():
         return _get_openai_embeddings()
-    else:
-        return _get_huggingface_embeddings()
+    return _get_huggingface_embeddings()
 
 
 def _get_dashscope_embeddings() -> Embeddings:
