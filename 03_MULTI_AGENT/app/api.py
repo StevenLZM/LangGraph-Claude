@@ -10,17 +10,20 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from langgraph.types import Command
+from sse_starlette.sse import EventSourceResponse
 
-from app import bootstrap, report_store
+from app import bootstrap, report_store, sse
 from app.schemas import ResumeReq, StartReq, StartResp, TurnReq
 from app.turn_init import reset_per_turn
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +53,14 @@ def _graph():
     return g
 
 
-def _config(tid: str) -> dict:
-    return {"configurable": {"thread_id": tid}}
+def _config(tid: str, *, query: str | None = None, audience: str | None = None) -> dict:
+    """RunnableConfig：thread_id 走 configurable，业务字段走 metadata 让 LangSmith 可筛选。"""
+    metadata: dict[str, Any] = {"thread_id": tid, "app": "insightloop"}
+    if query is not None:
+        metadata["research_query"] = query
+    if audience is not None:
+        metadata["audience"] = audience
+    return {"configurable": {"thread_id": tid}, "metadata": metadata}
 
 
 def _extract_interrupt(result: dict[str, Any]) -> dict | None:
@@ -77,7 +86,7 @@ async def health() -> dict:
 @app.post("/research", response_model=StartResp)
 async def start_research(req: StartReq) -> StartResp:
     tid = uuid.uuid4().hex[:12]
-    cfg = _config(tid)
+    cfg = _config(tid, query=req.research_query, audience=req.audience)
     payload = {
         "research_query": req.research_query,
         "audience": req.audience,
@@ -178,3 +187,59 @@ async def read_report(path: str) -> dict:
         return {"path": path, "content": report_store.read_report(path)}
     except FileNotFoundError:
         raise HTTPException(404, f"报告不存在: {path}")
+
+
+# ─────────────────────────── SSE 流式端点 ───────────────────────────
+# 设计文档：plans/tidy-hatching-gem.md
+# 用 graph.astream_events(version="v2") 把 LangGraph 内部事件转成 SSE
+# 旧的 /research /resume /turn 全部保留，互不影响
+
+
+def _sse_response(thread_id: str, payload, cfg) -> EventSourceResponse:
+    g = _graph()
+
+    async def gen():
+        events = g.astream_events(payload, config=cfg, version="v2")
+        async for item in sse.stream_events(events, thread_id=thread_id, graph=g, cfg=cfg):
+            yield {"event": item["event"], "data": json.dumps(item["data"], ensure_ascii=False)}
+
+    return EventSourceResponse(gen(), ping=15, send_timeout=settings.sse_retry_ms / 1000)
+
+
+@app.get("/research/stream")
+async def research_stream(
+    query: str = Query(..., description="研究问题"),
+    audience: str = Query("intermediate"),
+):
+    """启动新研究并流式推送 LangGraph 事件。命中 interrupt 时发 interrupt 事件后停止；
+    前端拿到 thread_id 后调 /research/{tid}/resume_stream 继续。"""
+    tid = uuid.uuid4().hex[:12]
+    cfg = _config(tid, query=query, audience=audience)
+    payload = {
+        "research_query": query,
+        "audience": audience,
+        "messages": [],
+        "evidence": [],
+    }
+    return _sse_response(tid, payload, cfg)
+
+
+@app.get("/research/{thread_id}/resume_stream")
+async def resume_stream(
+    thread_id: str,
+    plan: str = Query(..., description="JSON 序列化后的 ResearchPlan"),
+):
+    cfg = _config(thread_id)
+    resume_payload = sse.coerce_plan_payload(plan)
+    return _sse_response(thread_id, Command(resume=resume_payload), cfg)
+
+
+@app.get("/research/{thread_id}/turn_stream")
+async def turn_stream(
+    thread_id: str,
+    query: str = Query(..., description="追问问题"),
+):
+    cfg = _config(thread_id, query=query)
+    patch = reset_per_turn({}, query)
+    patch["plan_confirmed"] = False
+    return _sse_response(thread_id, patch, cfg)

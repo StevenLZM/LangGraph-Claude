@@ -1,7 +1,7 @@
 """真实 Prompt 模板 —— 各 agent 的系统提示与少量结构化指引。
 
 约定：
-  - 所有结构化输出节点用 LLM.with_structured_output(Pydantic)，因此 prompt 不需手写 JSON 范式
+  - 所有结构化输出节点用 LLM.with_structured_output(Pydantic)
   - Planner / Reflector 输出严格受 schema 约束；Writer 输出自由 markdown
 """
 from __future__ import annotations
@@ -18,6 +18,20 @@ PLANNER_SYSTEM = """你是资深 AI 行业研究方法论专家。
    - kb: 用户本地私有知识库（白皮书、内部文档）
 3. estimated_depth 根据问题复杂度选择 quick / standard / deep
 4. 每个子问题给一个简短稳定的 id（如 sq1, sq2 ...）
+5. 只输出 JSON 对象，不要输出 markdown、解释或代码围栏
+
+JSON 结构：
+{
+  "sub_questions": [
+    {
+      "id": "sq1",
+      "question": "子问题",
+      "recommended_sources": ["web"],
+      "status": "pending"
+    }
+  ],
+  "estimated_depth": "quick"
+}
 """
 
 REFLECTOR_SYSTEM = """你是研究质量审查员。基于已收集到的 evidence 列表，对每个子问题做覆盖度评分。
@@ -30,6 +44,15 @@ REFLECTOR_SYSTEM = """你是研究质量审查员。基于已收集到的 eviden
    - "need_more_research": 存在显著缺口 → 触发补查（同时给出 additional_queries）
    - "force_complete": 即便有缺口也强制收敛（用于第 3 轮迭代）
 4. additional_queries: 当 next_action=need_more_research 时给出 1-3 条具体补查 query
+5. 只输出 JSON 对象，不要输出 markdown、解释或代码围栏
+
+JSON 结构：
+{
+  "coverage_by_subq": {"sq1": 80},
+  "missing_aspects": [],
+  "next_action": "sufficient",
+  "additional_queries": []
+}
 """
 
 WRITER_SYSTEM = """你是顶级行业分析师。基于给定的 evidence 列表撰写一份高质量 Markdown 研究报告。

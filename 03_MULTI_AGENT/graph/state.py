@@ -58,6 +58,11 @@ class ResearchState(TypedDict, total=False):
     plan: list[SubQuestion]
     plan_confirmed: bool
 
+    """
+    Supervisor 用 Send API 把 N 个 Researcher 并行派发出去，每个 Researcher 各自返回一段 evidence。
+    LangGraph 在 fan-in 那一刻自动把 N 路结果交给 merge_evidence 合并 ——> 
+    这就是框架替你做的"等所有线程完成 + 聚合结果"，等价于 ThreadPoolExecutor.wait(ALL_COMPLETED) + 去重排序。
+    """
     evidence: Annotated[list[Evidence], merge_evidence]
     revision_count: int
 

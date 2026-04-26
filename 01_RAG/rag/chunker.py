@@ -30,6 +30,37 @@ DEFAULT_CHILD_MAX_TOKENS = 360
 DEFAULT_CHILD_OVERLAP_TOKENS = 60
 DEFAULT_TOKENIZER_NAME = "cl100k_base"
 
+ATOMIC_PLACEHOLDER_PREFIX = "\x00ATOM"
+ATOMIC_PLACEHOLDER_SUFFIX = "\x00"
+
+
+def _protect_atomics(text: str, atomics: Sequence[str]) -> tuple[str, dict[str, str]]:
+    """把不可切原子块（表格/代码）替换为占位符，避免被 splitter 切散或被 _normalize_text 折行。"""
+    placeholder_map: dict[str, str] = {}
+    if not atomics:
+        return text, placeholder_map
+    work = text
+    for i, atomic in enumerate(atomics):
+        if not atomic:
+            continue
+        idx = work.find(atomic)
+        if idx == -1:
+            continue
+        ph = f"{ATOMIC_PLACEHOLDER_PREFIX}{i}{ATOMIC_PLACEHOLDER_SUFFIX}"
+        work = work[:idx] + f"\n\n{ph}\n\n" + work[idx + len(atomic):]
+        placeholder_map[ph] = atomic
+    return work, placeholder_map
+
+
+def _restore_atomics(text: str, placeholder_map: dict[str, str]) -> str:
+    if not placeholder_map:
+        return text
+    out = text
+    for ph, atomic in placeholder_map.items():
+        if ph in out:
+            out = out.replace(ph, atomic)
+    return out
+
 
 @dataclass(frozen=True)
 class Section:
@@ -103,13 +134,19 @@ def chunk_documents(
     for doc_group in _group_documents_by_id(documents):
         all_text = "\n\n".join(_normalize_text(doc.page_content) for doc in doc_group if doc.page_content.strip())
         doc_version = _stable_hash(all_text, length=12)
-        sections = _build_sections(doc_group)
+        if _has_structured(doc_group):
+            sections = _build_sections_structured(doc_group)
+        else:
+            sections = _build_sections(doc_group)
 
         for section_index, section in enumerate(sections):
-            parent_texts = parent_splitter.split_text(section.text) or [section.text]
+            atomics = section.metadata.get("atomic_texts", ()) or ()
+            heading_level = section.metadata.get("heading_level", 0)
+            work_text, placeholder_map = _protect_atomics(section.text, atomics)
+            parent_works = parent_splitter.split_text(work_text) or [work_text]
 
-            for parent_index, parent_text in enumerate(parent_texts):
-                normalized_parent = _normalize_text(parent_text)
+            for parent_index, parent_work in enumerate(parent_works):
+                normalized_parent = _restore_atomics(_normalize_text(parent_work), placeholder_map)
                 parent_hash = _stable_hash(normalized_parent, length=12)
                 parent_id = f"{section.metadata['doc_id']}:p:{parent_hash}"
 
@@ -124,15 +161,16 @@ def chunk_documents(
                     "has_doc_date": dates.found,
                 }
 
+                section_meta_clean = {k: v for k, v in section.metadata.items() if k != "atomic_texts"}
                 parent_metadata = {
-                    # 将 section.metadata 字典中的所有键值对展开，合并到新字典中
-                    **section.metadata,
+                    **section_meta_clean,
                     "doc_version": doc_version,
                     "chunk_role": "parent",
                     "parent_id": parent_id,
                     "parent_index": len(all_parents),
                     "section_index": section_index,
                     "chunk_index": len(all_parents),
+                    "heading_level": heading_level,
                     "token_count": token_length(normalized_parent),
                     "page_range": _format_page_range(
                         section.metadata.get("page_start"),
@@ -143,13 +181,23 @@ def chunk_documents(
                 parent_doc = Document(page_content=normalized_parent, metadata=parent_metadata)
                 all_parents.append(parent_doc)
 
-                child_texts = child_splitter.split_text(normalized_parent) or [normalized_parent]
-                for child_text in child_texts:
-                    normalized_child = _normalize_text(child_text)
+                child_works = child_splitter.split_text(parent_work) or [parent_work]
+                for child_work in child_works:
+                    is_pure_atomic = (
+                        bool(placeholder_map)
+                        and child_work.strip() in placeholder_map
+                    )
+                    if is_pure_atomic:
+                        normalized_child = placeholder_map[child_work.strip()].strip()
+                    else:
+                        normalized_child = _restore_atomics(_normalize_text(child_work), placeholder_map)
+                    if not normalized_child:
+                        continue
+                    is_atomic_child = is_pure_atomic
                     child_hash = _stable_hash(normalized_child, length=12)
                     child_id = f"{section.metadata['doc_id']}:c:{child_hash}"
                     child_metadata = {
-                        **section.metadata,
+                        **section_meta_clean,
                         "doc_version": doc_version,
                         "chunk_role": "child",
                         "parent_id": parent_id,
@@ -158,6 +206,8 @@ def chunk_documents(
                         "chunk_index": len(all_children),
                         "section_index": section_index,
                         "section_path": section.metadata.get("section_path", "未命名章节"),
+                        "heading_level": heading_level,
+                        "is_atomic": is_atomic_child,
                         "token_count": token_length(normalized_child),
                         "page_range": _format_page_range(
                             section.metadata.get("page_start"),
@@ -183,6 +233,79 @@ def _group_documents_by_id(documents: Iterable[Document]) -> list[list[Document]
         grouped[doc_id].append(doc)
 
     return [grouped[doc_id] for doc_id in ordered]
+
+
+def _has_structured(documents: Sequence[Document]) -> bool:
+    return any(doc.metadata.get("structured_blocks") for doc in documents)
+
+
+def _build_sections_structured(documents: List[Document]) -> list[Section]:
+    """基于 loader 提供的 structured_blocks 构建 section。表格/代码记入 atomic_texts。"""
+    sections: list[Section] = []
+    current_heading = "导言"
+    current_level = 0
+    current_parts: list[tuple[str, str]] = []  # (kind, text); kind in {"text","atomic"}
+    current_atomics: list[str] = []
+    current_meta: dict | None = None
+
+    base_meta = {k: v for k, v in documents[0].metadata.items() if k != "structured_blocks"}
+
+    def flush():
+        nonlocal current_parts, current_atomics, current_meta
+        if not current_parts or current_meta is None:
+            current_parts = []
+            current_atomics = []
+            return
+        rendered: list[str] = []
+        for kind, text in current_parts:
+            if kind == "atomic":
+                rendered.append(text)
+            else:
+                norm = _normalize_text(text)
+                if norm:
+                    rendered.append(norm)
+        section_text = "\n\n".join(rendered)
+        if section_text:
+            sections.append(Section(
+                text=section_text,
+                metadata={
+                    **current_meta,
+                    "section_path": current_heading,
+                    "heading_level": current_level,
+                    "atomic_texts": tuple(current_atomics),
+                },
+            ))
+        current_parts = []
+        current_atomics = []
+        current_meta = None
+
+    for doc in documents:
+        blocks = doc.metadata.get("structured_blocks") or []
+        default_page = doc.metadata.get("page", 1)
+        for blk in blocks:
+            btype = blk.get("type")
+            page = blk.get("page", default_page)
+            text = (blk.get("text") or "").strip()
+            if not text:
+                continue
+            if btype == "heading":
+                flush()
+                current_heading = text
+                current_level = int(blk.get("level", 0) or 0)
+                current_meta = _build_section_metadata(base_meta, page_start=page, page_end=page)
+                current_parts = [("text", current_heading)]
+            else:
+                if current_meta is None:
+                    current_meta = _build_section_metadata(base_meta, page_start=page, page_end=page)
+                else:
+                    current_meta["page_end"] = max(current_meta.get("page_end", page), page)
+                if btype in {"table", "code"}:
+                    current_parts.append(("atomic", text))
+                    current_atomics.append(text)
+                else:
+                    current_parts.append(("text", text))
+    flush()
+    return sections
 
 
 def _build_sections(documents: List[Document]) -> list[Section]:
@@ -282,6 +405,8 @@ def _normalize_text(text: str) -> str:
 
 
 def _should_merge_lines(previous: str, current: str) -> bool:
+    if ATOMIC_PLACEHOLDER_PREFIX in previous or ATOMIC_PLACEHOLDER_PREFIX in current:
+        return False
     prev_tail = previous.rstrip()[-1:] if previous.strip() else ""
     if prev_tail in {"。", "！", "？", ".", "!", "?", ":", "："}:
         return False

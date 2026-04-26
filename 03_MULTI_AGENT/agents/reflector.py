@@ -50,7 +50,7 @@ async def reflector_node(state: ResearchState) -> dict[str, Any]:
     )
 
     llm = get_llm("max", temperature=0.0)
-    structured = llm.with_structured_output(ReflectionResult, method="function_calling")
+    structured = llm.with_structured_output(ReflectionResult, method="json_mode")
     result: ReflectionResult = await structured.ainvoke(
         [
             SystemMessage(content=REFLECTOR_SYSTEM),

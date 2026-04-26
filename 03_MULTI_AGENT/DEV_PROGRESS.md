@@ -2,8 +2,8 @@
 
 > 本文档是 Claude 跨会话的工程记忆 —— 读完本文即可掌握完整开发脉络、已做决策、当前状态、未竟事项。
 >
-> 最后更新：2026-04-18
-> 当前阶段：**M4 完成**（后端闭环 + 内/外部 MCP 集成）；M5/M6 待启动
+> 最后更新：2026-04-26
+> 当前阶段：**M5 完成 + M6 部分完成**（LangSmith 自动追踪 + LLM-as-judge + 评测看板）；M6 剩 Docker 与 20 题完整集
 
 ---
 
@@ -60,16 +60,57 @@ PYTHONPATH=. python -m scripts.run_local "研究问题"
   - handlers 全部真实实现（非 stub）
   - 支持 stdio 启动：`python -m tools.internal_mcp.server`
 
+### DeepSeek 切换（2026-04-25）
+- `config/llm.py`：LLM 工厂从 DashScope 切到 DeepSeek（`deepseek-v4-pro` / `deepseek-v4-flash`），走 OpenAI 兼容端点 `https://api.deepseek.com`
+- `agents/planner.py`、`agents/reflector.py`：`with_structured_output(..., method="json_mode")`（DashScope 时代用的 `function_calling` 不再适用，DeepSeek 原生支持 JSON mode）
+- DashScope 留作搜索兜底（`tools/dashscope_search_tool.py`），LLM 通道完全切走
+- 新增 `tests/test_deepseek_structured_output.py` 锁住 method 不被回退
+
+### M5 SSE + Streamlit UI（已完成，2026-04-26）
+- `app/sse.py`：纯函数把 LangGraph `astream_events(v2)` 事件 → SSE event dict
+  - `on_chain_start/_end` 仅过 8 个业务节点；非业务 run（ChannelWrite 等）丢弃
+  - `on_chat_model_stream` **只对 `langgraph_node == "writer"` 转 token**，避免 planner/reflector 中间 token 轰炸
+  - 顶层图 `LangGraph` 的 on_chain_end 输出含 `__interrupt__` 时发 `interrupt` 事件并跳过 `done`
+  - `coerce_plan_payload` 支持 dict / JSON str / `{"plan": {...}}` 三形态
+- `app/api.py` 新增 3 条 SSE 端点（旧端点全部保留）：
+  - `GET /research/stream?query=...&audience=...` 启动并流推
+  - `GET /research/{tid}/resume_stream?plan=<json>` 恢复 interrupt
+  - `GET /research/{tid}/turn_stream?query=...` 同会话追问
+  - 用 `sse_starlette.EventSourceResponse`，`ping=15`、`send_timeout` 来自 `settings.sse_retry_ms`
+- `app/streamlit_ui.py`：单页聊天 UI
+  - 8:4 双栏；左侧报告区（writer token 流式 markdown），右侧 8 节点状态指示（⚪️/⏳/✅）+ 最近 5 条工具调用
+  - 命中 `interrupt` 时弹出 `st.expander` + `st.data_editor` 让用户改 sub_questions
+  - 报告完成后底部启用追问输入框，复用 thread_id 走 `turn_stream`
+  - 用 `httpx-sse.connect_sse` 同步消费，每 12 个 token 刷一次 placeholder（避免 Streamlit rerun 风暴）
+- 测试：`tests/test_sse_stream.py` 8 用例（事件映射规则 + ASGITransport 端点冒烟），全量 49 用例绿
+
 ### 已完成的配套
 - **Python 3.11 升级**：conda env `langgraph-cc-multiagent`；langgraph 1.1.6、mcp 1.27.0、langchain 1.2.15 等
 - **requirements.txt** 对齐 3.11 生态
 - **DashScope 内置搜索兜底**（`tools/dashscope_search_tool.py`）：直调 DashScope 原生端点 `/api/v1/.../generation`，读 `output.search_info.search_results`；用作国内可达的 web 兜底
 - **01_RAG 复用**：`tools/kb_retriever.py` 用 surgical sys.path/sys.modules 隔离加载
-- **14 单测全绿**
+- **49 单测全绿**（M5 加 8 条 SSE 用例、tutorial 子目录 +N 条）
+
+### M6 LangSmith + LLM-as-judge（已完成，2026-04-26）
+- **LangSmith 自动追踪**（`app/bootstrap.py:_setup_langsmith`）：检测到 `langchain_tracing_v2=true` + key 时把 `LANGCHAIN_*` 同步到 `os.environ`，LangChain 全局 callback 自动上报；不改任何节点代码
+  - `app/api.py:_config(tid, query, audience)` 给 RunnableConfig 注入 `metadata={thread_id, research_query, audience, app}`，云端可按 thread / 问题筛 trace
+  - 评测处再加 `metadata.eval_run_id / case_id` 与 `tags=["eval"]`，把评测 trace 与 demo trace 区分开
+  - `config/tracing.py:with_tags` 仍是兼容钩子（节点级硬 tag 留作后续优化）
+- **LLM-as-judge**（`evals/judge.py`）：DeepSeek pro `with_structured_output(JudgeScore, method="json_mode")` 三维度打分
+  - 维度：覆盖度 / 准确性 / 引用质量；overall = 0.4·cov + 0.3·acc + 0.3·cit
+  - prompt 同时塞 query / plan / evidence_brief / report_md；报告超 6000 字截断
+- **评测脚本**（`evals/run.py`）：`PYTHONPATH=. python -m evals.run [--limit N]`
+  - 每题 graph.ainvoke → interrupt → 自动 accept LLM plan → resume → judge；失败不中断整轮
+  - 产出 `evals/results/{run_id}/results.jsonl` + `REPORT.md`
+- **Markdown 报告**（`evals/report.py`）：表格 + 维度均值 + 失分案例（综合 < 70 或执行失败）
+- **Streamlit 看板**（`app/evals_ui.py`）：`streamlit run app/evals_ui.py`
+  - 单 run：4 项指标卡 + 维度均值柱状图 + 用例 dataframe + 单条详情（rationale + 报告全文 expander）
+  - 两 run 对比：维度均值并排柱状图 + 逐用例 overall delta 表
+- **数据集**（`evals/dataset.jsonl`）：5 题烟测（技术 / 产业 / 对比 / 追问），后续可扩到 20
+- **53 单测全绿**（M6 加 4 条 evals 用例）
 
 ### 待启动里程碑
-- **M5**：FastAPI SSE 流式推送 agent 事件 + Streamlit UI（聊天界面 + 计划确认 + 报告预览）
-- **M6**：20 题评测集 + LLM-as-judge + Docker Compose 一键启动 + LangSmith tag
+- **M6 剩余**：20 题完整数据集；Dockerfile + docker-compose 一键启动；`config/tracing.py` 节点级手动 tag
 
 ---
 
@@ -254,7 +295,8 @@ PYTHONPATH=. python -m scripts.test_brave_mcp "LangGraph 2025"
 
 | 变量 | 状态 | 备注 |
 |---|---|---|
-| DASHSCOPE_API_KEY | ✅ 已填 | qwen-max / qwen-plus |
+| DEEPSEEK_API_KEY | ✅ 已填 | deepseek-v4-pro / deepseek-v4-flash（M4 末换掉 DashScope LLM） |
+| DASHSCOPE_API_KEY | ✅ 已填 | 仅用于内置搜索兜底（LLM 通道已切走） |
 | TAVILY_API_KEY | ✅ 已填 | web 主源 |
 | GITHUB_TOKEN | ✅ 已填 | code 源 |
 | BRAVE_API_KEY | ✅ 已填 | 但国内不可达 |
@@ -265,23 +307,18 @@ PYTHONPATH=. python -m scripts.test_brave_mcp "LangGraph 2025"
 
 ## 八、下次开发建议的起点
 
-### 优先级 A：M5 SSE + Streamlit UI（作品集必需）
-1. `app/api.py` 加 `GET /research/{tid}/stream` SSE 端点
-2. 用 `graph.astream_events(v2)` 把 `on_chain_start/on_chain_end/on_tool_start/on_chat_model_stream/__interrupt__` 转成 SSE 协议事件
-3. `app/streamlit_ui.py`：输入框 + 计划编辑面板 + 实时 agent 状态侧栏（读 SSE）+ Markdown 报告预览
-4. thread 列表页：`GET /threads` 拉取已有会话
+### 优先级 A：M6 收尾（面试亮点剩余）
+1. `evals/dataset.jsonl` 扩到 20 题（5×{技术、产业、对比、追问} × audience 变化）
+2. `Dockerfile` + `docker-compose.yml`：app + chroma 两 service（按用户偏好仅打包 03_MULTI_AGENT）
+3. 可选：`config/tracing.py:with_tags` 真实接入 RunnableConfig.merge —— 节点级 tag 让 LangSmith filter 更精细
 
-### 优先级 B：M6 评测 + Docker（面试亮点）
-1. `evals/dataset.jsonl`：20 题 = 5×{技术、产业、对比、追问} × audience 变化
-2. `evals/judge.py`：LLM-as-judge 三维度（覆盖度 40% + 准确性 30% + 引用质量 30%）
-3. `Dockerfile` + `docker-compose.yml`：app + chroma 两 service
-4. `config/tracing.py` 填真正的 LangSmith tag 注入（目前是骨架）
-
-### 优先级 C：锦上添花
+### 优先级 B：锦上添花
 - 多并发时的工具限速（semaphore）
 - `reflector` 覆盖度低时只对缺失子问题补查（当前实现是无差别触发 fanout）
 - Mem0 长期记忆（跨会话偏好）
 - 报告 PDF 导出
+- Streamlit UI 增加 reports/threads 历史浏览页（M5 已有 SSE 基础）
+- 评测：并行跑 + 失败重试；judge 用 self-consistency（n=3 取均值）
 
 ---
 

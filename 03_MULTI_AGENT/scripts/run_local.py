@@ -7,13 +7,63 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import sys
 import uuid
+from typing import Callable
 
 from langgraph.types import Command
 
 from app import bootstrap
+
+
+def _prompt_plan_decision(
+    proposed: dict,
+    *,
+    input_fn: Callable[[str], str] = input,
+) -> dict | None:
+    """Return the plan decision, defaulting to accept when stdin is unavailable."""
+    print("\n" + "=" * 60)
+    print("请选择操作：")
+    print("  1. 接受计划，开始执行")
+    print("  2. 修改计划（将重新生成）")
+    print("  3. 取消任务")
+    print("=" * 60)
+
+    try:
+        choice = input_fn("请输入选项 (1/2/3): ").strip()
+    except EOFError:
+        print("\n⚠️ 未检测到交互式输入，默认接受计划")
+        return {"plan": proposed["plan"], "action": "accept"}
+
+    if choice == "1":
+        print("\n✅ 计划已接受，开始执行...")
+        return {"plan": proposed["plan"], "action": "accept"}
+
+    if choice == "2":
+        print("\n✏️ 修改计划：")
+        modified_plan = copy.deepcopy(proposed["plan"])
+
+        for i, sq in enumerate(modified_plan["sub_questions"], 1):
+            print(f"\n问题 {i}: {sq['question']}")
+            new_question = input_fn(f"  新问题 (回车保持不变): ").strip()
+            if new_question:
+                sq["question"] = new_question
+
+            new_sources = input_fn(f"  新来源 (逗号分隔, 回车保持不变): ").strip()
+            if new_sources:
+                sq["recommended_sources"] = [s.strip() for s in new_sources.split(",")]
+
+        print("\n✅ 计划已更新，开始执行...")
+        return {"plan": modified_plan, "action": "accept"}
+
+    if choice == "3":
+        print("\n❌ 任务已取消")
+        return None
+
+    print("\n⚠️ 无效选项，默认接受计划")
+    return {"plan": proposed["plan"], "action": "accept"}
 
 
 async def run(query: str) -> None:
@@ -41,51 +91,12 @@ async def run(query: str) -> None:
         for sq in proposed["plan"]["sub_questions"]:
             print(f"  - {sq['id']}: {sq['question']} (sources={sq['recommended_sources']})")
 
-        # ========== 用户交互部分 ==========
-        print("\n" + "=" * 60)
-        print("请选择操作：")
-        print("  1. 接受计划，开始执行")
-        print("  2. 修改计划（将重新生成）")
-        print("  3. 取消任务")
-        print("=" * 60)
-        
-        choice = input("请输入选项 (1/2/3): ").strip()
-        
-        if choice == "1":
-            # 接受计划
-            decision = {"plan": proposed["plan"], "action": "accept"}
-            print("\n✅ 计划已接受，开始执行...")
-            
-        elif choice == "2":
-            # 修改计划：获取用户想要修改的内容
-            print("\n✏️ 修改计划：")
-            modified_plan = proposed["plan"].copy()
-            
-            for i, sq in enumerate(modified_plan["sub_questions"], 1):
-                print(f"\n问题 {i}: {sq['question']}")
-                new_question = input(f"  新问题 (回车保持不变): ").strip()
-                if new_question:
-                    sq["question"] = new_question
-                
-                new_sources = input(f"  新来源 (逗号分隔, 回车保持不变): ").strip()
-                if new_sources:
-                    sq["recommended_sources"] = [s.strip() for s in new_sources.split(",")]
-            
-            decision = {"plan": modified_plan, "action": "accept"}
-            print("\n✅ 计划已更新，开始执行...")
-            
-        elif choice == "3":
-            # 取消任务
-            print("\n❌ 任务已取消")
+        decision = _prompt_plan_decision(proposed)
+        if decision is None:
             return
-            
-        else:
-            print("\n⚠️ 无效选项，默认接受计划")
-            decision = {"plan": proposed["plan"], "action": "accept"}
-        # ==================================
 
         # print("\n=== 自动接受计划（CLI 场景，真实 UI 处由用户编辑）===")
-        resumed = await g.ainvoke(Command(resume={"plan": proposed["plan"]}), config=cfg)
+        resumed = await g.ainvoke(Command(resume={"plan": decision["plan"]}), config=cfg)
 
         report = resumed.get("final_report", "")
         print(f"\n=== 报告 ===\n（{len(report)} 字, {len(resumed.get('citations', []))} 引用, 路径={resumed.get('report_path')}）\n")

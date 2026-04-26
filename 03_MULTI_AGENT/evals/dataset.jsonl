@@ -1,0 +1,5 @@
+{"id":"tech_01","category":"技术","query":"对比 LangGraph 与 AutoGen 的核心抽象差异","audience":"intermediate"}
+{"id":"tech_02","category":"技术","query":"RAG 中 parent-child chunking 相比单层 chunking 的工程收益","audience":"expert"}
+{"id":"industry_01","category":"产业","query":"2026 年中国大模型 API 价格走势与主要供应商定价策略","audience":"intermediate"}
+{"id":"compare_01","category":"对比","query":"DeepSeek V4 与 Qwen 3 在长上下文与代码任务的差异","audience":"expert"}
+{"id":"followup_01","category":"追问","query":"在 Agent 多步工具调用稳定性上，DeepSeek V4 与 Qwen 3 的实测差异","audience":"expert"}

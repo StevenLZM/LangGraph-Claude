@@ -16,6 +16,10 @@ pydantic-settings
 fastapi
 uvicorn[standard]
 sse-starlette
+httpx-sse
+
+# ── UI ─────────────────────────────────────────────────────────
+streamlit>=1.32
 
 # ── MCP（官方 SDK，需 Python ≥ 3.10） ──────────────────────────
 mcp

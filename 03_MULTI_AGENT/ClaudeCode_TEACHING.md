@@ -625,7 +625,204 @@ class SearchTool(Protocol):
 
 ---
 
-## 八、快速参考卡
+---
+
+## 八、M5 实时事件流 + Streamlit 聊天 UI
+
+> 把"接口调用 → 干等几十秒"升级为"提交 → 实时看到 8 节点逐个跑完 → writer 流式渲染 markdown"。
+
+### 8.1 设计要点：interrupt 不在事件流里
+
+**踩坑记录**：第一版用 `astream_events(version="v2")` 监听 `__interrupt__` 字段，怎么都拿不到。`astream_events` 在 interrupt 触发时：
+- 被截断的节点（planner）**不发** `on_chain_end`
+- 顶层 `LangGraph` 的 `on_chain_end` output 里**也没有** `__interrupt__` 字段
+- interrupt 信息**只能**通过 `graph.aget_state(cfg).tasks[*].interrupts` 拿
+
+```python
+# app/sse.py
+async def stream_events(events, *, thread_id, graph, cfg):
+    yield {"event": "thread", "data": {"thread_id": thread_id}}
+    async for ev in events:
+        mapped = map_event(ev)
+        if mapped: yield mapped
+    pending = await _detect_pending_interrupt(graph, cfg)   # 关键：流结束后再问 state
+    if pending:
+        yield {"event": "interrupt", "data": pending}
+        return
+    yield {"event": "done", "data": {...}}
+```
+
+### 8.2 Writer-only token 流
+
+planner / reflector 也调 LLM，但它们的中间 token 不应该轰炸前端：
+
+```python
+# app/sse.py:map_event
+if etype == "on_chat_model_stream":
+    if metadata.get("langgraph_node") != "writer":
+        return None
+    return {"event": "token", "data": {"text": chunk.content}}
+```
+
+### 8.3 三条 SSE 端点
+
+```
+GET  /research/stream?query=...&audience=...      启动 + 流推
+GET  /research/{tid}/resume_stream?plan=<json>    用户编辑 plan 后恢复
+GET  /research/{tid}/turn_stream?query=...        同会话追问
+```
+
+旧的 `/research`、`/resume`、`/turn`（POST）全部保留 —— 测试和 Internal MCP 在用。
+
+### 8.4 Streamlit 单页 chat UI
+
+`app/streamlit_ui.py`：8:4 双栏。
+- 左：报告区（writer token 累积渲染，每 12 个 token 刷一次 placeholder，避免 rerun 风暴）
+- 右：实时进度（按 graph 顺序，**只显示 plan 中用到的 researcher**：从 `sub_questions[*].recommended_sources` 推出来）
+- interrupt 弹层：`st.expander + st.data_editor`；点确认时立即 `plan_panel.empty()` 清掉按钮
+
+**使用**：
+```bash
+PYTHONPATH=. uvicorn app.api:app --port 8080      # 后端
+streamlit run app/streamlit_ui.py                  # UI
+```
+
+---
+
+## 九、M6 LangSmith 自动追踪 + LLM-as-judge 评测
+
+### 9.1 LangSmith：零侵入开启
+
+LangChain 全局 callback 检测到 `LANGCHAIN_TRACING_V2=true` + key 时自动上报，**不需要改任何节点代码**。
+
+```python
+# app/bootstrap.py
+def _setup_langsmith():
+    if not settings.langchain_tracing_v2 or not settings.langchain_api_key:
+        return
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    os.environ["LANGCHAIN_API_KEY"] = settings.langchain_api_key
+    os.environ["LANGCHAIN_PROJECT"] = settings.langchain_project
+```
+
+**业务标签**：在 `RunnableConfig.metadata` 里塞 thread_id / case_id 等，云端可按字段筛 trace：
+
+```python
+# app/api.py
+def _config(tid, *, query=None, audience=None):
+    return {
+        "configurable": {"thread_id": tid},
+        "metadata": {"thread_id": tid, "research_query": query, "audience": audience, "app": "insightloop"},
+    }
+```
+
+**为什么不在节点上手动加 tag**：LangGraph 自动把节点名写进 run name，足够 filter；`config/tracing.py:with_tags` 装饰器先保留作钩子，需要更细维度时再启用。
+
+### 9.2 LLM-as-judge：三维度结构化打分
+
+`evals/judge.py` 用 DeepSeek pro `with_structured_output(JudgeScore, method="json_mode")` 给报告打分：
+
+```python
+class JudgeScore(BaseModel):
+    coverage: int      # 0-100  plan 中的 sub_questions 是否被报告答到
+    accuracy: int      # 0-100  关键论断是否能在 evidence 里找到支撑
+    citation: int      # 0-100  [^N] 引用是否对应 evidence
+    overall: int       # 加权 0.4·cov + 0.3·acc + 0.3·cit
+    rationale: str     # 中文一段话，每维度给 1 句解释 + 失分点
+```
+
+prompt 同时塞 `query / plan / evidence_brief / report_md`，让 judge 看到"问题—调研—成稿"三方，而不是只评最终文本。报告超 6000 字自动截断防止吃满上下文。
+
+### 9.3 评测脚本：interrupt 自动接受
+
+评测场景下不需要 HITL，自动 accept LLM 给的 plan：
+
+```python
+# evals/run.py
+r1 = await g.ainvoke({"research_query": case["query"], ...}, config=cfg)
+proposed = r1["__interrupt__"][0].value
+r2 = await g.ainvoke(Command(resume={"plan": proposed["plan"]}), config=cfg)
+score = await judge_one(JudgeInput(query=..., plan=..., evidence_brief=..., report_md=r2["final_report"]))
+```
+
+特性：
+- `--limit N` 烟测；`--dataset path` 自定义集
+- 失败案例不中断整轮，`error` 字段记 `{ExceptionType}: {msg}`
+- 每条 case 都给 `tags=["eval"]` + `metadata.eval_run_id` —— LangSmith 上一眼就能把评测 trace 与 demo trace 分开
+
+产出：`evals/results/{run_id}/results.jsonl` + `REPORT.md`
+
+### 9.4 Markdown 报告 + Streamlit 看板：双产物
+
+| 产物 | 文件 | 用途 |
+|---|---|---|
+| Markdown | `REPORT.md` | 静态总结（PR/汇报直接贴），含表 + 维度均值 + 失分案例 |
+| 看板 | `app/evals_ui.py` | 交互看板：单 run 详情 + **两 run 对比柱状图** + 单题 rationale + 报告全文 |
+
+看板的"对比模式"是面试演示亮点 —— 同一数据集跑两次（比如改了 reflector 阈值前后），能直观看维度均值变化。
+
+### 9.5 完整使用方式
+
+**前置**：在 `03_MULTI_AGENT/.env` 设 LangSmith key：
+```bash
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_API_KEY=ls__...
+LANGCHAIN_PROJECT=insightloop-multi-agent
+```
+
+**1. 跑评测**（5 题约 5-10 分钟，调真 LLM 和搜索）：
+```bash
+conda activate langgraph-cc-multiagent
+cd 03_MULTI_AGENT
+
+# 烟测 1 题（~1 分钟）
+PYTHONPATH=. python -m evals.run --limit 1
+
+# 全量 5 题
+PYTHONPATH=. python -m evals.run
+
+# 自定义数据集
+PYTHONPATH=. python -m evals.run --dataset evals/my_set.jsonl
+```
+
+产出：
+```
+evals/results/20260426-153000/
+  ├── results.jsonl   # 每行一个 case 的输入/报告/打分/耗时
+  └── REPORT.md       # 可读评测报告
+```
+
+**2. 看 Markdown 报告**：直接打开 `evals/results/{run_id}/REPORT.md`
+
+**3. 启 Streamlit 看板**：
+```bash
+streamlit run app/evals_ui.py
+```
+- 侧栏切换"单 run 详情"/"两 run 对比"
+- 单 run：4 项指标卡 + 维度均值柱状图 + 用例 dataframe + 单条详情（含报告全文 expander）
+- 对比：选两个 run，并排维度均值柱状图 + 逐用例 overall delta
+
+**4. 看 LangSmith trace**：登 https://smith.langchain.com → 选 project `insightloop-multi-agent` → filter `metadata.eval_run_id = "20260426-153000"`
+
+### 9.6 数据集扩展指南
+
+`evals/dataset.jsonl` 一行一题：
+```json
+{"id":"tech_01","category":"技术","query":"...","audience":"intermediate"}
+```
+
+DEV_PROGRESS 原计划 20 题 = 5 × {技术、产业、对比、追问}。当前是 5 题烟测，扩到 20 直接往 jsonl 加行即可，无需改任何代码。
+
+### 9.7 面试可讲点
+
+- **不写一行节点代码就接入了 trace**：靠 LangChain 全局 callback + RunnableConfig.metadata 的两层设计；展示了对 LangChain 抽象的理解
+- **judge 看到三方信息（query / plan / evidence / report）而不是只看 report**：避免"报告写得漂亮但实际偏题"的盲区
+- **失败不中断整轮 + tags=["eval"]**：评测产物可对比、可复现、与 demo trace 隔离 —— 工程化思维
+- **本地 + 云端双轨**：Markdown/看板满足无网演示，LangSmith 满足深度归因 —— 面向不同观众
+
+---
+
+## 十、快速参考卡
 
 **启动 3 行**：
 ```bash
@@ -647,6 +844,11 @@ PYTHONPATH=. python -m scripts.run_local "研究问题"
 - FastAPI：`app/api.py` `_extract_interrupt` + `Command(resume=...)`
 - MCP stdio 会话：`tools/mcp_brave_tool.py` `_ensure_session`
 - KB 复用手术：`tools/kb_retriever.py` `_load_01rag_get_hybrid_retriever`
+- **SSE 事件映射**：`app/sse.py` `map_event` + `_detect_pending_interrupt`
+- **Streamlit chat UI**：`app/streamlit_ui.py` `_active_nodes_from_plan`
+- **LangSmith 接入**：`app/bootstrap.py:_setup_langsmith` + `app/api.py:_config` 的 metadata
+- **judge**：`evals/judge.py` `JudgeScore` + `judge_one`
+- **评测看板**：`app/evals_ui.py`
 
 **记住三个数字**：
 - **7** 个 Agent（Planner/Supervisor/4 Researchers/Reflector/Writer）

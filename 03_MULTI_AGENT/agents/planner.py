@@ -20,7 +20,7 @@ async def planner_node(state: ResearchState) -> dict[str, Any]:
     audience = state.get("audience", "intermediate")
 
     llm = get_llm("max", temperature=0.3)
-    structured = llm.with_structured_output(ResearchPlan, method="function_calling")
+    structured = llm.with_structured_output(ResearchPlan, method="json_mode")
     plan: ResearchPlan = await structured.ainvoke(
         [SystemMessage(content=PLANNER_SYSTEM), HumanMessage(content=planner_user(query, audience))]
     )
