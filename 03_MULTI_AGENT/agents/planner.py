@@ -27,6 +27,10 @@ async def planner_node(state: ResearchState) -> dict[str, Any]:
     logger.info("[planner] 生成 %d 个子问题", len(plan.sub_questions))
     print(f"llm生成plan：{plan}")
 
+    # model_dump() 是 Pydantic v2 的方法，将模型实例序列化为字典。
+    # plan = Plan(name="数据分析", steps=["采集", "清洗", "建模"])
+    # result = plan.model_dump()
+    # {'name': '数据分析', 'steps': ['采集', '清洗', '建模'], 'priority': 1}
     decision = interrupt({"phase": "plan_review", "plan": plan.model_dump()})
     print(f"用户的输入:{decision}")
 
