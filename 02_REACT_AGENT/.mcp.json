@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "weather": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.weather_server"],
+      "description": "内部天气 MCP Server，使用本地模拟天气数据"
+    }
+  }
+}

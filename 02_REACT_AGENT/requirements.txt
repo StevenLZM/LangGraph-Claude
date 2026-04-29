@@ -1,0 +1,13 @@
+langgraph>=1.0
+langchain
+langchain-core
+langchain-openai
+pydantic>=2
+pydantic-settings
+python-dotenv
+streamlit>=1.32
+mcp
+tavily-python
+wikipedia
+pytest
+pytest-asyncio
