@@ -7,7 +7,9 @@
   "python.analysis.extraPaths": [
     "01_RAG",
     "02_REACT_AGENT",
-    "03_MULTI_AGENT"
+    "03_MULTI_AGENT",
+    "04_HUMAN_IN_THE_LOOP",
+    "05_PRODUCT_AGENT"
   ],
   "python.analysis.exclude": [
     "**/.worktrees/**",
