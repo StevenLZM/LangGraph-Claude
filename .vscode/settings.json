@@ -1,0 +1,59 @@
+{
+  "python.useEnvironmentsExtension": false,
+  "python.createEnvironment.trigger": "off",
+  "python.analysis.diagnosticMode": "openFilesOnly",
+  "python.analysis.indexing": false,
+  "python.analysis.autoSearchPaths": false,
+  "python.analysis.extraPaths": [
+    "01_RAG",
+    "02_REACT_AGENT",
+    "03_MULTI_AGENT"
+  ],
+  "python.analysis.exclude": [
+    "**/.worktrees/**",
+    "**/.venv/**",
+    "**/venv/**",
+    "**/__pycache__/**",
+    "**/.pytest_cache/**",
+    "**/.mypy_cache/**",
+    "**/.ruff_cache/**",
+    "**/data/vectorstore/**",
+    "**/data/docstore/**",
+    "**/data/documents/**",
+    "**/data/**/*.db",
+    "**/data/**/*.sqlite",
+    "**/data/**/*.sqlite3",
+    "**/data/**/*.bin"
+  ],
+  "python.testing.autoTestDiscoverOnSaveEnabled": false,
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/.worktrees/**": true,
+    "**/__pycache__/**": true,
+    "**/.pytest_cache/**": true,
+    "**/.mypy_cache/**": true,
+    "**/.ruff_cache/**": true,
+    "**/data/vectorstore/**": true,
+    "**/data/docstore/**": true,
+    "**/data/documents/**": true,
+    "**/data/**/*.db": true,
+    "**/data/**/*.sqlite": true,
+    "**/data/**/*.sqlite3": true,
+    "**/data/**/*.bin": true
+  },
+  "search.exclude": {
+    "**/.worktrees": true,
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "**/.mypy_cache": true,
+    "**/.ruff_cache": true,
+    "**/data/vectorstore": true,
+    "**/data/docstore": true,
+    "**/data/documents": true,
+    "**/data/**/*.db": true,
+    "**/data/**/*.sqlite": true,
+    "**/data/**/*.sqlite3": true,
+    "**/data/**/*.bin": true
+  }
+}
