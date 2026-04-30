@@ -27,6 +27,7 @@ def get_llm(tier: Tier = "max", *, temperature: float = 0.2, streaming: bool = F
         base_url=settings.deepseek_base_url,
         temperature=temperature,
         streaming=streaming,
+        extra_body={"thinking": {"type": "disabled"}},
         timeout=120,
         max_retries=2,
     )

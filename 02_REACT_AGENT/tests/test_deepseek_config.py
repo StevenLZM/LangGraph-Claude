@@ -36,6 +36,15 @@ def test_get_llm_uses_deepseek_light_model(monkeypatch):
     assert _base_url(llm) == "https://api.deepseek.com"
 
 
+def test_get_llm_disables_deepseek_thinking_mode(monkeypatch):
+    llm_module.get_llm.cache_clear()
+    monkeypatch.setattr(llm_module.settings, "deepseek_api_key", "sk-test")
+
+    llm = llm_module.get_llm("max")
+
+    assert llm.extra_body == {"thinking": {"type": "disabled"}}
+
+
 def test_get_llm_requires_deepseek_key(monkeypatch):
     llm_module.get_llm.cache_clear()
     monkeypatch.setattr(llm_module.settings, "deepseek_api_key", "")
