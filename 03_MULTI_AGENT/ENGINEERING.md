@@ -666,8 +666,8 @@ evals/
 ### 12.3 入口
 
 ```bash
-make eval                    # 全集
-make eval CASE=langgraph_vs  # 单条
+make eval        # 20 题全集
+make eval-smoke  # 1 题冒烟
 ```
 
 输出 markdown 报告：每题分项分 + 总分 + diff 上一次基线。
@@ -681,20 +681,22 @@ make eval CASE=langgraph_vs  # 单条
 ```mermaid
 flowchart LR
     user((用户)) --> ui[streamlit:8501]
-    ui --> app[fastapi:8000]
-    app --> chroma[chroma:8002]
-    app --> sqlite[(checkpoints.sqlite<br/>volume)]
+    ui --> app[fastapi:8080]
+    app --> sqlite[(checkpoints.db<br/>volume)]
     app --> reports[(data/reports<br/>volume)]
 ```
+
+M6 Compose 仅打包 `03_MULTI_AGENT` 的 API + UI。`01_RAG` 不挂入容器；KB 检索源缺失时按现有降级逻辑返空。
 
 ### 13.2 环境变量分类
 
 | 类别 | 变量 | 必填 |
 |---|---|---|
-| LLM | `DASHSCOPE_API_KEY` | ✅ |
+| LLM | `DEEPSEEK_API_KEY` | ✅ |
+| 搜索 | `DASHSCOPE_API_KEY` | ✅（DashScope 搜索兜底） |
 | 工具 | `TAVILY_API_KEY`, `GITHUB_TOKEN`, `BRAVE_API_KEY` | ✅ / ✅ / 可选 |
 | 追踪 | `LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT` | 可选 |
-| 应用 | `INSIGHTLOOP_DB_PATH`, `INSIGHTLOOP_REPORTS_DIR`, `MAX_ITERATIONS` | 默认值 |
+| 应用 | `CHECKPOINTER_DB`, `REPORTS_DIR`, `MAX_REFLECTION_ITERATIONS`, `INSIGHTLOOP_API` | 默认值 |
 
 `.env.example` 列出所有键 + 注释 + 示例值，Docker 通过 `env_file:` 注入。
 

@@ -1,0 +1,39 @@
+services:
+  api:
+    build: .
+    command: uvicorn app.api:app --host 0.0.0.0 --port 8080
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+      - DOCUMENTS_DIR=/app/data/documents
+      - VECTORSTORE_DIR=/app/data/vectorstore
+      - REPORTS_DIR=/app/data/reports
+      - ARCHIVE_DB=/app/data/archive.db
+      - CHECKPOINTER_DB=/app/data/checkpoints.db
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  ui:
+    build: .
+    command: streamlit run app/streamlit_ui.py --server.address=0.0.0.0 --server.port=8501
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+      - INSIGHTLOOP_API=http://api:8080
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      api:
+        condition: service_healthy

@@ -17,7 +17,7 @@ import pandas as pd
 import streamlit as st
 from httpx_sse import connect_sse
 
-API_BASE = os.environ.get("INSIGHTLOOP_API", "http://localhost:8080")
+API_BASE = os.environ.get("INSIGHTLOOP_API") or os.environ.get("API_BASE_URL") or "http://localhost:8080"
 
 # graph 顺序（plans/tidy-hatching-gem.md）：planner → supervisor → researchers* → reflector → writer
 NODE_ORDER = (

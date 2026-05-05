@@ -1,5 +1,20 @@
 {"id":"tech_01","category":"技术","query":"对比 LangGraph 与 AutoGen 的核心抽象差异","audience":"intermediate"}
 {"id":"tech_02","category":"技术","query":"RAG 中 parent-child chunking 相比单层 chunking 的工程收益","audience":"expert"}
+{"id":"tech_03","category":"技术","query":"多 Agent 系统中反思循环的状态设计与失败兜底策略","audience":"expert"}
+{"id":"tech_04","category":"技术","query":"MCP 工具协议接入 LangGraph 工作流的工程边界与安全风险","audience":"intermediate"}
+{"id":"tech_05","category":"技术","query":"Agent 工作流中结构化输出、JSON mode 与 function calling 的稳定性差异","audience":"expert"}
 {"id":"industry_01","category":"产业","query":"2026 年中国大模型 API 价格走势与主要供应商定价策略","audience":"intermediate"}
+{"id":"industry_02","category":"产业","query":"企业私有知识库 Agent 在金融与制造业落地的主要 ROI 来源","audience":"intermediate"}
+{"id":"industry_03","category":"产业","query":"AI Agent 平台从演示走向生产部署时的商业化阻力","audience":"beginner"}
+{"id":"industry_04","category":"产业","query":"开源 Agent 框架在企业采购中的风险评估维度","audience":"expert"}
+{"id":"industry_05","category":"产业","query":"国内外云厂商 Agent Builder 产品的差异化定位","audience":"intermediate"}
 {"id":"compare_01","category":"对比","query":"DeepSeek V4 与 Qwen 3 在长上下文与代码任务的差异","audience":"expert"}
+{"id":"compare_02","category":"对比","query":"LangGraph、CrewAI、AutoGen 在生产可观测性上的差异","audience":"intermediate"}
+{"id":"compare_03","category":"对比","query":"Tavily、Brave Search 与 DashScope 联网搜索在 Agent 检索链路中的取舍","audience":"intermediate"}
+{"id":"compare_04","category":"对比","query":"SQLite checkpoint 与 Postgres checkpoint 在 LangGraph 多会话部署中的差异","audience":"expert"}
+{"id":"compare_05","category":"对比","query":"Streamlit 与 React 前端承载 Agent 实时进度 UI 的工程差异","audience":"beginner"}
 {"id":"followup_01","category":"追问","query":"在 Agent 多步工具调用稳定性上，DeepSeek V4 与 Qwen 3 的实测差异","audience":"expert"}
+{"id":"followup_02","category":"追问","query":"如果已有报告证据不足，Reflector 应如何只触发缺失子问题补查","audience":"expert"}
+{"id":"followup_03","category":"追问","query":"在同一 thread_id 下追加追问时，哪些 state 字段应保留或重置","audience":"intermediate"}
+{"id":"followup_04","category":"追问","query":"当 Web 搜索 API 配额耗尽时，Agent 应如何解释证据覆盖风险","audience":"beginner"}
+{"id":"followup_05","category":"追问","query":"评测平均分低于 80 时，应该优先优化 Planner、Retriever 还是 Writer","audience":"intermediate"}

@@ -2,8 +2,8 @@
 
 > 本文档是 Claude 跨会话的工程记忆 —— 读完本文即可掌握完整开发脉络、已做决策、当前状态、未竟事项。
 >
-> 最后更新：2026-04-26
-> 当前阶段：**M5 完成 + M6 部分完成**（LangSmith 自动追踪 + LLM-as-judge + 评测看板）；M6 剩 Docker 与 20 题完整集
+> 最后更新：2026-05-05
+> 当前阶段：**M6 完成**（20 题评测集 + Docker Compose + LangSmith 节点级 tags）
 
 ---
 
@@ -91,11 +91,11 @@ PYTHONPATH=. python -m scripts.run_local "研究问题"
 - **01_RAG 复用**：`tools/kb_retriever.py` 用 surgical sys.path/sys.modules 隔离加载
 - **49 单测全绿**（M5 加 8 条 SSE 用例、tutorial 子目录 +N 条）
 
-### M6 LangSmith + LLM-as-judge（已完成，2026-04-26）
+### M6 生产化（已完成，2026-05-05）
 - **LangSmith 自动追踪**（`app/bootstrap.py:_setup_langsmith`）：检测到 `langchain_tracing_v2=true` + key 时把 `LANGCHAIN_*` 同步到 `os.environ`，LangChain 全局 callback 自动上报；不改任何节点代码
   - `app/api.py:_config(tid, query, audience)` 给 RunnableConfig 注入 `metadata={thread_id, research_query, audience, app}`，云端可按 thread / 问题筛 trace
   - 评测处再加 `metadata.eval_run_id / case_id` 与 `tags=["eval"]`，把评测 trace 与 demo trace 区分开
-  - `config/tracing.py:with_tags` 仍是兼容钩子（节点级硬 tag 留作后续优化）
+  - `config/tracing.py:tagged_node` 在 `graph/workflow.py` 给 8 个业务节点统一注入 `agent:<node>` tag 与 `metadata.agent`
 - **LLM-as-judge**（`evals/judge.py`）：DeepSeek pro `with_structured_output(JudgeScore, method="json_mode")` 三维度打分
   - 维度：覆盖度 / 准确性 / 引用质量；overall = 0.4·cov + 0.3·acc + 0.3·cit
   - prompt 同时塞 query / plan / evidence_brief / report_md；报告超 6000 字截断
@@ -106,11 +106,15 @@ PYTHONPATH=. python -m scripts.run_local "研究问题"
 - **Streamlit 看板**（`app/evals_ui.py`）：`streamlit run app/evals_ui.py`
   - 单 run：4 项指标卡 + 维度均值柱状图 + 用例 dataframe + 单条详情（rationale + 报告全文 expander）
   - 两 run 对比：维度均值并排柱状图 + 逐用例 overall delta 表
-- **数据集**（`evals/dataset.jsonl`）：5 题烟测（技术 / 产业 / 对比 / 追问），后续可扩到 20
-- **53 单测全绿**（M6 加 4 条 evals 用例）
+- **数据集**（`evals/dataset.jsonl`）：20 题完整集，技术 / 产业 / 对比 / 追问各 5 条
+- **Docker Compose**（`Dockerfile` + `docker-compose.yml`）：`api:8080` + `ui:8501` 两服务，`./data` 挂载为持久化目录；按 M6 范围仅打包 `03_MULTI_AGENT`，容器内 KB 缺失时自动返空
+- **Makefile**：`make test` / `make eval-smoke` / `make eval` / `make docker-config`
+- **测试**：新增 M6 production 回归，覆盖 20 题数据集、Docker 入口、Streamlit API env fallback、节点级 tracing helper
 
-### 待启动里程碑
-- **M6 剩余**：20 题完整数据集；Dockerfile + docker-compose 一键启动；`config/tracing.py` 节点级手动 tag
+### 后续优化
+- 多并发时的工具限速（semaphore）
+- `reflector` 覆盖度低时只对缺失子问题补查（当前实现是无差别触发 fanout）
+- 评测：并行跑 + 失败重试；judge 用 self-consistency（n=3 取均值）
 
 ---
 
@@ -214,13 +218,13 @@ PYTHONPATH=. python -m scripts.run_local "研究问题"
 ├── config/
 │   ├── settings.py                  # pydantic-settings
 │   ├── llm.py                       # get_llm(tier) ChatOpenAI 工厂
-│   └── tracing.py                   # with_tags（骨架，M6 接 LangSmith）
+│   └── tracing.py                   # with_tags + tagged_node 节点级 LangSmith tag
 │
 ├── scripts/
 │   ├── run_local.py                 # CLI 端到端跑（自动接受 plan）
 │   └── test_brave_mcp.py            # Brave smoke 脚本
 │
-├── tests/                           # 14 单测全绿
+├── tests/                           # 58 单测全绿
 │   ├── test_graph_skeleton.py
 │   ├── test_evidence_reducer.py
 │   ├── test_registry.py
@@ -307,12 +311,7 @@ PYTHONPATH=. python -m scripts.test_brave_mcp "LangGraph 2025"
 
 ## 八、下次开发建议的起点
 
-### 优先级 A：M6 收尾（面试亮点剩余）
-1. `evals/dataset.jsonl` 扩到 20 题（5×{技术、产业、对比、追问} × audience 变化）
-2. `Dockerfile` + `docker-compose.yml`：app + chroma 两 service（按用户偏好仅打包 03_MULTI_AGENT）
-3. 可选：`config/tracing.py:with_tags` 真实接入 RunnableConfig.merge —— 节点级 tag 让 LangSmith filter 更精细
-
-### 优先级 B：锦上添花
+### 优先级 A：锦上添花
 - 多并发时的工具限速（semaphore）
 - `reflector` 覆盖度低时只对缺失子问题补查（当前实现是无差别触发 fanout）
 - Mem0 长期记忆（跨会话偏好）
@@ -349,4 +348,4 @@ Writer: qwen-max 输出 3800+ 字 Markdown，[^1]-[^13] 引用
 归档: data/reports/20260418-180845_*.md
 ```
 
-14 单测全绿 · 0 报错 · 0 警告（除 1 条 langchain 的 type hint 建议）。
+当前离线测试基线：58 单测全绿。

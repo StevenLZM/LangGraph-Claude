@@ -17,6 +17,7 @@ from agents.researcher_kb import kb_researcher_node
 from agents.researcher_web import web_researcher_node
 from agents.supervisor import supervisor_node
 from agents.writer import writer_node
+from config.tracing import tagged_node
 from graph.router import reflector_route, supervisor_route
 from graph.state import ResearchState
 
@@ -25,14 +26,14 @@ def build_graph(checkpointer: Optional[object] = None):
     # ResearchState全局状态，所有节点共享/膝修改
     wf = StateGraph(ResearchState)
 
-    wf.add_node("planner", planner_node) # 任务拆解
-    wf.add_node("supervisor", supervisor_node) # 决策下一步
-    wf.add_node("web_researcher", web_researcher_node)
-    wf.add_node("academic_researcher", academic_researcher_node)
-    wf.add_node("code_researcher", code_researcher_node)
-    wf.add_node("kb_researcher", kb_researcher_node)
-    wf.add_node("reflector", reflector_node) # 质量评估
-    wf.add_node("writer", writer_node) # 输出结果
+    wf.add_node("planner", tagged_node("planner", planner_node)) # 任务拆解
+    wf.add_node("supervisor", tagged_node("supervisor", supervisor_node)) # 决策下一步
+    wf.add_node("web_researcher", tagged_node("web_researcher", web_researcher_node))
+    wf.add_node("academic_researcher", tagged_node("academic_researcher", academic_researcher_node))
+    wf.add_node("code_researcher", tagged_node("code_researcher", code_researcher_node))
+    wf.add_node("kb_researcher", tagged_node("kb_researcher", kb_researcher_node))
+    wf.add_node("reflector", tagged_node("reflector", reflector_node)) # 质量评估
+    wf.add_node("writer", tagged_node("writer", writer_node)) # 输出结果
 
     # 固定流程
     # 用户输入 → planner → supervisor

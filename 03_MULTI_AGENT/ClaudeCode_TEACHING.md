@@ -689,11 +689,11 @@ streamlit run app/streamlit_ui.py                  # UI
 
 ---
 
-## 九、M6 LangSmith 自动追踪 + LLM-as-judge 评测
+## 九、M6 生产化：LangSmith + LLM-as-judge + Docker 部署
 
-### 9.1 LangSmith：零侵入开启
+### 9.1 LangSmith：全局 trace + 节点级 tag
 
-LangChain 全局 callback 检测到 `LANGCHAIN_TRACING_V2=true` + key 时自动上报，**不需要改任何节点代码**。
+LangChain 全局 callback 检测到 `LANGCHAIN_TRACING_V2=true` + key 时自动上报；业务维度通过 `RunnableConfig.metadata` 进入 trace，节点维度通过 `agent:<node>` tag 进入 LangSmith filter。
 
 ```python
 # app/bootstrap.py
@@ -716,7 +716,26 @@ def _config(tid, *, query=None, audience=None):
     }
 ```
 
-**为什么不在节点上手动加 tag**：LangGraph 自动把节点名写进 run name，足够 filter；`config/tracing.py:with_tags` 装饰器先保留作钩子，需要更细维度时再启用。
+**节点标签**：M6 后用 `config/tracing.py::tagged_node()` 包装图节点：
+
+```python
+# config/tracing.py
+def tagged_node(name: str, fn: Callable[..., Any], **metadata: Any):
+    node_metadata = {"agent": name, **metadata}
+    return RunnableLambda(fn, name=name).with_config(
+        tags=[f"agent:{name}"],
+        metadata=node_metadata,
+    )
+```
+
+```python
+# graph/workflow.py
+wf.add_node("planner", tagged_node("planner", planner_node))
+wf.add_node("web_researcher", tagged_node("web_researcher", web_researcher_node))
+wf.add_node("writer", tagged_node("writer", writer_node))
+```
+
+这样 LangSmith 上可以同时按 `metadata.thread_id` 找某次会话、按 `tags contains agent:writer` 找 writer 节点、按 `tags contains eval` 区分评测流量。
 
 ### 9.2 LLM-as-judge：三维度结构化打分
 
@@ -770,16 +789,16 @@ LANGCHAIN_API_KEY=ls__...
 LANGCHAIN_PROJECT=insightloop-multi-agent
 ```
 
-**1. 跑评测**（5 题约 5-10 分钟，调真 LLM 和搜索）：
+**1. 跑评测**（20 题全量会调真 LLM 和搜索，耗时与 API 额度取决于网络和 provider）：
 ```bash
 conda activate langgraph-cc-multiagent
 cd 03_MULTI_AGENT
 
 # 烟测 1 题（~1 分钟）
-PYTHONPATH=. python -m evals.run --limit 1
+make eval-smoke
 
-# 全量 5 题
-PYTHONPATH=. python -m evals.run
+# 全量 20 题
+make eval
 
 # 自定义数据集
 PYTHONPATH=. python -m evals.run --dataset evals/my_set.jsonl
@@ -811,14 +830,177 @@ streamlit run app/evals_ui.py
 {"id":"tech_01","category":"技术","query":"...","audience":"intermediate"}
 ```
 
-DEV_PROGRESS 原计划 20 题 = 5 × {技术、产业、对比、追问}。当前是 5 题烟测，扩到 20 直接往 jsonl 加行即可，无需改任何代码。
+M6 已补齐为 20 题完整集，四类各 5 条。新增题目时继续保持三点：
 
-### 9.7 面试可讲点
+1. `id` 唯一，建议用 `tech_06` / `industry_06` 这种可排序命名
+2. `category` 只用现有四类：`技术` / `产业` / `对比` / `追问`
+3. `audience` 只用 `beginner` / `intermediate` / `expert`
 
-- **不写一行节点代码就接入了 trace**：靠 LangChain 全局 callback + RunnableConfig.metadata 的两层设计；展示了对 LangChain 抽象的理解
+### 9.7 Docker 部署代码讲解
+
+M6 的 Docker 范围是**只打包 `03_MULTI_AGENT`**。容器里不挂载兄弟目录 `01_RAG`，所以 KB researcher 在容器里可能返回空；这是可接受的，因为 Web / ArXiv / GitHub / DashScope 搜索链仍可演示完整流程。
+
+#### Dockerfile
+
+```dockerfile
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl nodejs npm \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+RUN mkdir -p /app/data/documents /app/data/reports /app/data/vectorstore
+
+EXPOSE 8080 8501
+
+CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8080"]
+```
+
+关键点：
+- `PYTHONPATH=/app` 对齐本地 `PYTHONPATH=.`，避免容器内 import 路径不一致
+- 安装 `nodejs npm` 是为了外部 Brave MCP server 可用 `npx` 启动
+- `data/` 目录在镜像内预建，但运行时由 compose 挂载出来，保证报告和 checkpoint 可持久化
+
+#### docker-compose.yml
+
+```yaml
+services:
+  api:
+    build: .
+    command: uvicorn app.api:app --host 0.0.0.0 --port 8080
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+      - DOCUMENTS_DIR=/app/data/documents
+      - VECTORSTORE_DIR=/app/data/vectorstore
+      - REPORTS_DIR=/app/data/reports
+      - ARCHIVE_DB=/app/data/archive.db
+      - CHECKPOINTER_DB=/app/data/checkpoints.db
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  ui:
+    build: .
+    command: streamlit run app/streamlit_ui.py --server.address=0.0.0.0 --server.port=8501
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+      - INSIGHTLOOP_API=http://api:8080
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      api:
+        condition: service_healthy
+```
+
+关键点：
+- `api` 和 `ui` 复用同一个镜像，靠 `command` 区分启动命令
+- `INSIGHTLOOP_API=http://api:8080` 使用 compose 内部服务名，不用 `localhost`
+- `depends_on.condition=service_healthy` 避免 UI 先启动后连不上 API
+- `./data:/app/data` 让 `checkpoints.db`、`archive.db`、`data/reports` 都留在宿主机
+
+#### Makefile
+
+```makefile
+test:
+	PYTHONPATH=. pytest tests -q
+
+eval:
+	PYTHONPATH=. python -m evals.run
+
+eval-smoke:
+	PYTHONPATH=. python -m evals.run --limit 1
+
+docker-up:
+	docker compose up --build
+
+docker-config:
+	docker compose config
+```
+
+Makefile 的价值不是“少打几个字”，而是把面试/演示时的入口标准化：测试、评测、API、UI、Docker 都有固定命令。
+
+### 9.8 Docker 使用方式
+
+**1. 准备环境变量**：
+
+```bash
+cd 03_MULTI_AGENT
+cp .env.example .env
+```
+
+至少填：
+- `DEEPSEEK_API_KEY`：Planner / Reflector / Writer / Judge
+- `DASHSCOPE_API_KEY`：DashScope 搜索兜底
+- `TAVILY_API_KEY`：Web 主搜索
+- `GITHUB_TOKEN`：GitHub code evidence，建议填以避免低速率限制
+- `LANGCHAIN_API_KEY`：可选，启用 LangSmith trace
+
+**2. 启动容器**：
+
+```bash
+docker compose up --build
+```
+
+**3. 验证 API**：
+
+```bash
+curl http://localhost:8080/health
+```
+
+预期能看到：
+
+```json
+{
+  "ok": true,
+  "graph_ready": true,
+  "checkpointer": true
+}
+```
+
+**4. 打开 UI**：
+
+浏览器访问：
+
+```text
+http://localhost:8501
+```
+
+**5. 停止服务**：
+
+```bash
+docker compose down
+```
+
+### 9.9 面试可讲点
+
+- **trace 分两层**：`metadata.thread_id/case_id` 解决业务检索，`agent:<node>` 解决节点过滤
 - **judge 看到三方信息（query / plan / evidence / report）而不是只看 report**：避免"报告写得漂亮但实际偏题"的盲区
 - **失败不中断整轮 + tags=["eval"]**：评测产物可对比、可复现、与 demo trace 隔离 —— 工程化思维
 - **本地 + 云端双轨**：Markdown/看板满足无网演示，LangSmith 满足深度归因 —— 面向不同观众
+- **Docker 范围克制**：只打包 03 项目，保留 KB 降级而不强行重构 01_RAG，体现收尾阶段的范围控制
 
 ---
 
