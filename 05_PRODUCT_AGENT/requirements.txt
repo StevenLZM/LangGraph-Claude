@@ -1,0 +1,16 @@
+# LangGraph orchestration
+langgraph>=1.0
+langchain-core
+
+# API
+fastapi
+uvicorn[standard]
+
+# Settings
+pydantic>=2
+pydantic-settings
+python-dotenv
+
+# Test
+pytest
+httpx
