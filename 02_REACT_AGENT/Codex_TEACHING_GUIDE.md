@@ -25,7 +25,9 @@
 │   ├── plan_execute.py       # Plan-and-Execute 图
 │   ├── events.py             # UI 事件模型
 │   └── prompts.py            # 系统提示词
-├── tools/builtin.py          # 6 个 LangChain 工具
+├── tools/builtin.py          # 本地内置 LangChain 工具
+├── tools/mcp_loader.py       # 从 .mcp.json 动态加载 MCP 工具
+├── tools/registry.py         # 合并内置工具和 MCP 工具
 ├── mcp_servers/weather_*     # 内部天气 MCP server 和模拟数据
 ├── sandbox/executor.py       # 受限 Python 执行器
 ├── config/llm.py             # DeepSeek LLM 工厂
@@ -78,16 +80,22 @@ def get_llm(tier: Tier = "max", *, temperature: float = 0.2, streaming: bool = F
 
 ## 3. 工具层：让 LLM 能“行动”
 
-文件：`tools/builtin.py`
+文件：
 
-本项目实现了 6 个工具：
+- `tools/builtin.py`
+- `tools/mcp_loader.py`
+- `tools/registry.py`
+
+本项目的默认工具集由 registry 组合：
 
 ```python
 def get_tools():
-    return [web_search, calculator, python_executor, weather_query, get_datetime, wikipedia_search]
+    builtin_tools = get_builtin_tools()
+    builtin_names = {tool.name for tool in builtin_tools}
+    return [*builtin_tools, *load_mcp_tools(existing_names=builtin_names)]
 ```
 
-每个工具都用 LangChain 的 `@tool` 包装，并用 Pydantic schema 定义参数。例如计算器：
+内置工具用 LangChain 的 `@tool` 包装，并用 Pydantic schema 定义参数。例如计算器：
 
 ```python
 class CalcInput(BaseModel):
@@ -224,7 +232,7 @@ async def _call_tool(name: str, arguments: dict) -> list[TextContent]:
 
 - 天气是典型外部工具能力，适合演示 MCP 的“工具 server”角色。
 - 使用本地模拟数据，不依赖 OpenWeather API key，方便教学、测试和演示。
-- `.mcp.json` 保留了 MCP server 配置形式：
+- `.mcp.json` 是运行时配置，Agent 会从这里启动 server、读取 tool schema、包装成 LangChain tool：
 
 ```json
 {
@@ -239,7 +247,7 @@ async def _call_tool(name: str, arguments: dict) -> list[TextContent]:
 
 面试重点：
 
-> MCP 的价值是把工具能力标准化成独立 server。Agent 不需要知道工具内部怎么实现，只要知道工具 schema 和调用协议。
+> MCP 的价值是把工具能力标准化成独立 server。Agent 不需要知道工具内部怎么实现，只需要从 `.mcp.json` 找到 server，通过 MCP 协议发现 schema 并调用工具。
 
 ---
 
@@ -267,7 +275,7 @@ LLM 节点：
 def agent_node(state: ReactState) -> ReactState:
     messages = state.get("messages", [])
     if not messages or not isinstance(messages[0], SystemMessage):
-        messages = [SystemMessage(content=REACT_SYSTEM_PROMPT), *messages]
+        messages = [SystemMessage(content=system_prompt), *messages]
     response = bound_llm.invoke(messages)
     return {
         "messages": [response],
@@ -335,10 +343,11 @@ class Plan(BaseModel):
 ```python
 def default_planner(user_input: str) -> Plan:
     llm = get_llm("max", temperature=0.1)
+    tool_list = get_tools()
     structured = llm.with_structured_output(Plan, method="json_mode")
     result = structured.invoke(
         [
-            SystemMessage(content=PLAN_SYSTEM_PROMPT),
+            SystemMessage(content=build_plan_system_prompt(tool_list)),
             HumanMessage(content=f"用户任务：{user_input}\n请输出 JSON。"),
         ]
     )
@@ -510,8 +519,8 @@ assert state["iteration_count"] == 2
 
 1. 打开 `README.md`，说明项目目标和两种模式。
 2. 打开 `config/llm.py`，说明 DeepSeek 兼容 OpenAI API 的接入方式。
-3. 打开 `tools/builtin.py`，讲 6 个工具和 `@tool + args_schema`。
-4. 打开 `mcp_servers/weather_server.py`，讲内部天气 MCP。
+3. 打开 `tools/registry.py` 和 `tools/builtin.py`，讲内置工具与 MCP 工具如何合并。
+4. 打开 `tools/mcp_loader.py` 和 `mcp_servers/weather_server.py`，讲 `.mcp.json` 如何动态加载天气 MCP。
 5. 打开 `agent/react.py`，画出 `agent -> tools -> agent` 循环。
 6. 打开 `agent/plan_execute.py`，讲 `planner -> executor -> finalizer`。
 7. 打开 `app.py`，讲 UI 如何展示推理链。
@@ -558,7 +567,7 @@ assert state["iteration_count"] == 2
 
 结合本项目：
 
-> `calculator` 的 `CalcInput` 告诉模型 `expression` 应该是数学表达式；`weather_query` 的 `WeatherInput` 告诉模型需要 `city`。
+> `calculator` 的 `CalcInput` 告诉模型 `expression` 应该是数学表达式；`weather_query` 的 `city` 参数来自 MCP server 返回的 `inputSchema`。
 
 ### Q4：MCP 在项目中解决什么问题？
 

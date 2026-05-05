@@ -1,27 +1,53 @@
-REACT_SYSTEM_PROMPT = """你是一个可以使用工具的 AI 助手。
+from __future__ import annotations
+
+from typing import Any
+
+
+def _tool_name(tool: Any) -> str:
+    return str(getattr(tool, "name", "unknown"))
+
+
+def _tool_description(tool: Any) -> str:
+    description = str(getattr(tool, "description", "") or "无描述")
+    return description.splitlines()[0]
+
+
+def _tool_lines(tools: list[Any]) -> str:
+    if not tools:
+        return "- none：当前没有可用工具"
+    return "\n".join(f"- {_tool_name(tool)}: {_tool_description(tool)}" for tool in tools)
+
+
+def build_react_system_prompt(tools: list[Any]) -> str:
+    return f"""你是一个可以使用工具的 AI 助手。
 
 可用工具：
-- web_search：查询实时互联网信息。
-- calculator：精确数学计算。数学题必须调用它。
-- python_executor：在受限沙箱中运行 Python 代码。
-- weather_query：通过内部天气 MCP 查询天气。
-- get_datetime：查询当前日期时间。
-- wikipedia_search：查询百科背景知识。
+{_tool_lines(tools)}
 
 规则：
 1. 只在需要时调用工具，不为了演示而调用工具。
-2. 实时信息优先 web_search，天气优先 weather_query，数学优先 calculator。
-3. 工具失败时换一种方式或明确说明限制。
-4. 最终答案要综合工具结果，中文表达清晰。
+2. 对实时、天气、数学、代码执行等任务，优先选择当前工具列表中语义最匹配的工具。
+3. 如果用户问题依赖真实当前日期或时间（例如实时行情、最新新闻、今天/当前状态），先调用 get_datetime 确认真实当前日期时间；若上下文已有 get_datetime 工具结果，基于该结果构造 web_search 查询，禁止使用模型记忆中的日期。
+4. 工具失败时换一种方式或明确说明限制。
+5. 最终答案要综合工具结果，中文表达清晰。
 """
 
-PLAN_SYSTEM_PROMPT = """你是 Plan-and-Execute 智能体的规划器。
+
+def build_plan_system_prompt(tools: list[Any]) -> str:
+    tool_names = "、".join([_tool_name(tool) for tool in tools] + ["none"])
+    return f"""你是 Plan-and-Execute 智能体的规划器。
 
 把用户任务拆成 1 到 5 个可执行步骤。每个步骤包含：
 - id：从 1 开始的整数
 - objective：该步骤要完成的事情
-- suggested_tool：建议工具名，只能从 web_search、calculator、python_executor、weather_query、get_datetime、wikipedia_search、none 中选择
+- suggested_tool：建议工具名，只能从当前可用工具名中选择
+
+当前可用工具名：{tool_names}
 
 必须输出 JSON，格式为：
-{"steps":[{"id":1,"objective":"...","suggested_tool":"..."}]}
+{{"steps":[{{"id":1,"objective":"...","suggested_tool":"..."}}]}}
 """
+
+
+REACT_SYSTEM_PROMPT = build_react_system_prompt([])
+PLAN_SYSTEM_PROMPT = build_plan_system_prompt([])

@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent.events import AgentEvent
-from app import format_event_for_display
+import app
+from agent.events import AgentEvent, AgentRunResult
+from app import TRACE_HISTORY_TITLE, clear_previous_trace, format_event_for_display
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -17,6 +18,40 @@ def test_format_event_for_display_handles_tool_call():
     assert display["label"] == "调用工具: calculator"
     assert display["language"] == "json"
     assert "expression" in display["body"]
+
+
+def test_run_passes_event_callback_to_selected_mode(monkeypatch):
+    streamed_events = []
+
+    def collect_event(event: AgentEvent) -> None:
+        streamed_events.append(event)
+
+    def fake_run_react(prompt: str, *, event_callback=None):
+        assert prompt == "hi"
+        assert event_callback is collect_event
+        return AgentRunResult(final_answer="ok", events=[], raw_state={})
+
+    monkeypatch.setattr(app, "run_react", fake_run_react)
+
+    result = app._run("ReAct", "hi", event_callback=collect_event)
+
+    assert result.final_answer == "ok"
+
+
+def test_clear_previous_trace_removes_stale_last_events():
+    session_state = {
+        "last_events": [AgentEvent(type="error", title="执行停止", content="达到最大工具调用步数")],
+        "messages": [{"role": "user", "content": "旧问题"}],
+    }
+
+    clear_previous_trace(session_state)
+
+    assert "last_events" not in session_state
+    assert session_state["messages"] == [{"role": "user", "content": "旧问题"}]
+
+
+def test_sidebar_trace_title_marks_trace_as_previous_run():
+    assert TRACE_HISTORY_TITLE == "上一轮推理链"
 
 
 def test_project_files_document_deepseek_and_internal_weather_mcp():

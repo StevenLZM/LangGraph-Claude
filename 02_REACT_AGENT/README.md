@@ -18,12 +18,14 @@ streamlit run app.py
 
 ## 工具
 
+默认工具集由 `tools/registry.py` 统一加载：本地内置工具来自 `tools/builtin.py`，MCP 工具从 `.mcp.json` 动态发现并转换为 LangChain tool。
+
 - `web_search`：实时互联网搜索，依赖 Tavily。
 - `calculator`：安全 AST 数学计算器。
 - `python_executor`：受限 Python 代码执行器，禁止导入、文件系统和网络访问。
-- `weather_query`：内部天气 MCP，实现位于 `mcp_servers/weather_server.py`。
 - `get_datetime`：指定时区日期时间。
 - `wikipedia_search`：维基百科摘要查询。
+- `weather_query`：由 `.mcp.json` 启动 `mcp_servers.weather_server` 后动态加载。
 
 ## 测试
 

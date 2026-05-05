@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import ast
-import asyncio
 import math
 import os
+import re
+import unicodedata
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -12,8 +13,10 @@ from zoneinfo import ZoneInfo
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from mcp_servers.weather_data import format_weather, get_weather
 from sandbox.executor import run_python_code
+from config.settings import settings
+
+_GARBLED_CONTENT_FALLBACK = "摘要不可用（搜索结果内容疑似乱码，请打开来源核对）。"
 
 
 class SearchInput(BaseModel):
@@ -21,10 +24,40 @@ class SearchInput(BaseModel):
     max_results: int = Field(default=3, ge=1, le=5, description="返回结果数量")
 
 
+def _looks_garbled_search_content(text: str) -> bool:
+    sample = text[:300]
+    chars = [ch for ch in sample if not ch.isspace()]
+    if len(chars) < 30:
+        return False
+    if "\ufffd" in sample:
+        return True
+
+    letters = sum(ch.isalpha() for ch in chars)
+    cjk_or_latin = sum("\u4e00" <= ch <= "\u9fff" or "a" <= ch.lower() <= "z" for ch in chars)
+    digits = sum(ch.isdigit() for ch in chars)
+    punctuation = sum(unicodedata.category(ch).startswith("P") for ch in chars)
+    suspicious = sum(unicodedata.category(ch)[0] in {"C", "M", "S"} for ch in chars)
+    total = len(chars)
+
+    if suspicious / total > 0.08 and cjk_or_latin / total < 0.35:
+        return True
+    return (digits + punctuation + suspicious) / total > 0.75 and letters / total < 0.25
+
+
+def _format_search_content(content: Any, *, limit: int = 300) -> str:
+    text = re.sub(r"\s+", " ", str(content or "")).strip()
+    text = "".join(ch for ch in text if ch.isprintable()).strip()
+    if not text:
+        return "摘要不可用。"
+    if _looks_garbled_search_content(text):
+        return _GARBLED_CONTENT_FALLBACK
+    return text[:limit]
+
+
 @tool("web_search", args_schema=SearchInput)
 def web_search(query: str, max_results: int = 3) -> str:
     """搜索互联网获取实时信息，如新闻、股价、当前事件。"""
-    api_key = os.getenv("TAVILY_API_KEY")
+    api_key = os.getenv("TAVILY_API_KEY") or settings.tavily_api_key
     if not api_key:
         return "搜索工具未配置：请设置 TAVILY_API_KEY 后再查询实时互联网信息。"
     try:
@@ -40,7 +73,7 @@ def web_search(query: str, max_results: int = 3) -> str:
     results = []
     for item in response.get("results", []):
         title = item.get("title", "无标题")
-        content = str(item.get("content", ""))[:300]
+        content = _format_search_content(item.get("content", ""))
         url = item.get("url", "")
         results.append(f"标题: {title}\n内容: {content}\n来源: {url}")
     return "\n\n---\n\n".join(results) if results else "未搜索到相关结果。"
@@ -109,18 +142,6 @@ def python_executor(code: str) -> str:
     return run_python_code(code)
 
 
-class WeatherInput(BaseModel):
-    city: str = Field(description="城市名称，支持中文，如北京、上海")
-    units: str = Field(default="metric", description="metric=摄氏度，imperial=华氏度")
-
-
-@tool("weather_query", args_schema=WeatherInput)
-def weather_query(city: str, units: str = "metric") -> str:
-    """通过内部天气 MCP 实现查询天气和户外活动建议。"""
-    data = asyncio.run(get_weather(city, units))
-    return format_weather(data)
-
-
 class DatetimeInput(BaseModel):
     timezone: str = Field(default="Asia/Shanghai", description="IANA 时区名")
 
@@ -161,5 +182,10 @@ def wikipedia_search(query: str) -> str:
         return f"Wikipedia 查询失败: {exc}"
 
 
+def get_builtin_tools():
+    return [web_search, calculator, python_executor, get_datetime, wikipedia_search]
+
+
 def get_tools():
-    return [web_search, calculator, python_executor, weather_query, get_datetime, wikipedia_search]
+    """Backward-compatible alias for local built-in tools only."""
+    return get_builtin_tools()
