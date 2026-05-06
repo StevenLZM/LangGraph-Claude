@@ -19,6 +19,20 @@ def _chat(message: str, session_id: str = "session_001") -> dict:
     return response.json()
 
 
+def _chat_for_user(user_id: str, session_id: str, message: str) -> dict:
+    client = TestClient(app)
+    response = client.post(
+        "/chat",
+        json={
+            "user_id": user_id,
+            "session_id": session_id,
+            "message": message,
+        },
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
 def test_chat_answers_order_status():
     payload = _chat("我的订单 ORD123456 到哪了？")
 
@@ -82,3 +96,42 @@ def test_chat_rejects_empty_message():
     )
 
     assert response.status_code == 422
+
+
+def test_session_endpoint_returns_persisted_conversation():
+    client = TestClient(app)
+    session_id = "persisted_session_001"
+
+    _chat("我的订单 ORD123456 到哪了？", session_id=session_id)
+    response = client.get(f"/sessions/{session_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session_id"] == session_id
+    assert payload["user_id"] == "user_001"
+    assert payload["total_turns"] == 1
+    assert payload["window_size"] == 2
+    assert payload["messages"][0]["role"] == "user"
+    assert payload["messages"][-1]["role"] == "assistant"
+    assert "ORD123456" in payload["messages"][-1]["content"]
+
+
+def test_user_memory_recalls_across_sessions_and_can_be_deleted():
+    client = TestClient(app)
+    user_id = "memory_user_001"
+
+    first = _chat_for_user(user_id, "memory_seed_session", "我喜欢顺丰配送，以后发货优先顺丰")
+    assert "已记住" in first["answer"]
+
+    recalled = _chat_for_user(user_id, "memory_recall_session", "你记得我的配送偏好吗？")
+    assert "顺丰" in recalled["answer"]
+    assert recalled["user_memories"]
+
+    delete_response = client.delete(f"/users/{user_id}/memories")
+    assert delete_response.status_code == 200
+    assert delete_response.json()["deleted"] >= 1
+
+    after_delete = _chat_for_user(user_id, "memory_after_delete_session", "你记得我的配送偏好吗？")
+    assert after_delete["user_memories"] == []
+    assert "顺丰" not in after_delete["answer"]
+    assert "暂时没有" in after_delete["answer"]

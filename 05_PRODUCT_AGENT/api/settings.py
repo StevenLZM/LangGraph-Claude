@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     redis_url: str = ""
     database_url: str = ""
     checkpointer_db: str = str(ROOT / "data" / "sessions.db")
+    memory_db: str = str(ROOT / "data" / "memory.db")
 
     langchain_tracing_v2: bool = False
     langchain_endpoint: str = "https://api.smith.langchain.com"

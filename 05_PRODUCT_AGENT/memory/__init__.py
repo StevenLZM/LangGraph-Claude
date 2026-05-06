@@ -1,1 +1,1 @@
-"""Memory managers will be implemented in M2."""
+"""Memory managers for short-term context, sessions, and user memories."""

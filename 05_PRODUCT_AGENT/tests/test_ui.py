@@ -15,3 +15,5 @@ def test_root_serves_customer_service_workspace():
     assert "智能客服工作台" in response.text
     assert "/chat" in response.text
     assert "订单上下文" in response.text
+    assert "用户记忆" in response.text
+    assert "清除记忆" in response.text

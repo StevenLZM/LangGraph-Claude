@@ -6,25 +6,25 @@
 
 - M0：项目骨架、FastAPI 健康检查、基础配置、最小 LangGraph 图、pytest 测试。
 - M1：`POST /chat`、内置客服 UI、Mock 订单/物流/商品/退款工具、规则型客服 Agent、转人工标记、退款二次确认、测试覆盖。
+- M2：短期记忆窗口、SQLite 会话状态、用户长期记忆、`GET /sessions/{session_id}`、`DELETE /users/{user_id}/memories`。
 
 尚未完成范围：
 
-- M2 记忆系统：短期窗口、会话恢复、长期用户记忆。
 - M3 限流与弹性：Redis 限流、Token 预算、LLM fallback、熔断。
 - M4 可观测性：Prometheus、LangSmith、质量评估。
 - M5 Docker Compose 和压测。
 
-面试时要明确：当前 M1 是“离线可测的客服 MVP”，不是完整生产级系统。
+面试时要明确：当前 M2 是“离线可测的客服 MVP + 轻量记忆系统”，不是完整生产级系统。
 
 ---
 
 ## 1. 项目一句话介绍
 
-`05_PRODUCT_AGENT` 是一个生产级 AI 客服系统的渐进式实现。当前阶段先做出可演示、可测试的客服闭环：用户在 UI 输入问题，FastAPI 接收请求，LangGraph 组织状态流转，规则型客服决策调用 Mock 业务工具，最后返回回答、订单上下文、转人工状态和质量分占位。
+`05_PRODUCT_AGENT` 是一个生产级 AI 客服系统的渐进式实现。当前阶段已经做出可演示、可测试的客服闭环：用户在 UI 输入问题，FastAPI 接收请求，加载会话历史和用户记忆，LangGraph 组织状态流转，规则型客服决策调用 Mock 业务工具，最后返回回答、订单上下文、转人工状态、用户记忆和质量分占位。
 
 面试讲法：
 
-> 这个项目不是从一开始就接真实 LLM 和 Redis/Postgres，而是先把客服业务闭环、接口契约、状态结构、测试基线和 UI 演示跑通。这样后续接入记忆、限流、监控、真实 LLM 时，每一步都有稳定的验收点。
+> 这个项目不是从一开始就接真实 LLM 和 Redis/Postgres，而是先把客服业务闭环、接口契约、状态结构、测试基线、UI 演示和轻量记忆系统跑通。这样后续接入限流、监控、真实 LLM 时，每一步都有稳定的验收点。
 
 ---
 
@@ -47,13 +47,18 @@
 │   ├── service.py       # 规则型客服决策
 │   ├── tools.py         # Mock 业务工具
 │   └── prompts.py       # 客服提示词占位
+├── memory/
+│   ├── short_term.py    # 摘要 + 最近 8 轮的短期窗口
+│   ├── session_store.py # SQLite 会话状态
+│   └── long_term.py     # SQLite 用户长期记忆
 ├── tests/
 │   ├── test_chat_flow.py      # /chat 客服闭环测试
 │   ├── test_tools.py          # Mock 工具测试
 │   ├── test_ui.py             # UI 页面测试
 │   ├── test_graph_skeleton.py # LangGraph 骨架测试
 │   ├── test_health.py         # 健康检查测试
-│   └── test_settings.py       # 配置默认值测试
+│   ├── test_settings.py       # 配置默认值测试
+│   └── test_memory.py         # M2 记忆系统测试
 ├── README.md
 └── DEV_PROGRESS.md
 ```
@@ -61,10 +66,10 @@
 最重要的依赖方向：
 
 ```text
-api -> agent.graph -> agent.nodes -> agent.service -> agent.intent / agent.tools
+api -> memory + agent.graph -> agent.nodes -> agent.service -> agent.intent / agent.tools
 ```
 
-这个依赖方向说明：API 层不直接写客服业务规则，业务规则集中在 `agent/service.py`，业务数据访问集中在 `agent/tools.py`。
+这个依赖方向说明：API 层负责协议、会话和记忆接入，不直接写客服业务规则；业务规则集中在 `agent/service.py`，业务数据访问集中在 `agent/tools.py`。
 
 ---
 
@@ -78,6 +83,9 @@ api -> agent.graph -> agent.nodes -> agent.service -> agent.intent / agent.tools
   -> 前端 fetch("/chat")
   -> api/main.py::chat()
   -> ChatRequest 校验输入
+  -> SessionStore 加载历史会话
+  -> UserMemoryManager 召回用户长期记忆
+  -> ContextWindowManager 做短期窗口裁剪
   -> customer_service_graph.invoke(...)
   -> agent/graph.py 进入 LangGraph
   -> context_loader_node 初始化上下文
@@ -85,8 +93,10 @@ api -> agent.graph -> agent.nodes -> agent.service -> agent.intent / agent.tools
   -> handle_customer_message 做意图判断
   -> get_logistics / get_order 读取 Mock 数据
   -> finalizer_node 计算窗口大小、轮次、响应耗时
-  -> ChatResponse 返回 answer / order_context / handoff / quality_score
-  -> UI 更新聊天区、订单上下文和运行状态
+  -> SessionStore 保存本轮会话
+  -> UserMemoryManager 提取并保存关键长期记忆
+  -> ChatResponse 返回 answer / order_context / handoff / memories / quality_score
+  -> UI 更新聊天区、用户记忆、会话摘要、订单上下文和运行状态
 ```
 
 流程和代码对照：
@@ -96,6 +106,9 @@ api -> agent.graph -> agent.nodes -> agent.service -> agent.intent / agent.tools
 | 页面入口 | `api/main.py::customer_service_workspace` | 返回 `api/ui.py` 里的静态 HTML |
 | 前端提交 | `api/ui.py::sendMessage` | 用 `fetch("/chat")` 调接口 |
 | 请求校验 | `api/schemas.py::ChatRequest` | 校验 `user_id`、`session_id`、`message` |
+| 会话加载 | `memory/session_store.py::load_session` | 读取同一 `session_id` 的历史消息 |
+| 记忆召回 | `memory/long_term.py::load_memories` | 按用户和当前问题召回长期记忆 |
+| 窗口裁剪 | `memory/short_term.py::trim` | 摘要早期消息，保留最近 8 轮 |
 | API 进入图 | `api/main.py::chat` | 把用户输入包装成 `HumanMessage` |
 | 图编排 | `agent/graph.py::build_customer_service_graph` | 定义 `context_loader -> agent -> finalizer` |
 | 状态初始化 | `agent/nodes.py::context_loader_node` | 补齐状态默认值、记录开始时间 |
@@ -103,11 +116,13 @@ api -> agent.graph -> agent.nodes -> agent.service -> agent.intent / agent.tools
 | 意图判断 | `agent/service.py::handle_customer_message` | 按优先级处理转人工、退款、物流、订单、商品 |
 | 工具执行 | `agent/tools.py` | 返回 Mock 订单、物流、商品和退款结果 |
 | 响应收尾 | `agent/nodes.py::finalizer_node` | 计算消息窗口、轮次、响应时间 |
+| 会话保存 | `memory/session_store.py::save_session` | 持久化消息窗口和元数据 |
+| 记忆保存 | `memory/long_term.py::save_from_turn` | 抽取偏好、投诉等长期记忆 |
 | 响应模型 | `api/schemas.py::ChatResponse` | 固定 `/chat` 输出结构 |
 
 面试重点：
 
-> 这里的关键不是“写了几个 if”，而是把接口、状态机、业务决策、工具访问和 UI 展示拆成了不同层。这样后续把规则型决策替换成真实 LLM 或 ToolNode 时，API 契约和测试可以基本保持稳定。
+> 这里的关键不是“写了几个 if”，而是把接口、记忆、状态机、业务决策、工具访问和 UI 展示拆成了不同层。这样后续把 SQLite 换成 pgvector、把规则型决策换成真实 LLM 或 ToolNode 时，API 契约和测试可以基本保持稳定。
 
 ---
 
@@ -127,7 +142,7 @@ app = FastAPI(title=settings.app_name, version=settings.app_version)
 
 - 服务启动时构建一份 LangGraph。
 - `/chat` 请求复用这份图，不在每次请求里重新组装节点。
-- 当前图还没有持久化 checkpointer，所以 `session_id` 主要用于接口和后续 M2 扩展。
+- 当前没有使用 LangGraph checkpointer，但已经通过 `SessionStore` 把 `session_id` 对应的消息窗口持久化到 SQLite。
 
 页面入口：
 
@@ -158,7 +173,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
 - `ChatRequest` 负责输入校验。
 - 用户文本被转成 LangChain 的 `HumanMessage`。
-- `thread_id` 使用 `session_id`，这是为 M2 会话状态持久化预留的接口形状。
+- `thread_id` 使用 `session_id`，同时 API 层用同一个 `session_id` 加载和保存 SQLite 会话。
 - 当前 `build_customer_service_graph()` 没有传入 checkpointer，所以它还不保存历史会话。
 
 返回响应：
@@ -267,7 +282,7 @@ START -> context_loader -> agent -> finalizer -> END
 
 为什么不用普通函数直接写完？
 
-- M1 虽然简单，但 M2 要加入记忆加载和裁剪。
+- M1 虽然简单，但 M2 已经加入记忆加载、窗口裁剪和会话持久化。
 - M3 要加入限流、预算、LLM fallback。
 - M4 要加入质量评估和指标记录。
 - LangGraph 提前把“客服系统是状态流转”这个架构固定下来。
@@ -726,11 +741,130 @@ def test_root_serves_customer_service_workspace():
 
 ---
 
-## 14. 当前实现和设计稿的差异
+## 14. M2 记忆系统：短期、会话、长期三层
+
+M2 的核心变化是把“每次请求都像第一次见用户”升级为“能管理当前会话，也能跨会话记住用户关键信息”。
+
+### 14.1 短期记忆：ContextWindowManager
+
+文件：`memory/short_term.py`
+
+核心策略：
+
+```python
+recent_messages = list(messages[-self.max_messages :])
+old_messages = list(messages[: -self.max_messages])
+summary = self._summarize(old_messages)
+trimmed = [SystemMessage(content=summary)] + recent_messages
+```
+
+当前默认保留最近 16 条消息，也就是最近 8 轮用户/客服对话。更早的消息会被压缩成一条 `SystemMessage`：
+
+```text
+[早期对话摘要] 已压缩 N 条早期消息...
+```
+
+为什么这样做：
+
+- 避免 100 轮对话把上下文无限撑大。
+- 保留最近对话的细节。
+- 用摘要保留早期对话的关键背景。
+- 后续接真实 LLM 时，可以把摘要作为系统上下文。
+
+对应测试：
+
+```python
+def test_context_window_summarizes_old_messages_and_keeps_recent_turns():
+    ...
+    assert isinstance(trimmed[0], SystemMessage)
+    assert len(trimmed) <= 17
+    assert manager.count_tokens(trimmed) <= 260
+```
+
+面试重点：
+
+> 短期记忆解决的是当前会话的上下文窗口问题，不是用户画像。它应该控制 token 增长，保留最近对话，并把早期内容压缩成摘要。
+
+### 14.2 会话状态：SessionStore
+
+文件：`memory/session_store.py`
+
+会话保存：
+
+```python
+session_store.save_session(
+    session_id=req.session_id,
+    user_id=req.user_id,
+    messages=result.get("messages", []),
+    metadata={
+        "summary": memory_summary,
+        "needs_human_transfer": result.get("needs_human_transfer", False),
+        "transfer_reason": result.get("transfer_reason", ""),
+    },
+)
+```
+
+会话查询：
+
+```python
+@app.get("/sessions/{session_id}")
+async def get_session(session_id: str) -> dict:
+    session = session_store.get_public_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    return session
+```
+
+当前没有直接使用 LangGraph 的 SQLite checkpointer，而是在 API 层用 SQLite 保存消息窗口和元数据。这个实现更轻量，足够满足 M2 的“服务重启后可查询或恢复会话状态”要求。
+
+面试重点：
+
+> 会话状态解决的是同一个 `session_id` 的连续对话和状态查询。它和长期用户记忆不是一回事，不能混在一个消息列表里。
+
+### 14.3 长期记忆：UserMemoryManager
+
+文件：`memory/long_term.py`
+
+当前长期记忆保存三类信息：
+
+- 偏好：例如“我喜欢顺丰配送”。
+- 投诉：例如“我对物流很不满”。
+- 用户资料：例如“我叫张三”。
+
+保存入口：
+
+```python
+user_memory_manager.save_from_turn(req.user_id, req.message, answer)
+```
+
+召回入口：
+
+```python
+user_memories = user_memory_manager.load_memories(req.user_id, req.message)
+```
+
+删除入口：
+
+```python
+@app.delete("/users/{user_id}/memories")
+async def delete_user_memories(user_id: str) -> DeleteMemoriesResponse:
+    deleted = user_memory_manager.delete_memories(user_id)
+    return DeleteMemoriesResponse(user_id=user_id, deleted=deleted)
+```
+
+当前检索是轻量关键词匹配，不是向量检索。这是刻意的第一版选择：接口先稳定，后续可以把 SQLite 实现替换成 Mem0 + pgvector。
+
+面试重点：
+
+> 长期记忆解决的是跨会话用户画像和历史事件。它必须有删除接口，否则无法满足隐私合规和用户可控性。
+
+---
+
+## 15. 当前实现和设计稿的差异
 
 这一节面试时很重要，因为它能体现你对项目状态诚实且清楚。
 
-### 14.1 当前没有真实 LLM
+### 15.1 当前没有真实 LLM
 
 当前是规则型客服决策：
 
@@ -746,7 +880,7 @@ agent_node -> LLM tool calling -> ToolNode -> LLM final answer
 
 原因是 M1 目标是稳定闭环和测试基线，真实 LLM 放到后续迭代更合适。
 
-### 14.2 当前没有持久化会话
+### 15.2 当前没有 LangGraph Checkpointer
 
 虽然 `/chat` 传了：
 
@@ -754,11 +888,11 @@ agent_node -> LLM tool calling -> ToolNode -> LLM final answer
 config={"configurable": {"thread_id": req.session_id}}
 ```
 
-但 `build_customer_service_graph()` 当前没有传入 SQLite checkpointer，所以服务重启或多轮状态还不会恢复。
+但 `build_customer_service_graph()` 当前没有传入 LangGraph SQLite checkpointer。M2 用 API 层的 `SessionStore` 保存消息窗口和元数据，因此可以通过 `/sessions/{session_id}` 查询和恢复会话材料，但还不是 LangGraph 原生 checkpoint/resume。
 
-这正是 M2 要做的内容。
+这为后续接入 LangGraph checkpointer 留出了空间。
 
-### 14.3 当前工具不是 LangChain ToolNode
+### 15.3 当前工具不是 LangChain ToolNode
 
 当前工具是普通 Python 函数，由 `agent/service.py` 直接调用。
 
@@ -776,7 +910,7 @@ agent -> tools -> agent -> finalizer
 
 或者保留规则 guardrail，让 LLM 只处理表达和复杂语义。
 
-### 14.4 质量分和 Token 是占位
+### 15.4 质量分和 Token 是占位
 
 当前：
 
@@ -787,23 +921,23 @@ M4 才会接入真实质量评估和指标系统。
 
 面试讲法：
 
-> 我会明确区分已实现和计划实现。当前 M1 的价值是把接口、图、业务规则、工具和 UI 闭环打通；生产级能力会在 M2-M5 逐层补齐。
+> 我会明确区分已实现和计划实现。当前 M2 的价值是把接口、图、业务规则、工具、UI 和轻量记忆闭环打通；生产级限流、弹性、观测和部署会在 M3-M5 逐层补齐。
 
 ---
 
-## 15. 面试高频问题与回答
+## 16. 面试高频问题与回答
 
 ### Q1：为什么这个项目叫生产级 Agent，但现在不用真实 LLM？
 
 回答：
 
-> 生产级不等于第一步就调用真实模型。生产级更重要的是接口稳定、行为可测、安全边界清楚、可观测字段预留和迭代路径明确。M1 先用离线规则跑通客服闭环，保证退款确认、转人工、订单上下文这些关键行为稳定，再逐步接入真实 LLM、记忆、限流和监控。
+> 生产级不等于第一步就调用真实模型。生产级更重要的是接口稳定、行为可测、安全边界清楚、可观测字段预留和迭代路径明确。M1 先用离线规则跑通客服闭环，M2 加入轻量记忆系统，后续再逐步接入真实 LLM、限流和监控。
 
 ### Q2：为什么要用 LangGraph，而不是 FastAPI 里一个函数写完？
 
 回答：
 
-> 因为客服 Agent 后续会变成多节点状态流：记忆加载、上下文裁剪、LLM 推理、工具调用、质量评估、记忆保存、转人工。M1 的图虽然只有三步，但已经把状态结构和节点边界固定了，后续扩展不用重写 API 契约。
+> 因为客服 Agent 会演进成多节点状态流：记忆加载、上下文裁剪、LLM 推理、工具调用、质量评估、记忆保存、转人工。当前图虽然仍是线性三步，但 API 层已经接入 M2 记忆系统，后续扩展不用重写接口契约。
 
 ### Q3：退款为什么要二次确认？
 
@@ -829,21 +963,27 @@ M4 才会接入真实质量评估和指标系统。
 
 > 这些是为生产运营预留的字段。M1 是占位值，M4 会接真实评估和 Prometheus 指标。提前固定字段可以让 UI、测试和调用方先适配生产系统需要关注的指标。
 
-### Q7：当前项目的最大短板是什么？
+### Q7：M2 的长期记忆和短期记忆有什么区别？
 
 回答：
 
-> 最大短板是还没有 M2-M4 的生产能力：会话状态不持久、没有长期记忆、没有 Redis 限流、没有真实 LLM fallback、没有 Prometheus 和 LangSmith。当前 M1 只能说明客服闭环和工程骨架成立，不能宣称已经能承接真实流量。
+> 短期记忆服务于当前会话，重点是控制上下文窗口，所以它会摘要早期消息并保留最近 8 轮。长期记忆服务于跨会话用户画像，比如配送偏好和投诉记录，必须能保存、召回和删除。
 
-### Q8：如果继续开发 M2，你会怎么做？
+### Q8：当前项目的最大短板是什么？
 
 回答：
 
-> 我会先接短期记忆和 SQLite checkpointer，让 `session_id` 真正能恢复会话；再做消息窗口裁剪和摘要；最后用稳定接口封装长期记忆，先支持保存、检索和删除用户记忆。测试会重点覆盖多轮对话、服务重启恢复和删除后不可召回。
+> 最大短板是还没有 M3-M4 的生产能力：没有 Redis 限流、没有 Token 预算、没有真实 LLM fallback、没有 Prometheus 和 LangSmith。当前 M2 只能说明客服闭环和轻量记忆成立，不能宣称已经能承接真实流量。
+
+### Q9：如果继续开发 M3，你会怎么做？
+
+回答：
+
+> 我会先做 Redis 用户级限流，再做单次和全局 Token 预算，最后加 `ResilientLLM` 的重试、备用模型和熔断器。测试会重点覆盖第 11 次请求返回 429、预算超限降级、主模型失败切备用模型和连续失败后的熔断。
 
 ---
 
-## 16. 面试时可以画的架构图
+## 17. 面试时可以画的架构图
 
 ```text
 Browser UI
@@ -856,7 +996,7 @@ FastAPI UI Page
    v
 FastAPI API Layer
    |
-   | ChatRequest -> HumanMessage
+   | load session + load memories + ChatRequest -> HumanMessage
    v
 LangGraph StateGraph
    |
@@ -874,20 +1014,24 @@ ChatResponse
    |
    | answer + context + handoff + metrics
    v
+SessionStore / UserMemoryManager
+   |
+   | save session + extract memory
+   v
 Browser UI
 ```
 
 这张图的讲解重点：
 
 - UI 和 API 在同一个 FastAPI 服务中。
-- API 不直接做业务判断，而是进入 LangGraph。
+- API 不直接做业务判断，而是负责协议转换、会话/记忆接入，再进入 LangGraph。
 - LangGraph 当前是线性图，但为后续记忆、工具节点、质量评估预留了节点扩展。
 - 业务工具返回结构化数据，不只是拼接字符串。
 - 响应包含客服答案和运营字段。
 
 ---
 
-## 17. 你应该能现场演示什么
+## 18. 你应该能现场演示什么
 
 启动：
 
@@ -909,7 +1053,9 @@ http://127.0.0.1:8000/
 3. 点击“商品库存”，观察 `order_context` 为空但回答正常。
 4. 点击“退款申请”，说明不会直接提交。
 5. 输入：`我确认退款 ORD123456`，说明确认后才提交。
-6. 点击“转人工”，观察右侧转人工状态和原因。
+6. 点击“保存偏好”，再点击“召回记忆”，观察用户记忆。
+7. 点击“清除记忆”，再召回一次，说明删除后不再返回旧记忆。
+8. 点击“转人工”，观察右侧转人工状态和原因。
 
 接口演示：
 
@@ -925,18 +1071,16 @@ curl -X POST http://127.0.0.1:8000/chat \
 pytest tests -q
 ```
 
-当前应通过 17 个测试。
+当前应通过 22 个测试。
 
 ---
 
-## 18. 常见误区
+## 19. 常见误区
 
 ### 误区 1：把当前项目说成已经生产可用
 
-不准确。当前只是 M1。真实生产还缺：
+不准确。当前只是 M2。真实生产还缺：
 
-- 会话持久化
-- 长期记忆
 - 限流和 Token 预算
 - LLM fallback
 - 监控指标
@@ -946,7 +1090,7 @@ pytest tests -q
 
 当前不是 LLM 推理型 Agent，而是 LangGraph 编排下的规则型客服 MVP。更准确的说法是：
 
-> 当前 M1 用规则型决策模拟客服 Agent 的业务闭环，后续会把 agent 节点替换或扩展为真实 LLM + tool calling。
+> 当前 M2 用规则型决策模拟客服 Agent 的业务闭环，并接入轻量记忆系统；后续会把 agent 节点替换或扩展为真实 LLM + tool calling。
 
 ### 误区 3：忽略测试
 
@@ -964,14 +1108,14 @@ pytest tests -q
 
 ---
 
-## 19. 复盘总结
+## 20. 复盘总结
 
 当前 05 项目的已开发部分可以总结为三句话：
 
 1. M0 建好了可运行、可测试、可扩展的 FastAPI + LangGraph 骨架。
 2. M1 跑通了客服核心闭环：订单、物流、商品、退款确认、转人工和 UI 演示。
-3. 当前实现保持离线可测，把生产级能力拆成后续迭代逐步加入，而不是一开始堆满不可验证的基础设施。
+3. M2 加入了短期记忆、SQLite 会话状态和用户长期记忆，支持跨会话偏好召回和删除。
 
 面试收尾表达：
 
-> 我在这个项目里关注的不是“让模型回答一句话”，而是把客服 Agent 做成一个可以持续演进的服务：有稳定 API、有显式状态、有工具边界、有安全规则、有 UI 演示、有测试基线。M1 先验证闭环，后续 M2-M5 再逐层加入记忆、限流、弹性、观测和部署能力。
+> 我在这个项目里关注的不是“让模型回答一句话”，而是把客服 Agent 做成一个可以持续演进的服务：有稳定 API、有显式状态、有工具边界、有安全规则、有 UI 演示、有记忆接口、有测试基线。M1 验证客服闭环，M2 验证记忆系统，后续 M3-M5 再逐层加入限流、弹性、观测和部署能力。

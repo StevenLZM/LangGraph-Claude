@@ -7,7 +7,9 @@ from agent.intent import (
     extract_order_id,
     is_human_transfer_request,
     is_logistics_query,
+    is_memory_recall_query,
     is_order_query,
+    is_preference_statement,
     is_product_query,
     is_refund_confirmed,
     is_refund_request,
@@ -25,7 +27,8 @@ class CustomerServiceDecision:
     tool_name: str
 
 
-def handle_customer_message(message: str) -> CustomerServiceDecision:
+def handle_customer_message(message: str, user_memories: list[str] | None = None) -> CustomerServiceDecision:
+    user_memories = list(user_memories or [])
     order_id = extract_order_id(message)
 
     if is_human_transfer_request(message):
@@ -36,6 +39,17 @@ def handle_customer_message(message: str) -> CustomerServiceDecision:
             transfer_reason="用户要求人工或涉及投诉/法律问题",
             quality_score=82,
             tool_name="human_transfer",
+        )
+
+    if user_memories and is_memory_recall_query(message):
+        memory_text = "；".join(user_memories[:3])
+        return CustomerServiceDecision(
+            answer=f"我记得这些信息：{memory_text}",
+            order_context=None,
+            needs_human_transfer=False,
+            transfer_reason="",
+            quality_score=86,
+            tool_name="load_user_memory",
         )
 
     if is_refund_request(message):
@@ -122,6 +136,26 @@ def handle_customer_message(message: str) -> CustomerServiceDecision:
             transfer_reason="",
             quality_score=84,
             tool_name="get_product",
+        )
+
+    if is_memory_recall_query(message):
+        return CustomerServiceDecision(
+            answer="我暂时没有查到你已保存的相关记忆。",
+            order_context=None,
+            needs_human_transfer=False,
+            transfer_reason="",
+            quality_score=72,
+            tool_name="load_user_memory",
+        )
+
+    if is_preference_statement(message):
+        return CustomerServiceDecision(
+            answer="已记住你的偏好，后续服务会优先参考这条信息。",
+            order_context=None,
+            needs_human_transfer=False,
+            transfer_reason="",
+            quality_score=82,
+            tool_name="save_user_memory",
         )
 
     return CustomerServiceDecision(

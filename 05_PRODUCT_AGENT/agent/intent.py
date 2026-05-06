@@ -51,3 +51,11 @@ def is_order_query(text: str) -> bool:
 
 def is_product_query(text: str) -> bool:
     return contains_any(text, ("airbuds", "homehub", "商品", "库存", "有货", "product", "stock"))
+
+
+def is_memory_recall_query(text: str) -> bool:
+    return contains_any(text, ("记得", "偏好", "之前", "历史", "remember", "preference"))
+
+
+def is_preference_statement(text: str) -> bool:
+    return contains_any(text, ("喜欢", "偏好", "优先", "prefer", "preference"))

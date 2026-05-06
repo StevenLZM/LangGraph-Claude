@@ -28,3 +28,10 @@ class ChatResponse(BaseModel):
     token_used: int
     response_time_ms: int
     quality_score: int | None
+    user_memories: list[str] = []
+    memory_summary: str = ""
+
+
+class DeleteMemoriesResponse(BaseModel):
+    user_id: str
+    deleted: int

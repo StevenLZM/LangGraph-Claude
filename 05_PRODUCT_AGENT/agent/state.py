@@ -16,6 +16,7 @@ class CustomerServiceState(TypedDict, total=False):
 
     user_profile: dict[str, Any]
     user_memories: list[str]
+    memory_summary: str
     order_context: dict[str, Any] | None
 
     needs_human_transfer: bool

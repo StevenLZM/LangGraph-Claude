@@ -37,7 +37,10 @@ def agent_node(state: CustomerServiceState) -> dict:
     messages = list(state.get("messages") or [])
     latest_human = next((message for message in reversed(messages) if isinstance(message, HumanMessage)), None)
     if latest_human is not None:
-        decision = handle_customer_message(str(latest_human.content))
+        decision = handle_customer_message(
+            str(latest_human.content),
+            user_memories=list(state.get("user_memories") or []),
+        )
         return {
             "messages": [
                 AIMessage(

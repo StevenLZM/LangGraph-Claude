@@ -121,7 +121,10 @@ CUSTOMER_SERVICE_UI = """<!doctype html>
         <button data-message="帮我查一下物流 ORD123456">物流查询</button>
         <button data-message="AirBuds Pro 2 还有库存吗？">商品库存</button>
         <button data-message="我要给订单 ORD123456 退款">退款申请</button>
+        <button data-message="我喜欢顺丰配送，以后发货优先顺丰">保存偏好</button>
+        <button data-message="你记得我的配送偏好吗？">召回记忆</button>
         <button data-message="我要投诉，给我转人工">转人工</button>
+        <button id="clearMemory" type="button">清除记忆</button>
       </div>
     </aside>
     <section class="chat">
@@ -141,6 +144,10 @@ CUSTOMER_SERVICE_UI = """<!doctype html>
         <div><span>转人工</span><strong id="handoff">否</strong></div>
         <div><span>原因</span><strong id="reason">-</strong></div>
       </div>
+      <h2 class="side-title" style="margin-top: 20px;">用户记忆</h2>
+      <pre id="memories">[]</pre>
+      <h2 class="side-title" style="margin-top: 20px;">会话摘要</h2>
+      <pre id="summary"></pre>
       <h2 class="side-title" style="margin-top: 20px;">订单上下文</h2>
       <pre id="context">{}</pre>
     </aside>
@@ -179,6 +186,8 @@ CUSTOMER_SERVICE_UI = """<!doctype html>
       document.querySelector("#handoff").textContent = payload.needs_human_transfer ? "是" : "否";
       document.querySelector("#handoff").className = payload.needs_human_transfer ? "handoff" : "";
       document.querySelector("#reason").textContent = payload.transfer_reason || "-";
+      document.querySelector("#memories").textContent = JSON.stringify(payload.user_memories || [], null, 2);
+      document.querySelector("#summary").textContent = payload.memory_summary || "";
       document.querySelector("#context").textContent = JSON.stringify(payload.order_context || {}, null, 2);
     }
 
@@ -188,6 +197,13 @@ CUSTOMER_SERVICE_UI = """<!doctype html>
     });
     document.querySelectorAll("[data-message]").forEach((button) => {
       button.addEventListener("click", () => sendMessage(button.dataset.message));
+    });
+    document.querySelector("#clearMemory").addEventListener("click", async () => {
+      const userId = document.querySelector("#userId").value;
+      const response = await fetch(`/users/${encodeURIComponent(userId)}/memories`, {method: "DELETE"});
+      const payload = await response.json();
+      document.querySelector("#memories").textContent = "[]";
+      addMessage(`已清除 ${payload.deleted ?? 0} 条用户记忆`, "assistant");
     });
   </script>
 </body>

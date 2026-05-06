@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from api.main import app
 
 
-def test_health_returns_m0_runtime_status():
+def test_health_returns_runtime_status():
     client = TestClient(app)
 
     response = client.get("/health")
@@ -20,5 +20,6 @@ def test_health_returns_m0_runtime_status():
         "api": "ok",
         "redis": "not_configured",
         "database": "not_configured",
+        "memory": "sqlite",
         "llm": "offline_stub",
     }
