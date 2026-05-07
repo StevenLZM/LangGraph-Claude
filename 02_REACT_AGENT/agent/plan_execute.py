@@ -54,8 +54,11 @@ def default_planner(user_input: str) -> Plan:
             HumanMessage(content=f"用户任务：{user_input}\n请输出 JSON。"),
         ]
     )
+    
     if isinstance(result, Plan):
+        print(f"默认planner的llm输出计划:{result}")
         return result
+    print(f"默认planner的llm输出计划:{result.model_dump_json(indent=2)}")
     return Plan.model_validate(result)
 
 
@@ -66,7 +69,8 @@ def _step_prompt(step: PlanStep, user_input: str, past_steps: list[StepResult]) 
         f"已完成步骤：\n{history}\n\n"
         f"当前步骤：{step.objective}\n"
         f"建议工具：{step.suggested_tool}\n"
-        "请完成当前步骤；如果需要工具，自动调用合适工具。"
+        "**重要：请只完成当前步骤，不要处理其他问题！**"
+        "如果需要工具，自动调用合适工具。"
     )
 
 
@@ -78,6 +82,7 @@ def default_executor(
     event_callback: EventCallback | None = None,
 ) -> StepResult:
     prompt = _step_prompt(step, user_input, past_steps)
+    print(f"plan-and-execute中调用react的prompt：{prompt}")
     result = run_react(prompt, llm=get_llm("turbo", temperature=0.1), event_callback=event_callback)
     return StepResult(
         step_id=step.id,
@@ -103,7 +108,7 @@ def _plan_event(plan: Plan) -> AgentEvent:
 def _step_event(step: StepResult) -> AgentEvent:
     return AgentEvent(
         type="step",
-        title=f"步骤 {step.step_id}: {step.objective}",
+        title=f"plan-and-execute步骤 {step.step_id}: {step.objective}",
         content=step.output,
         tool=step.tool_used,
         metadata=step.model_dump(),
@@ -170,6 +175,7 @@ def _run_plan_and_execute_with_event_callback(
     _emit_event(events, _plan_event(plan), event_callback)
 
     for step in plan.steps:
+        print(f"step.id:{step.id}——step.objective:{step.objective}")
         if executor is None:
             current_round = 0
 
@@ -181,9 +187,11 @@ def _run_plan_and_execute_with_event_callback(
                     _react_trace_event(step.id, step.objective, event, react_round),
                     event_callback,
                 )
-
+            print("走default_executor")
+            print(f"current_round:{current_round}")
             result = default_executor(step, user_input, past_steps, event_callback=emit_react_trace)
         else:
+            print(f"走executor:{executor}")
             result = executor(step, user_input, past_steps)
             for trace_event in _react_trace_events_for_step(result):
                 _emit_event(events, trace_event, event_callback)
@@ -192,7 +200,7 @@ def _run_plan_and_execute_with_event_callback(
         _emit_event(events, _step_event(result), event_callback)
 
     final = _final_answer(user_input, past_steps)
-    _emit_event(events, AgentEvent(type="final", title="最终答案", content=final), event_callback)
+    _emit_event(events, AgentEvent(type="final", title="plan-and-execute.callback的最终答案", content=final), event_callback)
     return AgentRunResult(
         final_answer=final,
         events=events,
@@ -212,6 +220,7 @@ def build_plan_execute_graph(
 
     def planner_node(state: PlanExecuteState) -> PlanExecuteState:
         plan = plan_fn(state["input"])
+        print(f"初始化plan-and-execute图时的生成计划:{plan}")
         if len(plan.steps) > limit:
             plan = Plan(steps=plan.steps[:limit])
         return {"plan": plan, "current_step": 0, "past_steps": []}
@@ -233,6 +242,8 @@ def build_plan_execute_graph(
         return {"final_answer": _final_answer(state["input"], state.get("past_steps", []))}
 
     workflow = StateGraph(PlanExecuteState)
+    # 传入函数planner_node而不是planner_node(state)
+    # 目的：延迟执行 + 多次调用
     workflow.add_node("planner", planner_node)
     workflow.add_node("executor", executor_node)
     workflow.add_node("finalizer", finalizer_node)
@@ -252,6 +263,7 @@ def run_plan_and_execute(
     event_callback: EventCallback | None = None,
 ) -> AgentRunResult:
     if event_callback is not None:
+        print(f"run_plan_and_execute._run_plan_and_execute_with_event_callback:{event_callback}")
         return _run_plan_and_execute_with_event_callback(
             user_input,
             planner=planner,
@@ -259,7 +271,7 @@ def run_plan_and_execute(
             max_steps=max_steps,
             event_callback=event_callback,
         )
-
+    print("run_plan_and_execute.buildgraph")
     graph = build_plan_execute_graph(planner=planner, executor=executor, max_steps=max_steps)
     state = graph.invoke({"input": user_input})
 
@@ -270,5 +282,5 @@ def run_plan_and_execute(
         events.append(_step_event(step))
         events.extend(_react_trace_events_for_step(step))
     final = state.get("final_answer", "")
-    events.append(AgentEvent(type="final", title="最终答案", content=final))
+    events.append(AgentEvent(type="final", title="plan-and-execute最终答案", content=final))
     return AgentRunResult(final_answer=final, events=events, raw_state=dict(state))
