@@ -56,9 +56,7 @@ def default_planner(user_input: str) -> Plan:
     )
     
     if isinstance(result, Plan):
-        print(f"默认planner的llm输出计划:{result}")
         return result
-    print(f"默认planner的llm输出计划:{result.model_dump_json(indent=2)}")
     return Plan.model_validate(result)
 
 
@@ -69,7 +67,7 @@ def _step_prompt(step: PlanStep, user_input: str, past_steps: list[StepResult]) 
         f"已完成步骤：\n{history}\n\n"
         f"当前步骤：{step.objective}\n"
         f"建议工具：{step.suggested_tool}\n"
-        "**重要：请只完成当前步骤，不要处理其他问题！**"
+        "**重要：请只完成当前步骤，不要处理其他问题！只回答当前问题，不要输出无关内容！**"
         "如果需要工具，自动调用合适工具。"
     )
 
@@ -84,6 +82,7 @@ def default_executor(
     prompt = _step_prompt(step, user_input, past_steps)
     print(f"plan-and-execute中调用react的prompt：{prompt}")
     result = run_react(prompt, llm=get_llm("turbo", temperature=0.1), event_callback=event_callback)
+    print(f"plan-and-execute中调用react的result：{result}")
     return StepResult(
         step_id=step.id,
         objective=step.objective,
@@ -117,17 +116,20 @@ def _step_event(step: StepResult) -> AgentEvent:
 
 def _react_round_for_event(event: AgentEvent, current_round: int) -> tuple[int, int]:
     if event.type == "tool_call":
+        print(f"tool_call")
         next_round = current_round + 1
         return next_round, next_round
     if event.type == "final":
+        print(f"final")
         return current_round, current_round + 1 if current_round else 1
+    print(f"else")
     return current_round, current_round if current_round else 1
 
 
 def _react_trace_event(step_id: int, objective: str, event: AgentEvent, react_round: int) -> AgentEvent:
     return AgentEvent(
         type=event.type,
-        title=f"步骤 {step_id} / ReAct 第 {react_round} 轮 / {event.title}",
+        title=f"plan-execute步骤 {step_id} / ReAct 第 {react_round} 轮 / {event.title}",
         content=event.content,
         tool=event.tool,
         tool_input=event.tool_input,
