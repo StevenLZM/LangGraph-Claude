@@ -12,3 +12,7 @@ def test_settings_defaults_are_local_development_friendly():
     assert settings.llm_mode == "offline_stub"
     assert settings.redis_url == ""
     assert settings.database_url == ""
+    assert settings.user_rate_limit_per_minute == 10
+    assert settings.global_qps_limit == 100
+    assert settings.single_request_token_budget == 4000
+    assert settings.global_hourly_token_budget == 500000

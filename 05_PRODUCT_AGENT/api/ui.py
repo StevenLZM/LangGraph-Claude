@@ -141,6 +141,7 @@ CUSTOMER_SERVICE_UI = """<!doctype html>
       <div class="kv">
         <div><span>质量分</span><strong id="quality">-</strong></div>
         <div><span>Token</span><strong id="tokens">-</strong></div>
+        <div><span>降级状态</span><strong id="degraded">否</strong></div>
         <div><span>转人工</span><strong id="handoff">否</strong></div>
         <div><span>原因</span><strong id="reason">-</strong></div>
       </div>
@@ -183,9 +184,11 @@ CUSTOMER_SERVICE_UI = """<!doctype html>
       addMessage(payload.answer || "请求失败", "assistant");
       document.querySelector("#quality").textContent = payload.quality_score ?? "-";
       document.querySelector("#tokens").textContent = payload.token_used ?? "-";
+      document.querySelector("#degraded").textContent = payload.degraded ? "是" : "否";
+      document.querySelector("#degraded").className = payload.degraded ? "handoff" : "";
       document.querySelector("#handoff").textContent = payload.needs_human_transfer ? "是" : "否";
       document.querySelector("#handoff").className = payload.needs_human_transfer ? "handoff" : "";
-      document.querySelector("#reason").textContent = payload.transfer_reason || "-";
+      document.querySelector("#reason").textContent = payload.transfer_reason || payload.degrade_reason || "-";
       document.querySelector("#memories").textContent = JSON.stringify(payload.user_memories || [], null, 2);
       document.querySelector("#summary").textContent = payload.memory_summary || "";
       document.querySelector("#context").textContent = JSON.stringify(payload.order_context || {}, null, 2);

@@ -28,8 +28,10 @@ class ChatResponse(BaseModel):
     token_used: int
     response_time_ms: int
     quality_score: int | None
-    user_memories: list[str] = []
+    user_memories: list[str] = Field(default_factory=list)
     memory_summary: str = ""
+    degraded: bool = False
+    degrade_reason: str = ""
 
 
 class DeleteMemoriesResponse(BaseModel):

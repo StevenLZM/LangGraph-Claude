@@ -5,6 +5,7 @@ langchain-core
 # API
 fastapi
 uvicorn[standard]
+redis
 
 # Settings
 pydantic>=2

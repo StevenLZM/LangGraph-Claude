@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     checkpointer_db: str = str(ROOT / "data" / "sessions.db")
     memory_db: str = str(ROOT / "data" / "memory.db")
 
+    user_rate_limit_per_minute: int = 10
+    global_qps_limit: int = 100
+    single_request_token_budget: int = 4000
+    global_hourly_token_budget: int = 500000
+
     langchain_tracing_v2: bool = False
     langchain_endpoint: str = "https://api.smith.langchain.com"
     langchain_api_key: str = ""
