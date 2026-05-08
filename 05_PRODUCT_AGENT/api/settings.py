@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     api_port: int = 8000
 
     llm_mode: str = "offline_stub"
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_max_model: str = "deepseek-v4-pro"
+    deepseek_light_model: str = "deepseek-v4-flash"
     anthropic_api_key: str = ""
     openai_api_key: str = ""
     openai_base_url: str = ""

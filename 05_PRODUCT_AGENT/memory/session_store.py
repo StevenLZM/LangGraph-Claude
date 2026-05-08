@@ -113,6 +113,64 @@ class SessionStore:
             "updated_at": loaded["updated_at"],
         }
 
+    def list_public_sessions(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT session_id, user_id, messages_json, metadata_json, updated_at
+                FROM sessions
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        sessions = []
+        for row in rows:
+            messages = [message_from_dict(item) for item in json.loads(row["messages_json"] or "[]")]
+            metadata = json.loads(row["metadata_json"] or "{}")
+            sessions.append(
+                {
+                    "session_id": row["session_id"],
+                    "user_id": row["user_id"],
+                    "updated_at": row["updated_at"],
+                    "window_size": len(messages),
+                    "total_turns": sum(1 for message in messages if isinstance(message, HumanMessage)),
+                    "needs_human_transfer": metadata.get("needs_human_transfer", False),
+                    "transfer_reason": metadata.get("transfer_reason", ""),
+                    "quality_score": metadata.get("quality_score"),
+                    "token_used": metadata.get("token_used", 0),
+                    "quality_alert": metadata.get("quality_alert", False),
+                }
+            )
+        return sessions
+
+    def summarize_transfers(self) -> dict[str, Any]:
+        sessions = self.list_public_sessions(limit=10000)
+        transfer_reasons: dict[str, int] = {}
+        quality_scores = []
+        token_total = 0
+        low_quality_count = 0
+        for session in sessions:
+            if session["needs_human_transfer"]:
+                reason = session["transfer_reason"] or "未记录原因"
+                transfer_reasons[reason] = transfer_reasons.get(reason, 0) + 1
+            score = session.get("quality_score")
+            if isinstance(score, int):
+                quality_scores.append(score)
+                if score < 70:
+                    low_quality_count += 1
+            token_total += int(session.get("token_used") or 0)
+        return {
+            "total_sessions": len(sessions),
+            "human_transfer_count": sum(transfer_reasons.values()),
+            "transfer_reasons": transfer_reasons,
+            "low_quality_count": low_quality_count,
+            "average_quality_score": round(sum(quality_scores) / len(quality_scores), 1)
+            if quality_scores
+            else 0.0,
+            "token_total": token_total,
+        }
+
     def _connect(self) -> sqlite3.Connection:
         if self.db_path != ":memory:":
             Path(self.db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)

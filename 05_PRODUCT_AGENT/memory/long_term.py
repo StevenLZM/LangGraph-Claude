@@ -51,6 +51,27 @@ class UserMemoryManager:
             cursor = conn.execute("DELETE FROM user_memories WHERE user_id = ?", (user_id,))
             return cursor.rowcount
 
+    def list_memories(self, user_id: str, *, limit: int = 100) -> list[dict[str, str]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT category, content, created_at
+                FROM user_memories
+                WHERE user_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            ).fetchall()
+        return [
+            {
+                "category": row["category"],
+                "content": row["content"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
     async def aload_memories(self, user_id: str, current_query: str) -> list[str]:
         return self.load_memories(user_id, current_query)
 

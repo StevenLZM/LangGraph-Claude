@@ -6,6 +6,7 @@ from typing import Any
 from agent.intent import (
     extract_order_id,
     is_human_transfer_request,
+    is_faq_query,
     is_logistics_query,
     is_memory_recall_query,
     is_order_query,
@@ -15,6 +16,10 @@ from agent.intent import (
     is_refund_request,
 )
 from agent.tools import apply_refund, get_logistics, get_order, get_product
+from rag.faq_tool import FAQRAGTool
+
+
+faq_rag_tool = FAQRAGTool()
 
 
 @dataclass(frozen=True)
@@ -69,6 +74,24 @@ def handle_customer_message(message: str, user_memories: list[str] | None = None
             transfer_reason="",
             quality_score=82,
             tool_name="save_user_memory",
+        )
+
+    if is_faq_query(message):
+        rag_result = faq_rag_tool.search(message)
+        context = {
+            "rag_matched": rag_result.matched,
+            "rag_sources": rag_result.sources,
+            "rag_backend": rag_result.backend,
+        }
+        if rag_result.error:
+            context["rag_error"] = rag_result.error
+        return CustomerServiceDecision(
+            answer=rag_result.answer,
+            order_context=context,
+            needs_human_transfer=False,
+            transfer_reason="",
+            quality_score=86 if rag_result.matched else 72,
+            tool_name="faq_rag",
         )
 
     if is_refund_request(message):

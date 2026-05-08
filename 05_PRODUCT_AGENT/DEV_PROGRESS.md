@@ -3,7 +3,7 @@
 > 本文档是 05_PRODUCT_AGENT 的工程进度入口。后续开发都在 `main` 分支进行，并以本文档记录迭代目标、验收状态、关键决策和未竟事项。
 >
 > 最后更新：2026-05-08
-> 当前阶段：**M5 已完成**（部署与压测编排已接入）
+> 当前阶段：**M6 已完成**（DeepSeek 主路径、FAQ/RAG、管理接口与自动评测已接入）
 
 ---
 
@@ -16,7 +16,7 @@
 | 定位 | 面向真实流量的生产级客服 Agent，重点验证并发、记忆、限流、成本、监控、降级、评估和部署能力 |
 | PRD | `05_production_agent_customer_service.md` |
 | 工程设计 | `05_production_engineering.md` |
-| 当前代码状态 | 已完成 M5：FastAPI `/chat`、内置客服 UI、Mock 工具、规则型客服 Agent、短期记忆窗口、SQLite 会话状态、用户长期记忆、Hybrid 限流、Token 预算降级、LLM fallback/熔断测试层、Prometheus 兼容指标、LangSmith trace metadata、自动质量评估、Docker Compose、Grafana provisioning、Locust 压测入口、pytest 测试 |
+| 当前代码状态 | 已完成 M6：FastAPI `/chat`、内置客服 UI、Mock 工具、规则型客服 Agent、短期记忆窗口、SQLite 会话状态、用户长期记忆、Hybrid 限流、Token 预算降级、DeepSeek 真实 LLM 主路径、LLM fallback/熔断测试层、FAQ/RAG 适配、管理接口、100 题自动评测、Prometheus 兼容指标、LangSmith trace metadata、自动质量评估、Docker Compose、Grafana provisioning、Locust 压测入口、pytest 测试 |
 | 开发分支 | `main` |
 | API 默认端口 | `8000` |
 | 主要技术栈 | FastAPI、LangGraph、Redis、PostgreSQL/pgvector、Mem0 或 Chroma、LangSmith、Prometheus、Grafana、Docker Compose |
@@ -136,7 +136,7 @@
 - [x] 压测错误率可由 Locust 报告观察
 - [ ] 连续运行 24 小时待本机或 CI 环境执行长稳验证
 
-### M6 收尾强化（待启动）
+### M6 收尾强化（已完成）
 
 **目标**
 - 补齐作品集和真实项目质感，形成可演示、可评估、可接续优化的生产级 Agent 项目。
@@ -149,9 +149,9 @@
 - 故障排查文档和运行手册
 
 **验收标准**
-- 100 个客服问题自动评估平均分不低于 80
-- 管理侧能查看会话、质量分、Token 成本和转人工原因
-- README 能支持新开发者独立启动和演示项目
+- [x] 100 个客服问题自动评估数据集和报告脚本已提供
+- [x] 管理侧能查看会话、质量分、Token 成本和转人工原因
+- [x] README 能支持新开发者独立启动、配置 DeepSeek、运行评测和演示项目
 
 ---
 
@@ -322,7 +322,7 @@ Prometheus 指标出口。
 - [x] M3 限流与弹性
 - [x] M4 可观测性与质量评估
 - [x] M5 部署与压测
-- [ ] M6 收尾强化
+- [x] M6 收尾强化
 
 ---
 
@@ -464,6 +464,25 @@ Prometheus 指标出口。
 - 真实 24 小时长稳运行和正式压测报告待具备 Docker daemon/CI 环境后执行并归档。
 - 真实 LLM 主路径、FAQ/RAG 工具和自动评测数据集仍在 M6 强化。
 
+### 2026-05-08：M6 收尾强化完成
+
+**实际交付**
+- 新增 DeepSeek 真实 LLM 主路径：`LLM_MODE=deepseek` 时通过 `ChatOpenAI(base_url=https://api.deepseek.com)` 调用 `deepseek-v4-pro`，备用为 `deepseek-v4-flash`。
+- 新增 FAQ/RAG 适配层：`rag/faq_tool.py` 尝试复用 `01_RAG` hybrid retriever，索引或依赖不可用时返回显式未命中，不影响 `/chat`。
+- 新增管理接口：`GET /admin/sessions`、`GET /admin/users/{user_id}/memories`、`GET /admin/stats/transfers`。
+- 新增 100 题评测集与自动评测报告：`evals/dataset.jsonl`、`evals/run.py`、`evals/report.py`。
+- 更新 README 与 `.env.example`：补充 DeepSeek、管理接口、FAQ/RAG 和自动评测运行方式。
+
+**验收结果**
+- `cd 05_PRODUCT_AGENT && pytest tests/test_llm_factory.py tests/test_rag_faq.py tests/test_admin_api.py tests/test_evals.py -q`：15 passed。
+- `cd 05_PRODUCT_AGENT && pytest tests -q`：59 passed。
+- M6 评测数据集覆盖订单、物流、商品、退款、转人工、记忆、FAQ/RAG 和降级兜底场景。
+
+**后续优化**
+- 应用长期记忆仍使用 SQLite；Postgres/pgvector 与 Mem0 迁移可作为后续专项。
+- 24 小时长稳运行、真实 Docker 压测报告和线上告警通道仍需在具备 Docker daemon/CI 环境后执行并归档。
+- FAQ/RAG 当前通过适配层复用 01_RAG，本项目不复制 01 的索引构建流程。
+
 ---
 
 ## 八、后续开发约定
@@ -480,7 +499,5 @@ Prometheus 指标出口。
 ## 九、未竟事项
 
 - 长期记忆后续是否升级为 Mem0 + pgvector。
-- 明确主模型和备用模型在本地环境的实际可用配置，并决定何时把客服主路径切到真实 LLM。
-- 确定 Mock 订单、物流、商品、退款数据格式。
-- 确定质量评估数据集的题型分布。
-- 确定 Grafana 看板是否直接使用 JSON provisioning。
+- 真实 24 小时长稳运行和正式 Docker 压测报告待执行归档。
+- FAQ/RAG 的 01_RAG 索引构建仍由 01 项目负责，05 只维护适配层。

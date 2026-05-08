@@ -1,6 +1,6 @@
 # 05_PRODUCT_AGENT
 
-生产级 AI Agent 平台的智能客服项目。当前已完成 M5 部署与压测：`/chat`、内置客服工作台、Mock 工具、规则型客服 Agent、短期记忆窗口、SQLite 会话和用户长期记忆、限流与 Token 预算降级、LLM fallback 与熔断测试层、LangSmith trace metadata、Prometheus 兼容指标、Grafana 看板编排和 Locust 压测入口。
+生产级 AI Agent 平台的智能客服项目。当前已完成 M6 收尾强化：`/chat`、内置客服工作台、Mock 工具、规则型客服 Agent、短期记忆窗口、SQLite 会话和用户长期记忆、限流与 Token 预算降级、DeepSeek 真实 LLM 主路径、LLM fallback 与熔断测试层、FAQ/RAG 适配、管理接口、100 题自动评测、LangSmith trace metadata、Prometheus 兼容指标、Grafana 看板编排和 Locust 压测入口。
 
 ## 本地运行
 
@@ -48,6 +48,36 @@ Prometheus 指标：
 curl http://127.0.0.1:8000/metrics
 ```
 
+管理接口：
+
+```bash
+curl http://127.0.0.1:8000/admin/sessions
+curl http://127.0.0.1:8000/admin/users/user_001/memories
+curl http://127.0.0.1:8000/admin/stats/transfers
+```
+
+## M6 DeepSeek 与 FAQ/RAG
+
+本地测试默认使用 `LLM_MODE=offline_stub`。真实模型路径参考 03 项目，使用 DeepSeek 的 OpenAI-compatible API：
+
+```bash
+LLM_MODE=deepseek
+DEEPSEEK_API_KEY=sk-...
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MAX_MODEL=deepseek-v4-pro
+DEEPSEEK_LIGHT_MODEL=deepseek-v4-flash
+```
+
+FAQ/RAG 问题会通过 `rag/faq_tool.py` 尝试复用兄弟项目 `01_RAG` 的 hybrid retriever。若 01 索引或依赖不可用，接口不会崩溃，会返回明确的知识库未命中/不可用结果。
+
+自动评测：
+
+```bash
+python evals/run.py --dataset evals/dataset.jsonl
+```
+
+结果写入 `evals/results/<run_id>/results.jsonl` 和 `REPORT.md`。M6 数据集共 100 题，覆盖订单、物流、商品、退款、转人工、记忆、FAQ/RAG 和降级兜底场景。
+
 ## M5 Docker Compose 部署
 
 复制配置并按需调整：
@@ -61,6 +91,16 @@ cp .env.example .env
 ```bash
 docker compose up --build
 ```
+
+如果要在 LangSmith 网站看到当前项目，先在 `.env` 中配置：
+
+```bash
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_API_KEY=ls__...
+LANGCHAIN_PROJECT=production-agent-customer-service
+```
+
+启动后至少发送一次 `/chat` 请求，LangSmith 才会创建/显示对应项目 run。`/health` 和 `/metrics` 不会产生 LangGraph trace。
 
 服务入口：
 
@@ -128,7 +168,7 @@ docker compose --profile loadtest run --rm locust \
 pytest tests -q
 ```
 
-M5 默认仍使用离线规则型客服决策、本地 SQLite 记忆存储和确定性质量评估器；Compose 会启动 Redis、Postgres/pgvector、Prometheus 和 Grafana，但真实 LLM 主路径和 pgvector 记忆迁移仍留给后续迭代。
+M6 默认仍支持离线规则型客服决策、本地 SQLite 记忆存储和确定性质量评估器；配置 `LLM_MODE=deepseek` 后，客服回复会在规则/工具结果基础上调用 DeepSeek 生成最终话术。Compose 会启动 Redis、Postgres/pgvector、Prometheus 和 Grafana，pgvector 记忆迁移仍留给后续优化。
 
 ## 教学文档
 

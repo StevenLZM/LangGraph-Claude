@@ -22,6 +22,10 @@ class FakeChatOpenAI:
 def _settings(**overrides):
     values = {
         "llm_mode": "offline_stub",
+        "deepseek_api_key": "",
+        "deepseek_base_url": "https://api.deepseek.com",
+        "deepseek_max_model": "deepseek-v4-pro",
+        "deepseek_light_model": "deepseek-v4-flash",
         "anthropic_api_key": "",
         "openai_api_key": "",
         "openai_base_url": "",
@@ -73,3 +77,44 @@ def test_hybrid_mode_with_openai_key_builds_openai_primary_client(monkeypatch):
     assert FakeChatOpenAI.instances[0].kwargs["model"] == "gpt-4o-mini"
     assert FakeChatOpenAI.instances[0].kwargs["api_key"] == "sk-test"
     assert FakeChatOpenAI.instances[0].kwargs["base_url"] == "https://api.example.com/v1"
+
+
+def test_deepseek_mode_builds_openai_compatible_primary_and_light_fallback(monkeypatch):
+    import llm.factory as factory
+
+    FakeChatOpenAI.instances = []
+    monkeypatch.setattr(factory, "_load_chat_openai", lambda: FakeChatOpenAI)
+
+    setup = build_customer_service_llm(
+        _settings(
+            llm_mode="deepseek",
+            deepseek_api_key="sk-deepseek-test",
+            deepseek_base_url="https://api.deepseek.com",
+            deepseek_max_model="deepseek-v4-pro",
+            deepseek_light_model="deepseek-v4-flash",
+        )
+    )
+
+    result = asyncio.run(setup.llm.ainvoke_with_metadata(["hello"]))
+
+    assert setup.startup_error == ""
+    assert result.content == "openai answer"
+    assert result.model_used == "primary"
+    assert FakeChatOpenAI.instances[0].kwargs == {
+        "model": "deepseek-v4-pro",
+        "api_key": "sk-deepseek-test",
+        "base_url": "https://api.deepseek.com",
+        "temperature": 0.2,
+        "timeout": 240,
+        "max_retries": 2,
+    }
+    assert FakeChatOpenAI.instances[1].kwargs["model"] == "deepseek-v4-flash"
+
+
+def test_deepseek_mode_requires_deepseek_key():
+    setup = build_customer_service_llm(_settings(llm_mode="deepseek"))
+
+    result = asyncio.run(setup.llm.ainvoke_with_metadata(["hello"]))
+
+    assert "DEEPSEEK_API_KEY" in setup.startup_error
+    assert result.content == "offline_stub"

@@ -9,6 +9,7 @@ from langchain_core.messages import SystemMessage
 
 from agent.graph import build_customer_service_graph
 from api.middleware.rate_limiter import RateLimiter, TokenBudgetExceeded
+from api.routers.admin import create_admin_router
 from api.schemas import ChatRequest, ChatResponse, DeleteMemoriesResponse
 from api.settings import settings
 from api.ui import CUSTOMER_SERVICE_UI
@@ -36,6 +37,12 @@ rate_limiter = RateLimiter(
 )
 
 app = FastAPI(title=settings.app_name, version=settings.app_version)
+app.include_router(
+    create_admin_router(
+        session_store=session_store,
+        user_memory_manager=user_memory_manager,
+    )
+)
 configure_langsmith(
     enabled=settings.langchain_tracing_v2,
     endpoint=settings.langchain_endpoint,

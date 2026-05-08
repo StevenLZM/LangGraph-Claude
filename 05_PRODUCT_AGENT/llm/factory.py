@@ -13,8 +13,36 @@ class CustomerServiceLLMSetup:
 
 
 def build_customer_service_llm(settings: Any) -> CustomerServiceLLMSetup:
-    if getattr(settings, "llm_mode", "offline_stub") == "offline_stub":
+    llm_mode = getattr(settings, "llm_mode", "offline_stub")
+    if llm_mode == "offline_stub":
         return CustomerServiceLLMSetup(llm=ResilientLLM())
+
+    if llm_mode == "deepseek":
+        deepseek_key = getattr(settings, "deepseek_api_key", "")
+        if not deepseek_key:
+            return CustomerServiceLLMSetup(
+                llm=ResilientLLM(),
+                startup_error="LLM_MODE=deepseek, but DEEPSEEK_API_KEY is not configured.",
+            )
+        try:
+            primary_client = _build_deepseek_client(
+                model=getattr(settings, "deepseek_max_model", "deepseek-v4-pro"),
+                api_key=deepseek_key,
+                base_url=getattr(settings, "deepseek_base_url", "https://api.deepseek.com"),
+            )
+            fallback_client = _build_deepseek_client(
+                model=getattr(settings, "deepseek_light_model", "deepseek-v4-flash"),
+                api_key=deepseek_key,
+                base_url=getattr(settings, "deepseek_base_url", "https://api.deepseek.com"),
+            )
+        except Exception as exc:
+            return CustomerServiceLLMSetup(llm=ResilientLLM(), startup_error=str(exc))
+        return CustomerServiceLLMSetup(
+            llm=ResilientLLM(
+                primary_client=primary_client,
+                fallback_client=fallback_client,
+            )
+        )
 
     openai_key = getattr(settings, "openai_api_key", "")
     anthropic_key = getattr(settings, "anthropic_api_key", "")
@@ -86,6 +114,18 @@ def _build_openai_client(*, model: str, api_key: str, base_url: str) -> Any:
     if base_url:
         kwargs["base_url"] = base_url
     return chat_openai(**kwargs)
+
+
+def _build_deepseek_client(*, model: str, api_key: str, base_url: str) -> Any:
+    chat_openai = _load_chat_openai()
+    return chat_openai(
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=0.2,
+        timeout=240,
+        max_retries=2,
+    )
 
 
 def _build_anthropic_client(*, model: str, api_key: str) -> Any:
