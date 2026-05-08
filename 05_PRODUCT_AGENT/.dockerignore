@@ -1,0 +1,11 @@
+.pytest_cache
+__pycache__
+*.py[cod]
+*.db
+*.sqlite
+.env
+.DS_Store
+data/*
+!data/.gitignore
+infra/grafana/data
+locust_report.html

@@ -17,4 +17,7 @@ def test_root_serves_customer_service_workspace():
     assert "订单上下文" in response.text
     assert "用户记忆" in response.text
     assert "降级状态" in response.text
+    assert "LLM 状态" in response.text
+    assert "工具路径" in response.text
+    assert "处理摘要" in response.text
     assert "清除记忆" in response.text

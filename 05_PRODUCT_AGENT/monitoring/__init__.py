@@ -1,1 +1,1 @@
-"""Monitoring components will be implemented in M4."""
+"""Observability, metrics, tracing, and quality evaluation components."""

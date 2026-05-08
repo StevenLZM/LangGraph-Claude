@@ -22,5 +22,6 @@ def test_health_returns_runtime_status():
         "database": "not_configured",
         "memory": "sqlite",
         "llm": "offline_stub",
+        "llm_startup_error": "",
         "rate_limiter": "memory",
     }

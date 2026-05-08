@@ -142,9 +142,13 @@ CUSTOMER_SERVICE_UI = """<!doctype html>
         <div><span>质量分</span><strong id="quality">-</strong></div>
         <div><span>Token</span><strong id="tokens">-</strong></div>
         <div><span>降级状态</span><strong id="degraded">否</strong></div>
+        <div><span>LLM 状态</span><strong id="llmStatus">离线</strong></div>
+        <div><span>工具路径</span><strong id="toolName">-</strong></div>
         <div><span>转人工</span><strong id="handoff">否</strong></div>
         <div><span>原因</span><strong id="reason">-</strong></div>
       </div>
+      <h2 class="side-title" style="margin-top: 20px;">处理摘要</h2>
+      <pre id="llmTrace"></pre>
       <h2 class="side-title" style="margin-top: 20px;">用户记忆</h2>
       <pre id="memories">[]</pre>
       <h2 class="side-title" style="margin-top: 20px;">会话摘要</h2>
@@ -186,9 +190,13 @@ CUSTOMER_SERVICE_UI = """<!doctype html>
       document.querySelector("#tokens").textContent = payload.token_used ?? "-";
       document.querySelector("#degraded").textContent = payload.degraded ? "是" : "否";
       document.querySelector("#degraded").className = payload.degraded ? "handoff" : "";
+      const llmTrace = payload.llm_trace || {};
+      document.querySelector("#llmStatus").textContent = llmTrace.used_llm ? `${llmTrace.model_used || "LLM"}` : "离线";
+      document.querySelector("#toolName").textContent = llmTrace.tool_name || "-";
       document.querySelector("#handoff").textContent = payload.needs_human_transfer ? "是" : "否";
       document.querySelector("#handoff").className = payload.needs_human_transfer ? "handoff" : "";
       document.querySelector("#reason").textContent = payload.transfer_reason || payload.degrade_reason || "-";
+      document.querySelector("#llmTrace").textContent = llmTrace.reasoning_summary || "";
       document.querySelector("#memories").textContent = JSON.stringify(payload.user_memories || [], null, 2);
       document.querySelector("#summary").textContent = payload.memory_summary || "";
       document.querySelector("#context").textContent = JSON.stringify(payload.order_context || {}, null, 2);

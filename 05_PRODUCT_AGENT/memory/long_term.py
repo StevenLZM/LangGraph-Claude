@@ -4,6 +4,8 @@ import re
 import sqlite3
 from pathlib import Path
 
+DELIVERY_KEYWORDS = ("配送", "物流", "快递", "发货", "送货", "承运", "shipping", "delivery", "courier")
+
 
 class UserMemoryManager:
     def __init__(self, db_path: str) -> None:
@@ -21,7 +23,7 @@ class UserMemoryManager:
         scored = []
         for row in rows:
             content = row["content"]
-            score = self._score(query, content.casefold())
+            score = self._score(query, content.casefold(), row["category"])
             if score > 0:
                 scored.append((score, content))
         scored.sort(key=lambda item: item[0], reverse=True)
@@ -32,6 +34,8 @@ class UserMemoryManager:
         saved = 0
         with self._connect() as conn:
             for category, content in memories:
+                if category == "delivery_preference":
+                    self._delete_delivery_preferences(conn, user_id)
                 cursor = conn.execute(
                     """
                     INSERT OR IGNORE INTO user_memories(user_id, category, content, created_at)
@@ -61,7 +65,8 @@ class UserMemoryManager:
         if self._is_recall_query(normalized) or "?" in text or "？" in text:
             return memories
         if any(keyword in normalized for keyword in ("喜欢", "偏好", "优先", "prefer", "preference")):
-            memories.append(("preference", f"用户偏好：{text}"))
+            category = "delivery_preference" if self._is_delivery_related(normalized) else "preference"
+            memories.append((category, f"用户偏好：{text}"))
         if any(keyword in normalized for keyword in ("投诉", "不满", "差评", "complaint")):
             memories.append(("complaint", f"用户投诉记录：{text}"))
         name_match = re.search(r"我叫([\w\u4e00-\u9fff]{2,12})", text)
@@ -88,15 +93,49 @@ class UserMemoryManager:
         return any(keyword in query for keyword in ("记得", "偏好", "历史", "之前", "remember", "preference"))
 
     @staticmethod
-    def _score(query: str, content: str) -> int:
+    def _score(query: str, content: str, category: str) -> int:
         score = 0
-        for token in ("顺丰", "配送", "物流", "投诉", "退款", "airbuds", "homehub"):
+        if category == "delivery_preference" and UserMemoryManager._is_delivery_related(query):
+            score += 5
+        for token in ("顺丰", "京东", "京东物流", "配送", "物流", "快递", "发货", "送货", "投诉", "退款", "airbuds", "homehub"):
             if token.casefold() in query and token.casefold() in content:
                 score += 2
         for token in re.findall(r"[a-zA-Z0-9_]+", query):
             if token.casefold() in content:
                 score += 1
         return score
+
+    @staticmethod
+    def _is_delivery_related(text: str) -> bool:
+        return any(keyword.casefold() in text for keyword in DELIVERY_KEYWORDS)
+
+    @staticmethod
+    def _delete_delivery_preferences(conn: sqlite3.Connection, user_id: str) -> int:
+        cursor = conn.execute(
+            """
+            DELETE FROM user_memories
+            WHERE user_id = ?
+              AND (
+                category = 'delivery_preference'
+                OR (
+                  category = 'preference'
+                  AND (
+                    content LIKE '%配送%'
+                    OR content LIKE '%物流%'
+                    OR content LIKE '%快递%'
+                    OR content LIKE '%发货%'
+                    OR content LIKE '%送货%'
+                    OR content LIKE '%承运%'
+                    OR lower(content) LIKE '%shipping%'
+                    OR lower(content) LIKE '%delivery%'
+                    OR lower(content) LIKE '%courier%'
+                  )
+                )
+              )
+            """,
+            (user_id,),
+        )
+        return cursor.rowcount
 
     def _connect(self) -> sqlite3.Connection:
         if self.db_path != ":memory:":

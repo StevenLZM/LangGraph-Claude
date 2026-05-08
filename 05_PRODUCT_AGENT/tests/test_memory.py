@@ -71,3 +71,26 @@ def test_user_memory_manager_saves_searches_and_deletes_memories(tmp_path):
 
     assert deleted == 1
     assert manager.load_memories("user_001", "配送偏好") == []
+
+
+def test_delivery_preference_replaces_previous_delivery_preference(tmp_path):
+    db_path = tmp_path / "memories.db"
+    manager = UserMemoryManager(str(db_path))
+
+    first_saved = manager.save_from_turn(
+        user_id="user_001",
+        user_message="我喜欢顺丰配送，以后发货优先顺丰。",
+        assistant_answer="已记住你的配送偏好。",
+    )
+    second_saved = manager.save_from_turn(
+        user_id="user_001",
+        user_message="以后给我发货优先京东物流。",
+        assistant_answer="已更新你的配送偏好。",
+    )
+    memories = manager.load_memories("user_001", "你记得我的配送偏好吗？")
+
+    assert first_saved == 1
+    assert second_saved == 1
+    assert len(memories) == 1
+    assert "京东物流" in memories[0]
+    assert "顺丰" not in memories[0]

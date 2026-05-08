@@ -1,0 +1,107 @@
+services:
+  api:
+    build:
+      context: .
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_NAME=production-agent-customer-service
+      - APP_VERSION=0.1.0
+      - LLM_MODE=offline_stub
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://customer_service:${POSTGRES_PASSWORD:-customer_service}@postgres:5432/customer_service
+      - CHECKPOINTER_DB=/app/data/sessions.db
+      - MEMORY_DB=/app/data/memory.db
+      - USER_RATE_LIMIT_PER_MINUTE=${USER_RATE_LIMIT_PER_MINUTE:-10}
+      - GLOBAL_QPS_LIMIT=${GLOBAL_QPS_LIMIT:-100}
+      - SINGLE_REQUEST_TOKEN_BUDGET=${SINGLE_REQUEST_TOKEN_BUDGET:-4000}
+      - GLOBAL_HOURLY_TOKEN_BUDGET=${GLOBAL_HOURLY_TOKEN_BUDGET:-500000}
+      - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2:-false}
+      - LANGCHAIN_ENDPOINT=${LANGCHAIN_ENDPOINT:-https://api.smith.langchain.com}
+      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY:-}
+      - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT:-production-agent-customer-service}
+      - OBSERVABILITY_ENV=docker
+      - QUALITY_ALERT_THRESHOLD=${QUALITY_ALERT_THRESHOLD:-70}
+    volumes:
+      - api_data:/app/data
+    depends_on:
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      - POSTGRES_DB=customer_service
+      - POSTGRES_USER=customer_service
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-customer_service}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U customer_service -d customer_service"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      api:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+  locust:
+    image: locustio/locust:2.31.5
+    profiles:
+      - loadtest
+    ports:
+      - "8089:8089"
+    volumes:
+      - ./load_tests:/mnt/locust:ro
+    command: ["-f", "/mnt/locust/locustfile.py", "--host", "http://api:8000"]
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  api_data:
+  redis_data:
+  pg_data:
+  prometheus_data:
+  grafana_data:

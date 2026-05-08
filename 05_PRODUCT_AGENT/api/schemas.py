@@ -32,6 +32,7 @@ class ChatResponse(BaseModel):
     memory_summary: str = ""
     degraded: bool = False
     degrade_reason: str = ""
+    llm_trace: dict[str, Any] = Field(default_factory=dict)
 
 
 class DeleteMemoriesResponse(BaseModel):

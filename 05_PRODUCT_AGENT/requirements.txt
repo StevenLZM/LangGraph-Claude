@@ -1,6 +1,8 @@
 # LangGraph orchestration
 langgraph>=1.0
 langchain-core
+langchain-openai
+langchain-anthropic
 
 # API
 fastapi

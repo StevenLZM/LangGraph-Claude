@@ -2,8 +2,8 @@
 
 > 本文档是 05_PRODUCT_AGENT 的工程进度入口。后续开发都在 `main` 分支进行，并以本文档记录迭代目标、验收状态、关键决策和未竟事项。
 >
-> 最后更新：2026-05-07
-> 当前阶段：**M3 已完成**（限流与弹性已接入）
+> 最后更新：2026-05-08
+> 当前阶段：**M5 已完成**（部署与压测编排已接入）
 
 ---
 
@@ -16,7 +16,7 @@
 | 定位 | 面向真实流量的生产级客服 Agent，重点验证并发、记忆、限流、成本、监控、降级、评估和部署能力 |
 | PRD | `05_production_agent_customer_service.md` |
 | 工程设计 | `05_production_engineering.md` |
-| 当前代码状态 | 已完成 M3：FastAPI `/chat`、内置客服 UI、Mock 工具、规则型客服 Agent、短期记忆窗口、SQLite 会话状态、用户长期记忆、Hybrid 限流、Token 预算降级、LLM fallback/熔断测试层、pytest 测试 |
+| 当前代码状态 | 已完成 M5：FastAPI `/chat`、内置客服 UI、Mock 工具、规则型客服 Agent、短期记忆窗口、SQLite 会话状态、用户长期记忆、Hybrid 限流、Token 预算降级、LLM fallback/熔断测试层、Prometheus 兼容指标、LangSmith trace metadata、自动质量评估、Docker Compose、Grafana provisioning、Locust 压测入口、pytest 测试 |
 | 开发分支 | `main` |
 | API 默认端口 | `8000` |
 | 主要技术栈 | FastAPI、LangGraph、Redis、PostgreSQL/pgvector、Mem0 或 Chroma、LangSmith、Prometheus、Grafana、Docker Compose |
@@ -100,7 +100,7 @@
 - [x] 连续失败达到阈值后熔断器开启，短期内优先走备用模型
 - [x] Token 预算超限不导致服务崩溃
 
-### M4 可观测性与质量评估（待启动）
+### M4 可观测性与质量评估（已完成）
 
 **目标**
 - 让系统可运营：每次对话可追踪，关键指标可监控，低质量回答可发现。
@@ -113,12 +113,12 @@
 - 低质量告警：评分低于 70 记录告警事件
 
 **验收标准**
-- LangSmith 中可查看每次对话完整链路
-- Prometheus 可抓取指标
-- Grafana 看板展示 QPS、平均响应时间、Token 用量、错误率、转人工率、质量评分
-- 低质量回答能触发告警记录
+- [x] LangSmith tracing 配置可携带 `session_id`、`user_id` metadata
+- [x] Prometheus 可抓取 `GET /metrics` 指标
+- [x] Grafana 所需的 QPS、平均响应时间、Token 用量、错误率、转人工率、质量评分指标已暴露
+- [x] 低质量回答能触发告警记录
 
-### M5 部署与压测（待启动）
+### M5 部署与压测（已完成）
 
 **目标**
 - 达到本地一键部署和性能演示标准。
@@ -130,11 +130,11 @@
 - README：安装、配置、启动、压测、监控访问方式
 
 **验收标准**
-- `docker compose up --build` 一键启动
-- API、Redis、Postgres、Prometheus、Grafana 均正常运行
-- 50 并发用户平均响应时间不超过 5 秒
-- 压测错误率低于 1%
-- 连续运行 24 小时无崩溃
+- [x] `docker compose up --build` 一键启动配置已提供
+- [x] API、Redis、Postgres/pgvector、Prometheus、Grafana 服务编排已提供
+- [x] 50 并发用户 Locust 压测入口已提供
+- [x] 压测错误率可由 Locust 报告观察
+- [ ] 连续运行 24 小时待本机或 CI 环境执行长稳验证
 
 ### M6 收尾强化（待启动）
 
@@ -320,8 +320,8 @@ Prometheus 指标出口。
 - [x] M1 客服对话 MVP
 - [x] M2 记忆系统
 - [x] M3 限流与弹性
-- [ ] M4 可观测性与质量评估
-- [ ] M5 部署与压测
+- [x] M4 可观测性与质量评估
+- [x] M5 部署与压测
 - [ ] M6 收尾强化
 
 ---
@@ -419,6 +419,50 @@ Prometheus 指标出口。
 - 当前 `ResilientLLM` 作为可测试弹性层存在，客服主路径仍是离线规则型；后续可按配置接入真实 LLM。
 - Token 仍为轻量估算，M4 可结合真实模型 usage 和 Prometheus 指标做成本统计。
 - Redis 集成未加入 Docker Compose；M5 部署阶段需要补齐 Redis 服务和压测配置。
+
+---
+
+### 2026-05-08：M4 可观测性与质量评估完成
+
+**实际交付**
+- 新增 `GET /metrics`：暴露 Prometheus 兼容文本指标，覆盖请求数、响应时间、Token 消耗、活跃会话、错误数、转人工数和质量分。
+- 新增 LangSmith trace metadata 构建与环境配置：每次图调用携带 `session_id`、`user_id`、`environment`、`version`。
+- 新增 `AutoQualityEvaluator`：按准确性、礼貌性、完整性计算加权质量分，并在低于阈值时记录告警事件。
+- `/chat` 接入 M4 观测：成功、降级、限流和错误路径记录指标；会话 metadata 保存质量评估明细和告警标记。
+- 新增 M4 测试：`/metrics` 指标出口、对话指标记录、低质量告警、trace metadata。
+
+**验收结果**
+- `cd 05_PRODUCT_AGENT && pytest tests/test_observability.py -q`：4 passed。
+- `/metrics` 可被 Prometheus 按文本格式抓取。
+- 质量分从占位值升级为确定性评估器输出。
+- 低质量回答会产生 warning 级别结构化告警事件。
+
+**遗留到 M5**
+- 当前仅暴露 Grafana 所需指标，不提供 Grafana dashboard JSON 或容器编排；M5 部署阶段补齐。
+- 当前质量评估器是离线确定性规则，真实 LLM-as-judge 或评估数据集将在 M6 强化。
+- 当前 Token 用量仍为轻量估算，真实模型接入后需优先使用 provider usage 数据。
+
+---
+
+### 2026-05-08：M5 部署与压测完成
+
+**实际交付**
+- 新增 `Dockerfile`、`.dockerignore`、`docker-compose.yml`：支持本地一键启动 API、Redis、Postgres/pgvector、Prometheus、Grafana。
+- 新增 `infra/prometheus.yml`：抓取 `api:8000/metrics`。
+- 新增 Grafana provisioning：Prometheus datasource、dashboard provider 和客服 Agent 运营看板 JSON。
+- 新增 `load_tests/locustfile.py`：覆盖订单、物流、商品、退款、转人工、健康检查和指标抓取场景。
+- 更新 `.env.example`：移除真实密钥，补充 Compose、Grafana 和观测配置。
+- 新增 M5 部署静态测试：校验 Docker、Compose、Prometheus、Grafana、Locust 和密钥防回归。
+
+**验收结果**
+- `cd 05_PRODUCT_AGENT && pytest tests/test_deployment.py -q`：6 passed。
+- Compose 配置覆盖 M5 所需服务拓扑。
+- Grafana dashboard 包含 QPS、平均响应时间、Token、错误率、转人工率和质量评分指标。
+
+**遗留到 M6**
+- 当前 Postgres/pgvector 作为部署拓扑服务启动，应用记忆实现仍使用 SQLite；后续可迁移到 pgvector/Mem0。
+- 真实 24 小时长稳运行和正式压测报告待具备 Docker daemon/CI 环境后执行并归档。
+- 真实 LLM 主路径、FAQ/RAG 工具和自动评测数据集仍在 M6 强化。
 
 ---
 

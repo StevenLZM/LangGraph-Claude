@@ -108,6 +108,8 @@ class SessionStore:
             "transfer_reason": metadata.get("transfer_reason", ""),
             "token_used": metadata.get("token_used", 0),
             "quality_score": metadata.get("quality_score"),
+            "quality_evaluation": metadata.get("quality_evaluation"),
+            "quality_alert": metadata.get("quality_alert", False),
             "updated_at": loaded["updated_at"],
         }
 

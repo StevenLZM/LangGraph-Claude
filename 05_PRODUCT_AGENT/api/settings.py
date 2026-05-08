@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     llm_mode: str = "offline_stub"
     anthropic_api_key: str = ""
     openai_api_key: str = ""
+    openai_base_url: str = ""
     primary_model: str = "claude-sonnet-4-6"
     fallback_model: str = "gpt-4o-mini"
 
@@ -40,6 +41,8 @@ class Settings(BaseSettings):
     langchain_endpoint: str = "https://api.smith.langchain.com"
     langchain_api_key: str = ""
     langchain_project: str = "production-agent-customer-service"
+    observability_env: str = "local"
+    quality_alert_threshold: int = 70
 
 
 settings = Settings()

@@ -16,3 +16,5 @@ def test_settings_defaults_are_local_development_friendly():
     assert settings.global_qps_limit == 100
     assert settings.single_request_token_budget == 4000
     assert settings.global_hourly_token_budget == 500000
+    assert settings.observability_env == "local"
+    assert settings.quality_alert_threshold == 70

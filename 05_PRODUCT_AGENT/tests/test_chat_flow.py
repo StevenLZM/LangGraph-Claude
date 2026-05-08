@@ -1,8 +1,22 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from api.main import app
+
+
+class FakeChatLLM:
+    def __init__(self, answer: str) -> None:
+        self.answer = answer
+        self.calls = 0
+        self.messages: list[list[object]] = []
+
+    async def ainvoke(self, messages: list[object]) -> str:
+        self.calls += 1
+        self.messages.append(messages)
+        return self.answer
 
 
 def _chat(message: str, session_id: str = "session_001") -> dict:
@@ -135,3 +149,83 @@ def test_user_memory_recalls_across_sessions_and_can_be_deleted():
     assert after_delete["user_memories"] == []
     assert "顺丰" not in after_delete["answer"]
     assert "暂时没有" in after_delete["answer"]
+
+
+def test_chat_uses_latest_delivery_preference_when_carrier_query_has_no_order_id():
+    user_id = "delivery_preference_user_001"
+
+    _chat_for_user(user_id, "delivery_preference_seed_1", "我喜欢顺丰配送，以后发货优先顺丰")
+    _chat_for_user(user_id, "delivery_preference_seed_2", "以后给我发货优先京东物流")
+    payload = _chat_for_user(user_id, "delivery_preference_query", "给我送货用什么快递？")
+
+    assert "京东物流" in payload["answer"]
+    assert "订单号" in payload["answer"]
+    assert "顺丰" not in payload["answer"]
+    assert payload["llm_trace"]["used_llm"] is False
+    assert payload["llm_trace"]["tool_name"] == "delivery_preference"
+    assert "已读取配送偏好" in payload["llm_trace"]["reasoning_summary"]
+
+
+def test_replacing_delivery_preference_refreshes_response_memories():
+    user_id = "delivery_preference_refresh_user_001"
+
+    _chat_for_user(user_id, "delivery_preference_refresh_seed_1", "我喜欢顺丰配送，以后发货优先顺丰")
+    second = _chat_for_user(user_id, "delivery_preference_refresh_seed_2", "以后给我发货优先京东物流")
+
+    assert second["user_memories"] == ["用户偏好：以后给我发货优先京东物流"]
+
+
+def test_chat_calls_injected_llm_and_returns_trace(monkeypatch):
+    import api.main as main_module
+
+    fake_llm = FakeChatLLM("LLM回答：会优先参考你的京东物流偏好，请提供订单号确认实际承运商。")
+    monkeypatch.setattr(main_module.settings, "llm_mode", "hybrid")
+    monkeypatch.setattr(main_module, "customer_service_llm", fake_llm)
+
+    response = TestClient(app).post(
+        "/chat",
+        json={
+            "user_id": "llm_user_001",
+            "session_id": "llm_session_001",
+            "message": "给我送货用什么快递？",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["answer"].startswith("LLM回答")
+    assert payload["llm_trace"]["used_llm"] is True
+    assert payload["llm_trace"]["mode"] == "hybrid"
+    assert payload["llm_trace"]["model_used"] == "primary"
+    assert payload["llm_trace"]["tool_name"] == "delivery_preference"
+    assert fake_llm.calls == 1
+
+
+def test_hybrid_mode_with_llm_startup_error_keeps_rule_answer(monkeypatch):
+    import api.main as main_module
+
+    fake_llm = FakeChatLLM("offline_stub")
+    monkeypatch.setattr(main_module.settings, "llm_mode", "hybrid")
+    monkeypatch.setattr(main_module, "customer_service_llm", fake_llm)
+    monkeypatch.setattr(
+        main_module,
+        "customer_service_llm_setup",
+        SimpleNamespace(startup_error="OPENAI_API_KEY is not configured."),
+    )
+
+    response = TestClient(app).post(
+        "/chat",
+        json={
+            "user_id": "llm_startup_error_user_001",
+            "session_id": "llm_startup_error_session_001",
+            "message": "给我送货用什么快递？",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["answer"] != "offline_stub"
+    assert "订单号" in payload["answer"]
+    assert payload["llm_trace"]["used_llm"] is False
+    assert "OPENAI_API_KEY" in payload["llm_trace"]["reasoning_summary"]
+    assert fake_llm.calls == 0

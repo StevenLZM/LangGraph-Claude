@@ -1,30 +1,31 @@
 # 05 Product Agent 教学文档
 
-这份文档用于讲解 `05_PRODUCT_AGENT` 当前已经开发完成的部分。重点不是背目录，而是能把一次客服请求从 UI 到 API、再到 LangGraph、规则决策、Mock 工具和测试完整讲清楚。
+这份文档用于讲解 `05_PRODUCT_AGENT` 当前已经完成的 M0-M5。重点不是背目录，而是能把一次客服请求从 UI 到 API、记忆、限流、LangGraph、规则决策、质量评估、指标记录、Docker Compose 部署和 Locust 压测完整讲清楚。
 
 当前真实完成范围：
 
 - M0：项目骨架、FastAPI 健康检查、基础配置、最小 LangGraph 图、pytest 测试。
-- M1：`POST /chat`、内置客服 UI、Mock 订单/物流/商品/退款工具、规则型客服 Agent、转人工标记、退款二次确认、测试覆盖。
+- M1：`POST /chat`、内置客服 UI、Mock 订单/物流/商品/退款工具、规则型客服 Agent、转人工标记、退款二次确认。
 - M2：短期记忆窗口、SQLite 会话状态、用户长期记忆、`GET /sessions/{session_id}`、`DELETE /users/{user_id}/memories`。
+- M3：Hybrid 限流、全局 QPS 控制、Token 预算降级、`ResilientLLM` 重试/备用模型/熔断测试层。
+- M4：`GET /metrics`、Prometheus 兼容指标、LangSmith trace metadata、自动质量评估、低质量告警事件。
+- M5：Dockerfile、Docker Compose、Prometheus/Grafana 编排、Grafana 看板 provisioning、Locust 压测入口。
 
 尚未完成范围：
 
-- M3 限流与弹性：Redis 限流、Token 预算、LLM fallback、熔断。
-- M4 可观测性：Prometheus、LangSmith、质量评估。
-- M5 Docker Compose 和压测。
+- M6：管理接口、评估数据集、自动评测报告、FAQ/RAG 接入和运行手册。
 
-面试时要明确：当前 M2 是“离线可测的客服 MVP + 轻量记忆系统”，不是完整生产级系统。
+面试时要明确：当前 M5 已具备本地可演示的“客服闭环 + 记忆 + 限流 + 观测 + 质量评估 + 容器编排 + 压测入口”能力，但还不是完整线上生产系统；真实外部 LLM、正式压测报告、24 小时长稳验证和评估数据集留到 M6。
 
 ---
 
 ## 1. 项目一句话介绍
 
-`05_PRODUCT_AGENT` 是一个生产级 AI 客服系统的渐进式实现。当前阶段已经做出可演示、可测试的客服闭环：用户在 UI 输入问题，FastAPI 接收请求，加载会话历史和用户记忆，LangGraph 组织状态流转，规则型客服决策调用 Mock 业务工具，最后返回回答、订单上下文、转人工状态、用户记忆和质量分占位。
+`05_PRODUCT_AGENT` 是一个生产级 AI 客服系统的渐进式实现。当前阶段已经跑通可测试、可部署的客服服务：用户从 UI 或 API 发起咨询，FastAPI 做协议校验、限流和 Token 预算，加载会话与用户记忆，进入 LangGraph 状态流，规则型客服决策调用 Mock 业务工具，最后保存会话、评估回答质量、记录 Prometheus 兼容指标并返回响应。M5 进一步提供 Docker Compose、Prometheus、Grafana 和 Locust 压测入口。
 
 面试讲法：
 
-> 这个项目不是从一开始就接真实 LLM 和 Redis/Postgres，而是先把客服业务闭环、接口契约、状态结构、测试基线、UI 演示和轻量记忆系统跑通。这样后续接入限流、监控、真实 LLM 时，每一步都有稳定的验收点。
+> 这个项目不是一开始就追求真实 LLM 和全套 K8s 部署，而是按生产能力拆迭代：先稳定客服闭环和接口契约，再加记忆、限流、预算、弹性、观测和质量评估。这样每个阶段都有自动化测试和可演示验收点。
 
 ---
 
@@ -35,30 +36,43 @@
 ```text
 05_PRODUCT_AGENT/
 ├── api/
-│   ├── main.py          # FastAPI 入口：/、/health、/chat
-│   ├── schemas.py       # /chat 请求和响应模型
-│   ├── settings.py      # .env 配置读取
-│   └── ui.py            # 内置客服工作台 HTML/CSS/JS
+│   ├── main.py                  # FastAPI 入口：/、/health、/chat、/metrics
+│   ├── schemas.py               # /chat 请求和响应模型
+│   ├── settings.py              # .env 配置读取
+│   ├── ui.py                    # 内置客服工作台 HTML/CSS/JS
+│   └── middleware/
+│       └── rate_limiter.py      # 用户限流、QPS、Token 预算
 ├── agent/
-│   ├── graph.py         # LangGraph 工作流装配
-│   ├── state.py         # CustomerServiceState
-│   ├── nodes.py         # context_loader / agent / finalizer 节点
-│   ├── intent.py        # 订单号和意图识别
-│   ├── service.py       # 规则型客服决策
-│   ├── tools.py         # Mock 业务工具
-│   └── prompts.py       # 客服提示词占位
+│   ├── graph.py                 # LangGraph 工作流装配
+│   ├── state.py                 # CustomerServiceState
+│   ├── nodes.py                 # context_loader / agent / finalizer 节点
+│   ├── intent.py                # 订单号和意图识别
+│   ├── service.py               # 规则型客服决策
+│   └── tools.py                 # Mock 业务工具
 ├── memory/
-│   ├── short_term.py    # 摘要 + 最近 8 轮的短期窗口
-│   ├── session_store.py # SQLite 会话状态
-│   └── long_term.py     # SQLite 用户长期记忆
+│   ├── short_term.py            # 摘要 + 最近 8 轮的短期窗口
+│   ├── session_store.py         # SQLite 会话状态
+│   └── long_term.py             # SQLite 用户长期记忆
+├── llm/
+│   └── resilient_llm.py         # 主备模型、重试、熔断
+├── monitoring/
+│   ├── metrics.py               # Prometheus 兼容指标
+│   ├── tracing.py               # LangSmith trace metadata
+│   └── evaluator.py             # 自动质量评估和低质告警
+├── infra/
+│   ├── prometheus.yml           # Prometheus scrape 配置
+│   └── grafana/                 # Grafana datasource/dashboard provisioning
+├── load_tests/
+│   └── locustfile.py            # Locust 压测场景
+├── Dockerfile
+├── docker-compose.yml
 ├── tests/
-│   ├── test_chat_flow.py      # /chat 客服闭环测试
-│   ├── test_tools.py          # Mock 工具测试
-│   ├── test_ui.py             # UI 页面测试
-│   ├── test_graph_skeleton.py # LangGraph 骨架测试
-│   ├── test_health.py         # 健康检查测试
-│   ├── test_settings.py       # 配置默认值测试
-│   └── test_memory.py         # M2 记忆系统测试
+│   ├── test_chat_flow.py
+│   ├── test_memory.py
+│   ├── test_rate_limiter.py
+│   ├── test_llm_fallback.py
+│   ├── test_observability.py
+│   └── test_deployment.py
 ├── README.md
 └── DEV_PROGRESS.md
 ```
@@ -66,14 +80,18 @@
 最重要的依赖方向：
 
 ```text
-api -> memory + agent.graph -> agent.nodes -> agent.service -> agent.intent / agent.tools
+api.main
+  -> api.middleware.rate_limiter
+  -> memory.session_store / memory.long_term / memory.short_term
+  -> agent.graph -> agent.nodes -> agent.service -> agent.intent / agent.tools
+  -> monitoring.tracing / monitoring.evaluator / monitoring.metrics
 ```
 
-这个依赖方向说明：API 层负责协议、会话和记忆接入，不直接写客服业务规则；业务规则集中在 `agent/service.py`，业务数据访问集中在 `agent/tools.py`。
+这个依赖方向说明：API 层是生产边界，负责协议、限流、记忆、观测和响应落库；客服业务规则集中在 `agent/service.py`；业务数据访问集中在 `agent/tools.py`；运营指标集中在 `monitoring/`。
 
 ---
 
-## 3. 一次请求的完整流程
+## 3. 一次 `/chat` 请求的完整流程
 
 以用户输入“我的订单 ORD123456 到哪了？”为例，当前完整链路是：
 
@@ -83,20 +101,23 @@ api -> memory + agent.graph -> agent.nodes -> agent.service -> agent.intent / ag
   -> 前端 fetch("/chat")
   -> api/main.py::chat()
   -> ChatRequest 校验输入
+  -> RateLimiter 检查用户限流和全局 QPS
   -> SessionStore 加载历史会话
   -> UserMemoryManager 召回用户长期记忆
-  -> ContextWindowManager 做短期窗口裁剪
+  -> ContextWindowManager 裁剪短期上下文并估算 token
+  -> RateLimiter 预留单次和全局 token 预算
+  -> build_trace_config 生成 session/user metadata
   -> customer_service_graph.invoke(...)
-  -> agent/graph.py 进入 LangGraph
   -> context_loader_node 初始化上下文
-  -> agent_node 读取最新 HumanMessage
-  -> handle_customer_message 做意图判断
-  -> get_logistics / get_order 读取 Mock 数据
+  -> agent_node 调 handle_customer_message 做客服决策
+  -> get_order / get_logistics / get_product / apply_refund 读取 Mock 业务数据
   -> finalizer_node 计算窗口大小、轮次、响应耗时
-  -> SessionStore 保存本轮会话
-  -> UserMemoryManager 提取并保存关键长期记忆
-  -> ChatResponse 返回 answer / order_context / handoff / memories / quality_score
-  -> UI 更新聊天区、用户记忆、会话摘要、订单上下文和运行状态
+  -> AutoQualityEvaluator 评估准确性、礼貌性、完整性
+  -> SessionStore 保存本轮消息和质量评估 metadata
+  -> UserMemoryManager 提取并保存长期记忆
+  -> record_chat_request 记录 Prometheus 兼容指标
+  -> ChatResponse 返回 answer / context / handoff / memories / quality_score / degrade 状态
+  -> UI 更新聊天区、用户记忆、摘要、订单上下文和运行状态
 ```
 
 流程和代码对照：
@@ -104,97 +125,72 @@ api -> memory + agent.graph -> agent.nodes -> agent.service -> agent.intent / ag
 | 流程 | 关键代码 | 解释 |
 |---|---|---|
 | 页面入口 | `api/main.py::customer_service_workspace` | 返回 `api/ui.py` 里的静态 HTML |
-| 前端提交 | `api/ui.py::sendMessage` | 用 `fetch("/chat")` 调接口 |
 | 请求校验 | `api/schemas.py::ChatRequest` | 校验 `user_id`、`session_id`、`message` |
+| 限流/QPS | `api/middleware/rate_limiter.py::RateLimiter` | 用户每分钟限制和全局每秒限制 |
 | 会话加载 | `memory/session_store.py::load_session` | 读取同一 `session_id` 的历史消息 |
 | 记忆召回 | `memory/long_term.py::load_memories` | 按用户和当前问题召回长期记忆 |
 | 窗口裁剪 | `memory/short_term.py::trim` | 摘要早期消息，保留最近 8 轮 |
-| API 进入图 | `api/main.py::chat` | 把用户输入包装成 `HumanMessage` |
+| Token 预算 | `RateLimiter.reserve_token_budget` | 单次/全局预算超限走降级回复 |
+| Trace metadata | `monitoring/tracing.py::build_trace_config` | 给 LangGraph 调用注入 session/user metadata |
 | 图编排 | `agent/graph.py::build_customer_service_graph` | 定义 `context_loader -> agent -> finalizer` |
-| 状态初始化 | `agent/nodes.py::context_loader_node` | 补齐状态默认值、记录开始时间 |
-| 客服决策 | `agent/nodes.py::agent_node` | 调 `handle_customer_message()` |
-| 意图判断 | `agent/service.py::handle_customer_message` | 按优先级处理转人工、退款、物流、订单、商品 |
+| 客服决策 | `agent/service.py::handle_customer_message` | 按优先级处理转人工、退款、物流、订单、商品 |
 | 工具执行 | `agent/tools.py` | 返回 Mock 订单、物流、商品和退款结果 |
-| 响应收尾 | `agent/nodes.py::finalizer_node` | 计算消息窗口、轮次、响应时间 |
-| 会话保存 | `memory/session_store.py::save_session` | 持久化消息窗口和元数据 |
-| 记忆保存 | `memory/long_term.py::save_from_turn` | 抽取偏好、投诉等长期记忆 |
+| 质量评估 | `monitoring/evaluator.py::AutoQualityEvaluator` | 计算 `quality_score` 和低质告警 |
+| 指标记录 | `monitoring/metrics.py::record_chat_request` | 记录请求数、延迟、Token、质量分等 |
 | 响应模型 | `api/schemas.py::ChatResponse` | 固定 `/chat` 输出结构 |
 
 面试重点：
 
-> 这里的关键不是“写了几个 if”，而是把接口、记忆、状态机、业务决策、工具访问和 UI 展示拆成了不同层。这样后续把 SQLite 换成 pgvector、把规则型决策换成真实 LLM 或 ToolNode 时，API 契约和测试可以基本保持稳定。
+> 这里的关键不是“写了几个 if”，而是把接口、限流、记忆、状态机、业务决策、工具访问、质量评估和指标记录拆成了不同层。后续把 SQLite 换成 pgvector、把规则型决策换成真实 LLM 或 ToolNode 时，API 契约和测试可以保持稳定。
 
 ---
 
-## 4. API 层：FastAPI 如何接住请求
+## 4. API 层：FastAPI 如何承担生产边界
 
 文件：`api/main.py`
 
-关键代码：
+启动时构建核心单例：
 
 ```python
 customer_service_graph = build_customer_service_graph()
-
-app = FastAPI(title=settings.app_name, version=settings.app_version)
+context_window_manager = ContextWindowManager()
+session_store = SessionStore(settings.memory_db)
+user_memory_manager = UserMemoryManager(settings.memory_db)
+quality_evaluator = AutoQualityEvaluator(alert_threshold=settings.quality_alert_threshold)
+rate_limiter = RateLimiter(...)
 ```
 
 含义：
 
-- 服务启动时构建一份 LangGraph。
-- `/chat` 请求复用这份图，不在每次请求里重新组装节点。
-- 当前没有使用 LangGraph checkpointer，但已经通过 `SessionStore` 把 `session_id` 对应的消息窗口持久化到 SQLite。
+- 图、会话存储、长期记忆、限流器和质量评估器在进程内复用。
+- `/chat` 不在每次请求重新构建图或初始化存储。
+- 本地默认使用 SQLite 和内存限流，便于离线演示和测试。
 
-页面入口：
-
-```python
-@app.get("/", response_class=HTMLResponse)
-async def customer_service_workspace() -> str:
-    return CUSTOMER_SERVICE_UI
-```
-
-这让项目不需要单独启动 React、Vue 或 Streamlit。M1 阶段一个 FastAPI 进程即可同时提供 API 和演示 UI。
-
-对话接口：
+核心接口：
 
 ```python
+@app.get("/")
+async def customer_service_workspace() -> str
+
+@app.get("/health")
+async def health() -> dict
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def metrics() -> str
+
 @app.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest) -> ChatResponse:
-    result = customer_service_graph.invoke(
-        {
-            "session_id": req.session_id,
-            "user_id": req.user_id,
-            "messages": [HumanMessage(content=req.message)],
-        },
-        config={"configurable": {"thread_id": req.session_id}},
-    )
+async def chat(req: ChatRequest) -> ChatResponse
 ```
 
-解释：
+`/chat` 的职责不是直接写业务逻辑，而是组织生产链路：
 
-- `ChatRequest` 负责输入校验。
-- 用户文本被转成 LangChain 的 `HumanMessage`。
-- `thread_id` 使用 `session_id`，同时 API 层用同一个 `session_id` 加载和保存 SQLite 会话。
-- 当前 `build_customer_service_graph()` 没有传入 checkpointer，所以它还不保存历史会话。
-
-返回响应：
-
-```python
-return ChatResponse(
-    session_id=result.get("session_id", req.session_id),
-    user_id=result.get("user_id", req.user_id),
-    answer=answer,
-    needs_human_transfer=result.get("needs_human_transfer", False),
-    transfer_reason=result.get("transfer_reason", ""),
-    order_context=result.get("order_context"),
-    token_used=result.get("token_used", 0),
-    response_time_ms=result.get("response_time_ms", 0),
-    quality_score=result.get("quality_score"),
-)
+```text
+校验 -> 限流 -> 记忆/会话 -> token 预算 -> 图调用 -> 质量评估 -> 指标 -> 保存 -> 响应
 ```
 
 面试重点：
 
-> API 层只做协议转换：HTTP JSON -> LangGraph State -> HTTP JSON。它不直接实现订单查询、退款规则和转人工判断，这样边界更清晰。
+> API 层是生产边界。它接住 HTTP 请求，处理限流、预算、观测和持久化，再把业务判断交给 Agent 图和 service 层。这样服务治理能力不会散落在业务规则里。
 
 ---
 
@@ -223,17 +219,6 @@ class ChatRequest(BaseModel):
 - `min_length=1`：防止字段完全为空。
 - `value.strip()`：防止 `"   "` 这种空白输入。
 
-测试对应：
-
-```python
-def test_chat_rejects_empty_message():
-    response = client.post(
-        "/chat",
-        json={"user_id": "user_001", "session_id": "session_001", "message": "   "},
-    )
-    assert response.status_code == 422
-```
-
 响应模型：
 
 ```python
@@ -247,19 +232,29 @@ class ChatResponse(BaseModel):
     token_used: int
     response_time_ms: int
     quality_score: int | None
+    user_memories: list[str] = Field(default_factory=list)
+    memory_summary: str = ""
+    degraded: bool = False
+    degrade_reason: str = ""
 ```
+
+重点字段：
+
+- `quality_score`：M4 后由 `AutoQualityEvaluator` 计算，不再是纯占位。
+- `token_used`：当前仍是轻量估算；真实模型接入后应优先使用 provider usage。
+- `degraded` / `degrade_reason`：M3 Token 预算超限时的显式降级信号。
 
 面试重点：
 
-> 生产系统里接口返回结构要稳定。即使当前 `quality_score` 和 `token_used` 还是占位，也先固定字段，后续接入真实评估和 Token 统计时不会破坏前端和调用方。
+> 生产系统里接口返回结构要稳定。`quality_score`、`token_used`、`degraded` 这些字段让前端、监控和调用方提前适配运营视角，而不是只拿一段自然语言回答。
 
 ---
 
-## 6. LangGraph 层：为什么 M1 也要用图
+## 6. LangGraph 层：为什么现在仍保持线性图
 
 文件：`agent/graph.py`
 
-当前图很简单：
+当前图：
 
 ```python
 workflow = StateGraph(CustomerServiceState)
@@ -282,14 +277,14 @@ START -> context_loader -> agent -> finalizer -> END
 
 为什么不用普通函数直接写完？
 
-- M1 虽然简单，但 M2 已经加入记忆加载、窗口裁剪和会话持久化。
-- M3 要加入限流、预算、LLM fallback。
-- M4 要加入质量评估和指标记录。
-- LangGraph 提前把“客服系统是状态流转”这个架构固定下来。
+- M2 已经加入记忆加载、窗口裁剪和会话持久化。
+- M3 在 API 边界加入限流、预算和降级，图内部保持业务状态流简单。
+- M4 在 API 边界加入 trace metadata、质量评估和指标记录，图调用天然可被追踪。
+- 后续如果引入 ToolNode、LLM agent、多轮工具调用或 quality node，图结构可以平滑扩展。
 
 面试重点：
 
-> 这个阶段的图看起来简单，但它是为后续生产能力留扩展点。真实生产 Agent 往往不是一次函数调用，而是一条可观测、可插拔、可恢复的状态流。
+> 这个阶段的图看起来简单，但它固定了“客服系统是一条状态流”这个架构。生产能力不一定都塞进图里：限流和 HTTP 指标更适合 API 边界，业务推理和工具链路更适合图里。
 
 ---
 
@@ -297,31 +292,29 @@ START -> context_loader -> agent -> finalizer -> END
 
 文件：`agent/state.py`
 
-关键代码：
+关键结构：
 
 ```python
 class CustomerServiceState(TypedDict, total=False):
     session_id: str
     user_id: str
-
     messages: Annotated[list[BaseMessage], add_messages]
     window_size: int
     total_turns: int
-
     user_profile: dict[str, Any]
     user_memories: list[str]
+    memory_summary: str
     order_context: dict[str, Any] | None
-
     needs_human_transfer: bool
     transfer_reason: str
-
     token_used: int
     response_time_ms: int
     quality_score: int | None
     tool_name: str
+    _started_at: float
 ```
 
-最关键的是这一行：
+最关键的是：
 
 ```python
 messages: Annotated[list[BaseMessage], add_messages]
@@ -331,13 +324,7 @@ messages: Annotated[list[BaseMessage], add_messages]
 
 - `messages` 不是普通 list 覆盖。
 - LangGraph 合并节点输出时会用 `add_messages` reducer，把新消息追加进去。
-- 所以 `agent_node` 返回 `AIMessage` 后，最终 state 中会同时有用户消息和客服消息。
-
-M1 中还没有真正的长期记忆，但字段已经预留：
-
-- `user_profile`
-- `user_memories`
-- `order_context`
+- `agent_node` 返回 `AIMessage` 后，最终 state 中同时包含用户消息和客服消息。
 
 面试重点：
 
@@ -349,77 +336,36 @@ M1 中还没有真正的长期记忆，但字段已经预留：
 
 文件：`agent/nodes.py`
 
-### 8.1 context_loader_node
+### 8.1 `context_loader_node`
 
-```python
-def context_loader_node(state: CustomerServiceState) -> dict:
-    messages = list(state.get("messages") or [])
-    return {
-        "session_id": state.get("session_id", ""),
-        "user_id": state.get("user_id", ""),
-        "window_size": len(messages),
-        "total_turns": state.get("total_turns", _count_human_turns(messages)),
-        "_started_at": time.perf_counter(),
-    }
-```
+职责：
 
-它的职责是：
+- 补齐 `session_id`、`user_id`、记忆、转人工、token、质量分等默认字段。
+- 计算当前消息窗口大小和用户轮次。
+- 记录 `_started_at`，供 `finalizer_node` 计算响应耗时。
 
-- 补齐默认字段。
-- 计算当前消息窗口大小。
-- 统计用户轮次。
-- 记录开始时间，给 finalizer 算响应耗时。
+### 8.2 `agent_node`
 
-### 8.2 agent_node
-
-```python
-latest_human = next((message for message in reversed(messages) if isinstance(message, HumanMessage)), None)
-if latest_human is not None:
-    decision = handle_customer_message(str(latest_human.content))
-    return {
-        "messages": [AIMessage(content=decision.answer)],
-        "order_context": decision.order_context,
-        "needs_human_transfer": decision.needs_human_transfer,
-        "transfer_reason": decision.transfer_reason,
-        "quality_score": decision.quality_score,
-        "tool_name": decision.tool_name,
-        "token_used": max(1, len(str(latest_human.content)) // 2),
-    }
-```
-
-它的职责是：
+职责：
 
 - 找到最新用户消息。
 - 调用 `handle_customer_message()` 做客服决策。
 - 把决策结果转换成 LangGraph state patch。
 - 返回新的 `AIMessage`，由 `add_messages` 追加到消息列表。
+- 根据输入长度给出轻量 `token_used` 估算。
 
-### 8.3 finalizer_node
+### 8.3 `finalizer_node`
 
-```python
-def finalizer_node(state: CustomerServiceState) -> dict:
-    messages = list(state.get("messages") or [])
-    started_at = state.get("_started_at")
-    response_time_ms = 0
-    if isinstance(started_at, float):
-        response_time_ms = max(0, int((time.perf_counter() - started_at) * 1000))
-
-    return {
-        "window_size": len(messages),
-        "total_turns": _count_human_turns(messages),
-        "response_time_ms": response_time_ms,
-    }
-```
-
-它的职责是收尾，不做业务判断：
+职责：
 
 - 更新最终窗口大小。
 - 更新总轮次。
 - 记录响应耗时。
+- 不做业务判断。
 
 面试重点：
 
-> 节点要单一职责。`context_loader` 负责上下文准备，`agent` 负责业务决策，`finalizer` 负责运行指标收尾。这样以后加记忆、监控或质量评估时，不需要把一个大函数拆开重构。
+> 节点要单一职责。`context_loader` 负责上下文准备，`agent` 负责业务决策，`finalizer` 负责运行指标收尾。质量评估和 Prometheus 指标目前放在 API 边界，是因为它们关注 HTTP 请求和最终响应，而不是单个图节点。
 
 ---
 
@@ -447,18 +393,18 @@ def contains_any(text: str, keywords: tuple[str, ...]) -> bool:
 
 当前支持的意图：
 
-- `is_human_transfer_request`
-- `is_refund_request`
-- `is_refund_confirmed`
-- `is_logistics_query`
-- `is_order_query`
-- `is_product_query`
+- 转人工/投诉/法律问题。
+- 退款申请和退款确认。
+- 物流查询。
+- 订单查询。
+- 商品查询。
+- 记忆召回和偏好保存。
 
-为什么 M1 不直接用 LLM 判断意图？
+为什么当前主路径不直接用 LLM 判断意图？
 
 - 离线可测，不依赖密钥和网络。
 - 行为可预测，适合建立测试基线。
-- 客服关键规则，比如退款二次确认和转人工边界，必须确定性更强。
+- 退款二次确认、投诉、法律和转人工是客服安全边界，确定性规则更可靠。
 - 后续接真实 LLM 时可以用这些规则作为 guardrail。
 
 面试重点：
@@ -467,7 +413,7 @@ def contains_any(text: str, keywords: tuple[str, ...]) -> bool:
 
 ---
 
-## 10. 客服决策层：M1 的业务核心
+## 10. 客服决策层：业务核心
 
 文件：`agent/service.py`
 
@@ -487,32 +433,26 @@ class CustomerServiceDecision:
 这个对象把客服决策标准化：
 
 - `answer`：给用户看的回答。
-- `order_context`：给 UI 或后续节点看的结构化上下文。
+- `order_context`：给 UI、质量评估或后续节点看的结构化上下文。
 - `needs_human_transfer`：是否转人工。
 - `transfer_reason`：为什么转人工。
-- `quality_score`：M4 前的占位分数。
+- `quality_score`：规则路径的初始分，M4 最终返回值由评估器计算。
 - `tool_name`：本轮用了什么工具或路径。
 
-### 10.1 决策优先级
-
-`handle_customer_message()` 的处理顺序是：
+决策优先级：
 
 ```text
 转人工/投诉/法律
+  -> 记忆召回
   -> 退款
   -> 物流
   -> 订单
   -> 商品
+  -> 偏好保存
   -> fallback
 ```
 
-为什么转人工优先？
-
-- 用户明确要求人工时，系统不应该继续硬答。
-- 投诉、法律、纠纷属于客服安全边界。
-- 这也是 05 项目相比普通 Agent 更偏生产场景的体现。
-
-### 10.2 退款必须二次确认
+### 10.1 退款必须二次确认
 
 未确认时：
 
@@ -535,23 +475,11 @@ if refund["refund_status"] == "submitted":
     )
 ```
 
-对应测试：
-
-```python
-def test_refund_requires_explicit_confirmation_before_submit():
-    first = _chat("我要给订单 ORD123456 退款", session_id="refund_session")
-    assert "确认" in first["answer"]
-    assert "已提交" not in first["answer"]
-
-    confirmed = _chat("我确认退款 ORD123456", session_id="refund_session")
-    assert "退款申请已提交" in confirmed["answer"]
-```
-
 面试重点：
 
-> 客服系统不能把“用户提到退款”直接理解成“用户确认提交退款”。M1 用显式确认保护了高风险动作，这是生产 Agent 中非常重要的安全边界。
+> 客服系统不能把“用户提到退款”直接理解成“用户确认提交退款”。当前实现要求用户明确确认后才调用 `apply_refund(..., confirmed=True)`，这是高风险动作的安全边界。
 
-### 10.3 物流和订单为什么分开
+### 10.2 物流和订单为什么分开
 
 物流查询：
 
@@ -573,11 +501,7 @@ if order_id and is_order_query(message):
 
 - 订单查询回答商品、金额、订单状态、预计送达。
 - 物流查询回答承运商、运单号、当前位置、物流事件。
-- `order_context` 在物流场景会合并订单和物流信息，方便 UI 右侧展示。
-
-面试重点：
-
-> M1 虽然是 Mock 数据，但已经把“自然语言回答”和“结构化上下文”分开了。真实系统里结构化上下文可以继续给监控、转人工、后续记忆和质检使用。
+- `order_context` 在物流场景会合并订单和物流信息，方便 UI、转人工和质检复用。
 
 ---
 
@@ -594,158 +518,25 @@ def get_product(query: str) -> dict
 def apply_refund(order_id: str, *, confirmed: bool) -> dict
 ```
 
-### 11.1 为什么返回 deepcopy
+Mock 工具的设计要求：
 
-```python
-def get_order(order_id: str) -> dict:
-    order = MOCK_ORDERS.get(order_id.upper())
-    if order is None:
-        return {"order_id": order_id.upper(), "status": "未找到"}
-    return deepcopy(order)
-```
-
-原因：
-
-- 防止调用方修改 Mock 数据源。
-- 保持工具函数无副作用。
-- 这和真实数据库读取后的 DTO 思路接近。
-
-### 11.2 退款工具的 confirmed 参数
-
-```python
-def apply_refund(order_id: str, *, confirmed: bool) -> dict:
-    ...
-    if not confirmed:
-        return {
-            **order,
-            "refund_status": "confirmation_required",
-            "message": "退款会进入人工复核，请确认是否继续提交退款申请。",
-        }
-```
-
-`confirmed` 用关键字参数强制传入，避免误调用：
-
-```python
-apply_refund("ORD123456", confirmed=True)
-```
-
-比下面这种更安全：
-
-```python
-apply_refund("ORD123456", True)
-```
+- 输入参数明确。
+- 输出结构化 dict。
+- 找不到数据时返回可预期状态，不抛不可控异常。
+- 退款这类危险动作必须显式传入 `confirmed=True`。
+- 返回数据使用 copy，避免调用方污染 Mock 数据源。
 
 面试重点：
 
-> Mock 工具不是随便返回字符串。它应该尽量模拟真实业务工具的接口：输入参数明确、输出结构化、失败路径可预期、危险动作需要显式确认。
+> Mock 工具不是随便返回字符串。它应该尽量模拟真实业务工具的接口：输入参数明确、输出结构化、失败路径可预期、危险动作需要显式确认。这样后续替换成数据库或外部 API 时，上层改动最小。
 
 ---
 
-## 12. UI 层：为什么用 FastAPI 内置页面
-
-文件：`api/ui.py`
-
-当前 UI 是一个单文件 HTML：
-
-- 左侧：用户 ID、会话 ID、快捷问题。
-- 中间：聊天区和输入框。
-- 右侧：质量分、Token、转人工状态、转人工原因、订单上下文。
-
-核心前端调用：
-
-```javascript
-const response = await fetch("/chat", {
-  method: "POST",
-  headers: {"Content-Type": "application/json"},
-  body: JSON.stringify({
-    user_id: document.querySelector("#userId").value,
-    session_id: document.querySelector("#sessionId").value,
-    message,
-  }),
-});
-```
-
-响应后更新状态：
-
-```javascript
-document.querySelector("#quality").textContent = payload.quality_score ?? "-";
-document.querySelector("#tokens").textContent = payload.token_used ?? "-";
-document.querySelector("#handoff").textContent = payload.needs_human_transfer ? "是" : "否";
-document.querySelector("#context").textContent = JSON.stringify(payload.order_context || {}, null, 2);
-```
-
-为什么 M1 不用 React/Vue？
-
-- 当前目标是客服闭环，不是复杂前端工程。
-- 一个 FastAPI 服务即可演示，启动成本低。
-- UI 只需要验证核心交互：发消息、看回答、看上下文、看转人工状态。
-
-面试重点：
-
-> M1 的 UI 是为“演示和调试 Agent 行为”服务的，不是产品级前端。它把 `order_context`、`quality_score`、`token_used` 这些后端字段可视化，方便说明生产 Agent 不只是聊天，还要暴露可运营信息。
-
----
-
-## 13. 测试层：每个测试在保护什么
-
-当前测试共 17 个，核心测试文件如下。
-
-### 13.1 `tests/test_chat_flow.py`
-
-覆盖客服主流程：
-
-- 订单状态：`test_chat_answers_order_status`
-- 物流状态：`test_chat_answers_logistics_status`
-- 商品库存：`test_chat_answers_product_question`
-- 退款确认：`test_refund_requires_explicit_confirmation_before_submit`
-- 转人工：`test_chat_marks_human_transfer_for_complaint_and_legal_issue`
-- 中英混合：`test_chat_handles_mixed_english_and_chinese`
-- 空消息校验：`test_chat_rejects_empty_message`
-
-这组测试说明 M1 的验收标准不是口头描述，而是可重复运行的自动化检查。
-
-### 13.2 `tests/test_tools.py`
-
-覆盖 Mock 工具：
-
-- `get_order`
-- `get_logistics`
-- `get_product`
-- `apply_refund`
-- `list_customer_service_tools`
-
-面试时可以强调：
-
-> 工具层单独测试，能避免所有问题都要通过 `/chat` 黑盒排查。业务工具错了，就先在工具测试里定位。
-
-### 13.3 `tests/test_ui.py`
-
-```python
-def test_root_serves_customer_service_workspace():
-    response = client.get("/")
-    assert response.status_code == 200
-    assert "智能客服工作台" in response.text
-    assert "/chat" in response.text
-    assert "订单上下文" in response.text
-```
-
-这个测试不验证浏览器交互细节，但保护了 M1 的基本 UI 入口不被破坏。
-
-### 13.4 `tests/test_graph_skeleton.py`
-
-保护 LangGraph 能编译、节点存在、离线调用能返回客服消息。
-
-面试重点：
-
-> 测试按层分布：API 流程测试、工具单元测试、UI 入口测试、图结构测试。这样比只做端到端测试更容易定位问题。
-
----
-
-## 14. M2 记忆系统：短期、会话、长期三层
+## 12. M2 记忆系统：短期、会话、长期三层
 
 M2 的核心变化是把“每次请求都像第一次见用户”升级为“能管理当前会话，也能跨会话记住用户关键信息”。
 
-### 14.1 短期记忆：ContextWindowManager
+### 12.1 短期记忆：`ContextWindowManager`
 
 文件：`memory/short_term.py`
 
@@ -771,25 +562,11 @@ trimmed = [SystemMessage(content=summary)] + recent_messages
 - 用摘要保留早期对话的关键背景。
 - 后续接真实 LLM 时，可以把摘要作为系统上下文。
 
-对应测试：
-
-```python
-def test_context_window_summarizes_old_messages_and_keeps_recent_turns():
-    ...
-    assert isinstance(trimmed[0], SystemMessage)
-    assert len(trimmed) <= 17
-    assert manager.count_tokens(trimmed) <= 260
-```
-
-面试重点：
-
-> 短期记忆解决的是当前会话的上下文窗口问题，不是用户画像。它应该控制 token 增长，保留最近对话，并把早期内容压缩成摘要。
-
-### 14.2 会话状态：SessionStore
+### 12.2 会话状态：`SessionStore`
 
 文件：`memory/session_store.py`
 
-会话保存：
+会话状态解决的是同一个 `session_id` 的连续对话和状态查询：
 
 ```python
 session_store.save_session(
@@ -800,6 +577,10 @@ session_store.save_session(
         "summary": memory_summary,
         "needs_human_transfer": result.get("needs_human_transfer", False),
         "transfer_reason": result.get("transfer_reason", ""),
+        "token_used": token_used,
+        "quality_score": quality_score,
+        "quality_evaluation": evaluation.to_dict(),
+        "quality_alert": not evaluation.passed,
     },
 )
 ```
@@ -815,13 +596,9 @@ async def get_session(session_id: str) -> dict:
     return session
 ```
 
-当前没有直接使用 LangGraph 的 SQLite checkpointer，而是在 API 层用 SQLite 保存消息窗口和元数据。这个实现更轻量，足够满足 M2 的“服务重启后可查询或恢复会话状态”要求。
+当前没有直接使用 LangGraph SQLite checkpointer，而是在 API 层用 SQLite 保存消息窗口和元数据。这个实现更轻量，足够满足当前“服务重启后可查询或恢复会话材料”的要求。
 
-面试重点：
-
-> 会话状态解决的是同一个 `session_id` 的连续对话和状态查询。它和长期用户记忆不是一回事，不能混在一个消息列表里。
-
-### 14.3 长期记忆：UserMemoryManager
+### 12.3 长期记忆：`UserMemoryManager`
 
 文件：`memory/long_term.py`
 
@@ -831,42 +608,404 @@ async def get_session(session_id: str) -> dict:
 - 投诉：例如“我对物流很不满”。
 - 用户资料：例如“我叫张三”。
 
-保存入口：
-
-```python
-user_memory_manager.save_from_turn(req.user_id, req.message, answer)
-```
-
-召回入口：
+入口：
 
 ```python
 user_memories = user_memory_manager.load_memories(req.user_id, req.message)
+user_memory_manager.save_from_turn(req.user_id, req.message, answer)
+deleted = user_memory_manager.delete_memories(user_id)
 ```
-
-删除入口：
-
-```python
-@app.delete("/users/{user_id}/memories")
-async def delete_user_memories(user_id: str) -> DeleteMemoriesResponse:
-    deleted = user_memory_manager.delete_memories(user_id)
-    return DeleteMemoriesResponse(user_id=user_id, deleted=deleted)
-```
-
-当前检索是轻量关键词匹配，不是向量检索。这是刻意的第一版选择：接口先稳定，后续可以把 SQLite 实现替换成 Mem0 + pgvector。
 
 面试重点：
 
-> 长期记忆解决的是跨会话用户画像和历史事件。它必须有删除接口，否则无法满足隐私合规和用户可控性。
+> 短期记忆解决上下文窗口，会话状态解决同一 `session_id` 的连续性，长期记忆解决跨会话用户画像。长期记忆必须有删除接口，否则不满足用户可控性和隐私合规。
 
 ---
 
-## 15. 当前实现和设计稿的差异
+## 13. M3 限流与弹性：成本和失败影响控制
 
-这一节面试时很重要，因为它能体现你对项目状态诚实且清楚。
+M3 的目标是控制成本和失败影响，让系统在高频请求、Token 超支、LLM 异常时仍能给出可控响应。
 
-### 15.1 当前没有真实 LLM
+### 13.1 `RateLimiter` 的三类保护
 
-当前是规则型客服决策：
+文件：`api/middleware/rate_limiter.py`
+
+当前能力：
+
+- 用户级限流：默认同一用户每分钟 10 次请求，第 11 次返回 `429`。
+- 全局 QPS：默认每秒 100 次请求，超限返回 `503`。
+- Token 预算：单次默认 4000 tokens，全局每小时默认 500000 tokens。
+
+Hybrid 策略：
+
+```text
+REDIS_URL 为空
+  -> 使用进程内存计数，适合本地演示和测试
+
+REDIS_URL 已配置
+  -> 使用 Redis async counter，适合多进程/多实例部署
+```
+
+为什么要有内存后端？
+
+- 本地开发不需要先启动 Redis。
+- pytest 不依赖外部服务。
+- 接口和行为先稳定，M5 已用 Docker Compose 补齐 Redis 服务编排。
+
+### 13.2 Token 预算超限为什么返回降级 200
+
+在 `/chat` 中先估算上下文 token，再预留预算：
+
+```python
+estimated_tokens = context_window_manager.count_tokens(messages)
+try:
+    await rate_limiter.reserve_token_budget(estimated_tokens)
+except TokenBudgetExceeded as exc:
+    return _build_degraded_chat_response(...)
+```
+
+单次或全局预算超限时，系统不崩溃，也不返回 500，而是返回简化客服回复：
+
+```json
+{
+  "degraded": true,
+  "degrade_reason": "single_request_token_budget_exceeded"
+}
+```
+
+面试重点：
+
+> 预算超限是生产系统的正常风险，不应该变成服务异常。M3 把它设计成可观测、可解释的降级响应：用户得到明确提示，调用方也能通过 `degraded` 字段知道本轮不是完整处理。
+
+### 13.3 `ResilientLLM` 是测试层还是主路径
+
+文件：`llm/resilient_llm.py`
+
+当前实现了：
+
+- 主模型失败后指数退避重试。
+- 主模型持续失败后切换备用模型。
+- 连续失败达到阈值后熔断，短时间内优先走备用模型。
+- 可注入 fake client，便于离线测试 fallback、retry、circuit breaker。
+
+当前客服主路径仍是规则型离线实现，`ResilientLLM` 是可测试的弹性层，不直接影响 `/chat` 的客服回答。
+
+面试重点：
+
+> M3 先把模型调用的弹性边界做成可测试组件。等主路径切到真实 LLM 时，Agent 节点不应该直接调用裸模型，而应该通过 `ResilientLLM` 这一层处理重试、备用模型和熔断。
+
+---
+
+## 14. M4 可观测性与质量评估
+
+M4 的目标是让系统可运营：每次对话可追踪，关键指标可监控，低质量回答可发现。
+
+### 14.1 LangSmith trace metadata
+
+文件：`monitoring/tracing.py`
+
+核心函数：
+
+```python
+def build_trace_config(
+    *,
+    session_id: str,
+    user_id: str,
+    environment: str,
+    app_version: str,
+) -> dict[str, Any]:
+    return {
+        "tags": ["customer-service", f"session:{session_id}", f"user:{user_id}"],
+        "metadata": {
+            "session_id": session_id,
+            "user_id": user_id,
+            "environment": environment,
+            "version": app_version,
+        },
+    }
+```
+
+在图调用中注入：
+
+```python
+result = customer_service_graph.invoke(
+    state,
+    config={
+        "configurable": {"thread_id": req.session_id},
+        "tags": trace_config["tags"],
+        "metadata": trace_config["metadata"],
+    },
+)
+```
+
+本地默认 `LANGCHAIN_TRACING_V2=false`，不会强制访问外部 LangSmith；配置密钥后可打开 tracing。
+
+### 14.2 Prometheus 兼容指标
+
+文件：`monitoring/metrics.py`
+
+当前暴露：
+
+- `agent_requests_total{status=...}`：请求数。
+- `agent_response_time_seconds_count/sum`：响应时间。
+- `agent_tokens_total{type="estimated"}`：估算 Token 消耗。
+- `agent_active_sessions`：活跃会话数。
+- `agent_quality_score_count/sum`：质量分。
+- `agent_errors_total`：错误数。
+- `agent_human_transfers_total`：转人工数。
+
+接口：
+
+```python
+@app.get("/metrics", response_class=PlainTextResponse)
+async def metrics() -> str:
+    return render_prometheus_metrics()
+```
+
+本地单进程运行时不强制依赖 Prometheus Server 或 Grafana。M5 已提供 Compose 编排，Prometheus 会抓取 `api:8000/metrics`，Grafana 会自动加载客服运营看板。
+
+### 14.3 自动质量评估
+
+文件：`monitoring/evaluator.py`
+
+评估维度：
+
+```text
+accuracy     40%
+politeness   30%
+completeness 30%
+```
+
+接口：
+
+```python
+evaluation = quality_evaluator.evaluate(
+    question=req.message,
+    answer=answer,
+    context={
+        "order_context": result.get("order_context"),
+        "needs_human_transfer": result.get("needs_human_transfer", False),
+        "transfer_reason": result.get("transfer_reason", ""),
+        "user_memories": user_memories,
+    },
+)
+quality_score = evaluation.score
+```
+
+低质量告警：
+
+```python
+if not evaluation.passed:
+    self.trigger_alert(question=question, answer=answer, evaluation=evaluation)
+```
+
+当前评估器是确定性规则，不调用真实 LLM-as-judge。这样本地测试稳定，后续 M6 可以替换为评估数据集 + LLM 评审。
+
+面试重点：
+
+> M4 的价值不是“有一个分数”，而是把质量评估接入主链路：响应返回 `quality_score`，会话 metadata 保存评估明细，低于阈值产生告警事件，Prometheus 指标可被抓取。
+
+---
+
+## 15. M5 部署与压测：本地生产拓扑
+
+M5 的目标是把本地服务从“单进程可运行”推进到“一键启动完整演示栈”。
+
+### 15.1 Dockerfile 和 Compose 栈
+
+核心文件：
+
+```text
+Dockerfile
+docker-compose.yml
+.dockerignore
+```
+
+Compose 服务：
+
+- `api`：FastAPI 应用，容器内使用 `uvicorn api.main:app --host 0.0.0.0 --port 8000`。
+- `redis`：为 M3 `RateLimiter` 提供 Redis 计数后端。
+- `postgres`：使用 `pgvector/pgvector:pg16`，先作为 M5 拓扑服务启动。
+- `prometheus`：抓取 `api:8000/metrics`。
+- `grafana`：自动加载 Prometheus datasource 和客服 Agent 看板。
+- `locust`：通过 `loadtest` profile 启动压测入口。
+
+面试重点：
+
+> M5 的重点不是把所有存储都迁移到 Postgres，而是先把 API、缓存、数据库、监控、看板和压测工具放进同一套可启动拓扑。当前应用记忆仍是 SQLite，Postgres/pgvector 是后续记忆升级的部署基础。
+
+### 15.2 Prometheus 和 Grafana provisioning
+
+核心文件：
+
+```text
+infra/prometheus.yml
+infra/grafana/provisioning/datasources/prometheus.yml
+infra/grafana/provisioning/dashboards/customer-service.yml
+infra/grafana/dashboards/customer-service.json
+```
+
+Grafana 看板覆盖：
+
+- QPS by status。
+- 平均响应时间。
+- Token 使用。
+- 活跃会话。
+- 错误率。
+- 转人工率。
+- 平均质量分。
+
+面试重点：
+
+> M4 暴露指标，M5 负责把指标接入可视化。这样能说明系统不只是“有 `/metrics`”，而是有可运营的看板入口。
+
+### 15.3 Locust 压测入口
+
+文件：`load_tests/locustfile.py`
+
+压测场景覆盖：
+
+- 订单查询。
+- 物流查询。
+- 商品咨询。
+- 退款申请和确认。
+- 转人工。
+- 健康检查。
+- 指标抓取。
+
+运行方式：
+
+```bash
+docker compose --profile loadtest up locust
+```
+
+或无界面压测：
+
+```bash
+docker compose --profile loadtest run --rm locust \
+  -f /mnt/locust/locustfile.py \
+  --host http://api:8000 \
+  --headless -u 50 -r 5 -t 2m
+```
+
+面试重点：
+
+> 当前 M5 提供压测入口和场景，不等于已经完成正式压测报告。正式报告需要在稳定 Docker 环境里运行，并记录平均延迟、P95、错误率和资源占用。
+
+---
+
+## 16. UI 层：为什么用 FastAPI 内置页面
+
+文件：`api/ui.py`
+
+当前 UI 是一个单文件 HTML：
+
+- 左侧：用户 ID、会话 ID、快捷问题。
+- 中间：聊天区和输入框。
+- 右侧：质量分、Token、转人工状态、转人工原因、降级状态、用户记忆、会话摘要、订单上下文。
+
+核心前端调用：
+
+```javascript
+const response = await fetch("/chat", {
+  method: "POST",
+  headers: {"Content-Type": "application/json"},
+  body: JSON.stringify({
+    user_id: document.querySelector("#userId").value,
+    session_id: document.querySelector("#sessionId").value,
+    message,
+  }),
+});
+```
+
+为什么不用 React/Vue？
+
+- 当前目标是演示和调试 Agent 行为，不是复杂前端工程。
+- 一个 FastAPI 服务即可提供 API 和演示 UI。
+- UI 重点是可视化 `order_context`、`quality_score`、`token_used`、`degraded`、`user_memories` 等生产运营字段。
+
+面试重点：
+
+> 这个 UI 是工程演示台，不是产品级前端。它让面试官能直观看到客服回答、结构化上下文、转人工、记忆、降级和质量分，而不是只看接口 JSON。
+
+---
+
+## 17. 测试层：每组测试在保护什么
+
+当前完整测试覆盖 M0-M4。
+
+### 17.1 `tests/test_chat_flow.py`
+
+保护客服主流程：
+
+- 订单状态。
+- 物流状态。
+- 商品库存。
+- 退款二次确认。
+- 转人工。
+- 中英文混合输入。
+- 空消息 422。
+- 会话查询。
+- 长期记忆保存、召回和删除。
+
+### 17.2 `tests/test_memory.py`
+
+保护 M2 记忆系统：
+
+- 短期窗口裁剪和摘要。
+- SQLite 会话持久化。
+- 用户长期记忆保存、召回、删除。
+
+### 17.3 `tests/test_rate_limiter.py`
+
+保护 M3 限流和预算：
+
+- 同一用户第 11 次请求返回 `429`。
+- 全局 QPS 超限返回 `503`。
+- 全局 Token 预算超限返回降级 `200`。
+- 单次 Token 预算超限返回降级 `200`。
+
+### 17.4 `tests/test_llm_fallback.py`
+
+保护 M3 模型弹性层：
+
+- 主模型失败后切备用模型。
+- 主模型失败会重试。
+- 连续失败后熔断器打开。
+
+### 17.5 `tests/test_observability.py`
+
+保护 M4 可观测性：
+
+- `/metrics` 暴露核心指标名。
+- `/chat` 后请求、Token、延迟、质量分指标发生变化。
+- 低质量回答触发告警事件。
+- trace config 带 `session_id` 和 `user_id` metadata。
+
+面试重点：
+
+> 测试按层分布：API 流程、工具单元、记忆、限流、模型弹性、观测。这样比只做端到端测试更容易定位问题，也能证明每个生产能力都有独立验收标准。
+
+---
+
+### 17.6 `tests/test_deployment.py`
+
+保护 M5 部署编排：
+
+- Dockerfile 能启动 FastAPI 应用。
+- Compose 定义 API、Redis、Postgres/pgvector、Prometheus、Grafana、Locust。
+- Prometheus 抓取 `/metrics`。
+- Grafana provisioning 包含 datasource 和 dashboard。
+- Locust 覆盖核心客服压测场景。
+- `.env.example` 不包含真实密钥。
+
+## 18. 当前实现和设计稿的差异
+
+这一节面试时很重要，因为它体现对项目状态诚实且清楚。
+
+### 18.1 当前客服主路径仍不是真实 LLM
+
+当前是：
 
 ```text
 agent_node -> handle_customer_message -> intent/tools
@@ -878,9 +1017,13 @@ agent_node -> handle_customer_message -> intent/tools
 agent_node -> LLM tool calling -> ToolNode -> LLM final answer
 ```
 
-原因是 M1 目标是稳定闭环和测试基线，真实 LLM 放到后续迭代更合适。
+原因：
 
-### 15.2 当前没有 LangGraph Checkpointer
+- 当前阶段优先保证客服业务闭环、限流、记忆、观测和质量评估稳定。
+- 规则型路径离线可测，不依赖外部密钥。
+- `ResilientLLM` 已作为模型弹性层准备好，后续可以把主路径接入真实模型。
+
+### 18.2 当前没有 LangGraph 原生 Checkpointer
 
 虽然 `/chat` 传了：
 
@@ -888,11 +1031,9 @@ agent_node -> LLM tool calling -> ToolNode -> LLM final answer
 config={"configurable": {"thread_id": req.session_id}}
 ```
 
-但 `build_customer_service_graph()` 当前没有传入 LangGraph SQLite checkpointer。M2 用 API 层的 `SessionStore` 保存消息窗口和元数据，因此可以通过 `/sessions/{session_id}` 查询和恢复会话材料，但还不是 LangGraph 原生 checkpoint/resume。
+但 `build_customer_service_graph()` 当前没有传入 LangGraph SQLite checkpointer。项目用 API 层的 `SessionStore` 保存消息窗口和元数据，因此可以通过 `/sessions/{session_id}` 查询和恢复会话材料，但还不是 LangGraph 原生 checkpoint/resume。
 
-这为后续接入 LangGraph checkpointer 留出了空间。
-
-### 15.3 当前工具不是 LangChain ToolNode
+### 18.3 当前工具不是 LangChain ToolNode
 
 当前工具是普通 Python 函数，由 `agent/service.py` 直接调用。
 
@@ -910,34 +1051,35 @@ agent -> tools -> agent -> finalizer
 
 或者保留规则 guardrail，让 LLM 只处理表达和复杂语义。
 
-### 15.4 质量分和 Token 是占位
+### 18.4 当前 Token 仍是轻量估算
 
 当前：
 
-- `quality_score` 是规则路径给出的固定分值。
-- `token_used` 是基于输入长度的轻量估算。
+- `token_used` 主要基于输入长度或上下文估算。
+- Token 预算控制已经接入主链路。
+- Prometheus 指标记录的是 `type="estimated"`。
 
-M4 才会接入真实质量评估和指标系统。
+后续接真实 LLM 后，应优先使用 provider 返回的 usage 数据。
 
 面试讲法：
 
-> 我会明确区分已实现和计划实现。当前 M2 的价值是把接口、图、业务规则、工具、UI 和轻量记忆闭环打通；生产级限流、弹性、观测和部署会在 M3-M5 逐层补齐。
+> 我会明确区分已实现和计划实现。当前 M5 已经完成客服闭环、记忆、限流、预算、弹性测试层、指标、质量评估、Docker Compose、Grafana provisioning 和 Locust 压测入口；但真实 LLM 主路径、原生 checkpointer、ToolNode、正式压测报告和 24 小时长稳验证还在后续阶段。
 
 ---
 
-## 16. 面试高频问题与回答
+## 19. 面试高频问题与回答
 
-### Q1：为什么这个项目叫生产级 Agent，但现在不用真实 LLM？
+### Q1：为什么这个项目叫生产级 Agent，但客服主路径还不用真实 LLM？
 
 回答：
 
-> 生产级不等于第一步就调用真实模型。生产级更重要的是接口稳定、行为可测、安全边界清楚、可观测字段预留和迭代路径明确。M1 先用离线规则跑通客服闭环，M2 加入轻量记忆系统，后续再逐步接入真实 LLM、限流和监控。
+> 生产级不等于第一步就调用真实模型。生产级更重要的是接口稳定、行为可测、安全边界清楚、成本控制、可观测和可降级。当前先用规则路径把客服业务、安全规则、记忆、限流和质量评估跑稳，再把 agent 节点替换或扩展为真实 LLM。
 
 ### Q2：为什么要用 LangGraph，而不是 FastAPI 里一个函数写完？
 
 回答：
 
-> 因为客服 Agent 会演进成多节点状态流：记忆加载、上下文裁剪、LLM 推理、工具调用、质量评估、记忆保存、转人工。当前图虽然仍是线性三步，但 API 层已经接入 M2 记忆系统，后续扩展不用重写接口契约。
+> 因为客服 Agent 会演进成多节点状态流：记忆加载、上下文裁剪、LLM 推理、工具调用、质量评估、记忆保存、转人工。当前图虽然仍是线性三步，但 API 层已经围绕它接入了记忆、限流、预算和观测，后续扩展不用重写接口契约。
 
 ### Q3：退款为什么要二次确认？
 
@@ -951,39 +1093,45 @@ M4 才会接入真实质量评估和指标系统。
 
 > 用户明确要求人工、投诉、法律、纠纷等场景继续让 AI 硬答会有业务风险。当前 `handle_customer_message()` 先判断转人工，再判断退款、物流、订单和商品，体现的是客服系统的安全优先级。
 
-### Q5：Mock 工具有实际意义吗？
+### Q5：为什么 Token 预算超限返回 200，而不是报错？
 
 回答：
 
-> 有。Mock 工具让 Agent 闭环可以离线测试，同时约束了未来真实工具的接口形状。比如 `get_order()`、`get_logistics()`、`apply_refund()` 都返回结构化 dict，后续替换成数据库或外部 API 时，service 层和 API 层可以少改。
+> Token 预算超限是可预期的生产情况，不是服务崩溃。返回降级 200 可以让用户得到明确提示，同时调用方通过 `degraded=true` 和 `degrade_reason` 知道本轮走了简化路径。
 
-### Q6：当前 `/chat` 的返回字段为什么包含 `quality_score` 和 `token_used`？
+### Q6：M3 的 `ResilientLLM` 为什么没有接到客服主路径？
 
 回答：
 
-> 这些是为生产运营预留的字段。M1 是占位值，M4 会接真实评估和 Prometheus 指标。提前固定字段可以让 UI、测试和调用方先适配生产系统需要关注的指标。
+> 当前主路径仍是离线规则型，为了保持本地可测和业务规则稳定。`ResilientLLM` 先作为独立弹性层被测试覆盖，后续接真实模型时，Agent 节点应该通过它调用模型，而不是直接调用裸 provider。
 
-### Q7：M2 的长期记忆和短期记忆有什么区别？
+### Q7：`quality_score` 现在怎么来的？
+
+回答：
+
+> M4 后 `quality_score` 来自 `AutoQualityEvaluator`。它按准确性 40%、礼貌性 30%、完整性 30% 计算加权分，低于阈值会记录告警事件，并把评估明细保存到会话 metadata。
+
+### Q8：Prometheus 和 Grafana 现在做到什么程度？
+
+回答：
+
+> 当前实现了 Prometheus 兼容 `/metrics` 文本出口，并在 M5 通过 Docker Compose 编排 Prometheus 和 Grafana。Grafana 会自动加载 Prometheus datasource 和客服 Agent dashboard，展示 QPS、延迟、Token、错误率、转人工率和质量分。
+
+### Q9：M2 的长期记忆和短期记忆有什么区别？
 
 回答：
 
 > 短期记忆服务于当前会话，重点是控制上下文窗口，所以它会摘要早期消息并保留最近 8 轮。长期记忆服务于跨会话用户画像，比如配送偏好和投诉记录，必须能保存、召回和删除。
 
-### Q8：当前项目的最大短板是什么？
+### Q10：当前项目的最大短板是什么？
 
 回答：
 
-> 最大短板是还没有 M3-M4 的生产能力：没有 Redis 限流、没有 Token 预算、没有真实 LLM fallback、没有 Prometheus 和 LangSmith。当前 M2 只能说明客服闭环和轻量记忆成立，不能宣称已经能承接真实流量。
-
-### Q9：如果继续开发 M3，你会怎么做？
-
-回答：
-
-> 我会先做 Redis 用户级限流，再做单次和全局 Token 预算，最后加 `ResilientLLM` 的重试、备用模型和熔断器。测试会重点覆盖第 11 次请求返回 429、预算超限降级、主模型失败切备用模型和连续失败后的熔断。
+> 最大短板是还没有真实 LLM 主路径、正式压测报告、24 小时长稳验证和评估数据集。当前 M5 证明了本地可测、可编排的生产能力骨架，但不能宣称已经完成线上生产验证。
 
 ---
 
-## 17. 面试时可以画的架构图
+## 20. 面试时可以画的架构图
 
 ```text
 Browser UI
@@ -996,7 +1144,11 @@ FastAPI UI Page
    v
 FastAPI API Layer
    |
-   | load session + load memories + ChatRequest -> HumanMessage
+   | validate + rate limit + QPS + token budget
+   v
+Session / Memory Layer
+   |
+   | load session + load user memories + trim context
    v
 LangGraph StateGraph
    |
@@ -1010,28 +1162,39 @@ Mock Business Tools
    |
    | order / logistics / product / refund
    v
+Quality + Observability
+   |
+   | evaluator + trace metadata + metrics
+   v
 ChatResponse
    |
-   | answer + context + handoff + metrics
+   | answer + context + handoff + memories + quality + degraded
    v
-SessionStore / UserMemoryManager
+SessionStore / UserMemoryManager / Metrics
    |
-   | save session + extract memory
+   | save session + extract memory + expose /metrics
    v
 Browser UI
+
+Docker Compose Runtime
+   |
+   | api + redis + postgres + prometheus + grafana + locust
+   v
+Monitoring / Load Test Demo
 ```
 
-这张图的讲解重点：
+讲解重点：
 
 - UI 和 API 在同一个 FastAPI 服务中。
-- API 不直接做业务判断，而是负责协议转换、会话/记忆接入，再进入 LangGraph。
-- LangGraph 当前是线性图，但为后续记忆、工具节点、质量评估预留了节点扩展。
+- API 是生产边界，处理限流、预算、记忆、观测和持久化。
+- LangGraph 当前是线性图，但为后续 ToolNode、真实 LLM 和质量节点留扩展空间。
 - 业务工具返回结构化数据，不只是拼接字符串。
-- 响应包含客服答案和运营字段。
+- 响应包含客服答案、结构化上下文和运营字段。
+- M5 用 Docker Compose 把 API、Redis、Postgres、Prometheus、Grafana 和 Locust 放入同一个本地演示拓扑。
 
 ---
 
-## 18. 你应该能现场演示什么
+## 21. 你应该能现场演示什么
 
 启动：
 
@@ -1048,14 +1211,15 @@ http://127.0.0.1:8000/
 
 推荐演示顺序：
 
-1. 点击“订单状态”或输入：`我的订单 ORD123456 到哪了？`
-2. 点击“物流查询”，观察右侧订单上下文。
-3. 点击“商品库存”，观察 `order_context` 为空但回答正常。
-4. 点击“退款申请”，说明不会直接提交。
+1. 输入：`我的订单 ORD123456 到哪了？`，观察订单状态和质量分。
+2. 输入：`帮我查一下物流 ORD123456`，观察右侧订单上下文。
+3. 输入：`AirBuds Pro 2 还有库存吗？`，说明商品查询不需要订单上下文。
+4. 输入：`我要给订单 ORD123456 退款`，说明不会直接提交。
 5. 输入：`我确认退款 ORD123456`，说明确认后才提交。
-6. 点击“保存偏好”，再点击“召回记忆”，观察用户记忆。
-7. 点击“清除记忆”，再召回一次，说明删除后不再返回旧记忆。
-8. 点击“转人工”，观察右侧转人工状态和原因。
+6. 输入：`我喜欢顺丰配送，以后发货优先顺丰`，再新会话问偏好，观察长期记忆召回。
+7. 调 `DELETE /users/{user_id}/memories`，再召回一次，说明删除后不再返回旧记忆。
+8. 输入投诉或人工诉求，观察转人工状态和原因。
+9. 请求 `/metrics`，说明 Prometheus 可抓取指标。
 
 接口演示：
 
@@ -1065,57 +1229,91 @@ curl -X POST http://127.0.0.1:8000/chat \
   -d '{"user_id":"user_001","session_id":"session_001","message":"Where is my order ORD123456？谢谢"}'
 ```
 
+指标演示：
+
+```bash
+curl http://127.0.0.1:8000/metrics
+```
+
+Compose 演示：
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+监控入口：
+
+```text
+Prometheus: http://127.0.0.1:9090
+Grafana:    http://127.0.0.1:3000
+```
+
+压测演示：
+
+```bash
+docker compose --profile loadtest run --rm locust \
+  -f /mnt/locust/locustfile.py \
+  --host http://api:8000 \
+  --headless -u 50 -r 5 -t 2m
+```
+
 测试演示：
 
 ```bash
 pytest tests -q
 ```
 
-当前应通过 22 个测试。
+当前应通过 39 个测试。
 
 ---
 
-## 19. 常见误区
+## 22. 常见误区
 
-### 误区 1：把当前项目说成已经生产可用
+### 误区 1：把当前项目说成已经完整生产可用
 
-不准确。当前只是 M2。真实生产还缺：
+不准确。当前已完成 M5 的本地可测生产能力骨架和 Compose 编排，但真实线上生产验证还缺：
 
-- 限流和 Token 预算
-- LLM fallback
-- 监控指标
-- Docker Compose 和压测
+- 真实 LLM 主路径。
+- 正式压测报告。
+- 24 小时长稳验证。
+- 真实外部告警系统。
 
 ### 误区 2：把规则型决策说成 LLM Agent
 
-当前不是 LLM 推理型 Agent，而是 LangGraph 编排下的规则型客服 MVP。更准确的说法是：
+当前不是 LLM 推理型 Agent，而是 LangGraph 编排下的规则型客服系统。更准确的说法是：
 
-> 当前 M2 用规则型决策模拟客服 Agent 的业务闭环，并接入轻量记忆系统；后续会把 agent 节点替换或扩展为真实 LLM + tool calling。
+> 当前用规则型决策模拟客服 Agent 的业务闭环，并接入记忆、限流、质量评估和指标系统；后续会把 agent 节点替换或扩展为真实 LLM + tool calling。
 
-### 误区 3：忽略测试
+### 误区 3：忽略降级路径
 
-这个项目当前最有价值的部分之一就是测试已经锁住 M1 验收标准。面试时不要只讲 UI 和接口，也要讲：
+生产系统不能只讲成功路径。M3 已经覆盖：
 
-- 空消息 422
-- 退款确认
-- 转人工原因
-- 中英文混合输入
-- 工具函数返回结构化数据
+- 用户限流返回 `429`。
+- 全局 QPS 超限返回 `503`。
+- Token 预算超限返回 `degraded=true` 的简化 `200`。
 
 ### 误区 4：忽略 `order_context`
 
-`order_context` 是连接“自然语言客服回答”和“结构化业务系统”的关键。后续转人工、质检、记忆保存都可以复用它。
+`order_context` 是连接“自然语言客服回答”和“结构化业务系统”的关键。转人工、质检、记忆保存、UI 展示都可以复用它。
+
+### 误区 5：把质量分当成绝对真理
+
+M4 的质量评估器是确定性规则评估，不是最终真实评测体系。它的价值是把评估链路、告警和指标打通。M6 才会引入评估数据集和更正式的自动评测报告。
 
 ---
 
-## 20. 复盘总结
+## 23. 复盘总结
 
-当前 05 项目的已开发部分可以总结为三句话：
+当前 05 项目的已开发部分可以总结为六句话：
 
 1. M0 建好了可运行、可测试、可扩展的 FastAPI + LangGraph 骨架。
 2. M1 跑通了客服核心闭环：订单、物流、商品、退款确认、转人工和 UI 演示。
 3. M2 加入了短期记忆、SQLite 会话状态和用户长期记忆，支持跨会话偏好召回和删除。
+4. M3 加入了用户限流、全局 QPS、Token 预算降级和可测试的 LLM fallback/熔断层。
+5. M4 加入了 trace metadata、Prometheus 兼容指标、自动质量评估和低质量告警。
+6. M5 加入了 Docker Compose、Redis/Postgres/Prometheus/Grafana 编排、Grafana 看板和 Locust 压测入口。
 
 面试收尾表达：
 
-> 我在这个项目里关注的不是“让模型回答一句话”，而是把客服 Agent 做成一个可以持续演进的服务：有稳定 API、有显式状态、有工具边界、有安全规则、有 UI 演示、有记忆接口、有测试基线。M1 验证客服闭环，M2 验证记忆系统，后续 M3-M5 再逐层加入限流、弹性、观测和部署能力。
+> 我在这个项目里关注的不是“让模型回答一句话”，而是把客服 Agent 做成可以持续演进的服务：有稳定 API、有显式状态、有工具边界、有安全规则、有记忆、有成本控制、有降级、有观测、有质量评估、有部署编排、有压测入口和测试基线。M6 再补管理接口、正式评估数据集、RAG 工具和运行手册。

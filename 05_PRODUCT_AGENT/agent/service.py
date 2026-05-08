@@ -41,8 +41,17 @@ def handle_customer_message(message: str, user_memories: list[str] | None = None
             tool_name="human_transfer",
         )
 
-    if user_memories and is_memory_recall_query(message):
+    if is_memory_recall_query(message):
         memory_text = "；".join(user_memories[:3])
+        if not memory_text:
+            return CustomerServiceDecision(
+                answer="我暂时没有查到你已保存的相关记忆。",
+                order_context=None,
+                needs_human_transfer=False,
+                transfer_reason="",
+                quality_score=72,
+                tool_name="load_user_memory",
+            )
         return CustomerServiceDecision(
             answer=f"我记得这些信息：{memory_text}",
             order_context=None,
@@ -50,6 +59,16 @@ def handle_customer_message(message: str, user_memories: list[str] | None = None
             transfer_reason="",
             quality_score=86,
             tool_name="load_user_memory",
+        )
+
+    if is_preference_statement(message):
+        return CustomerServiceDecision(
+            answer="已记住你的偏好，后续服务会优先参考这条信息。",
+            order_context=None,
+            needs_human_transfer=False,
+            transfer_reason="",
+            quality_score=82,
+            tool_name="save_user_memory",
         )
 
     if is_refund_request(message):
@@ -102,6 +121,24 @@ def handle_customer_message(message: str, user_memories: list[str] | None = None
             tool_name="get_logistics",
         )
 
+    if is_logistics_query(message):
+        if user_memories:
+            memory_text = "；".join(user_memories[:2])
+            answer = (
+                f"我会优先参考你的配送偏好：{memory_text}。"
+                "不过实际使用哪家快递要以具体订单为准，请提供订单号后我可以查询实际承运商。"
+            )
+        else:
+            answer = "请提供订单号，例如 ORD123456，我可以帮你查询这单实际使用哪家快递。"
+        return CustomerServiceDecision(
+            answer=answer,
+            order_context=None,
+            needs_human_transfer=False,
+            transfer_reason="",
+            quality_score=82,
+            tool_name="delivery_preference",
+        )
+
     if order_id and is_order_query(message):
         order = get_order(order_id)
         if order["status"] == "未找到":
@@ -136,26 +173,6 @@ def handle_customer_message(message: str, user_memories: list[str] | None = None
             transfer_reason="",
             quality_score=84,
             tool_name="get_product",
-        )
-
-    if is_memory_recall_query(message):
-        return CustomerServiceDecision(
-            answer="我暂时没有查到你已保存的相关记忆。",
-            order_context=None,
-            needs_human_transfer=False,
-            transfer_reason="",
-            quality_score=72,
-            tool_name="load_user_memory",
-        )
-
-    if is_preference_statement(message):
-        return CustomerServiceDecision(
-            answer="已记住你的偏好，后续服务会优先参考这条信息。",
-            order_context=None,
-            needs_human_transfer=False,
-            transfer_reason="",
-            quality_score=82,
-            tool_name="save_user_memory",
         )
 
     return CustomerServiceDecision(
