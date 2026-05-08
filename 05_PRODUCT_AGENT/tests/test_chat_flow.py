@@ -161,7 +161,8 @@ def test_chat_uses_latest_delivery_preference_when_carrier_query_has_no_order_id
     assert "京东物流" in payload["answer"]
     assert "订单号" in payload["answer"]
     assert "顺丰" not in payload["answer"]
-    assert payload["llm_trace"]["used_llm"] is False
+    assert payload["llm_trace"]["used_llm"] is True
+    assert payload["llm_trace"]["model_used"] == "test-real-llm"
     assert payload["llm_trace"]["tool_name"] == "delivery_preference"
     assert "已读取配送偏好" in payload["llm_trace"]["reasoning_summary"]
 
@@ -201,11 +202,11 @@ def test_chat_calls_injected_llm_and_returns_trace(monkeypatch):
     assert fake_llm.calls == 1
 
 
-def test_hybrid_mode_with_llm_startup_error_keeps_rule_answer(monkeypatch):
+def test_real_llm_startup_error_returns_503_instead_of_rule_answer(monkeypatch):
     import api.main as main_module
 
     fake_llm = FakeChatLLM("offline_stub")
-    monkeypatch.setattr(main_module.settings, "llm_mode", "hybrid")
+    monkeypatch.setattr(main_module.settings, "llm_mode", "deepseek")
     monkeypatch.setattr(main_module, "customer_service_llm", fake_llm)
     monkeypatch.setattr(
         main_module,
@@ -222,10 +223,8 @@ def test_hybrid_mode_with_llm_startup_error_keeps_rule_answer(monkeypatch):
         },
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 503
     payload = response.json()
-    assert payload["answer"] != "offline_stub"
-    assert "订单号" in payload["answer"]
-    assert payload["llm_trace"]["used_llm"] is False
-    assert "OPENAI_API_KEY" in payload["llm_trace"]["reasoning_summary"]
+    assert payload["detail"]["error"] == "llm_unavailable"
+    assert "OPENAI_API_KEY" in payload["detail"]["reason"]
     assert fake_llm.calls == 0

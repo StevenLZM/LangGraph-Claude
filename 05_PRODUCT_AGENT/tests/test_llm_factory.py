@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from llm.factory import build_customer_service_llm
 
 
@@ -36,22 +38,20 @@ def _settings(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_offline_mode_builds_stub_llm_without_startup_error():
+def test_offline_mode_is_rejected_because_runtime_requires_real_llm():
     setup = build_customer_service_llm(_settings())
 
-    result = asyncio.run(setup.llm.ainvoke_with_metadata(["hello"]))
-
-    assert setup.startup_error == ""
-    assert result.content == "offline_stub"
+    assert "offline_stub" in setup.startup_error
+    with pytest.raises(RuntimeError, match="real LLM"):
+        asyncio.run(setup.llm.ainvoke_with_metadata(["hello"]))
 
 
 def test_hybrid_mode_without_matching_key_returns_explainable_startup_error():
     setup = build_customer_service_llm(_settings(llm_mode="hybrid"))
 
-    result = asyncio.run(setup.llm.ainvoke_with_metadata(["hello"]))
-
     assert "OPENAI_API_KEY" in setup.startup_error
-    assert result.content == "offline_stub"
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+        asyncio.run(setup.llm.ainvoke_with_metadata(["hello"]))
 
 
 def test_hybrid_mode_with_openai_key_builds_openai_primary_client(monkeypatch):
@@ -114,7 +114,6 @@ def test_deepseek_mode_builds_openai_compatible_primary_and_light_fallback(monke
 def test_deepseek_mode_requires_deepseek_key():
     setup = build_customer_service_llm(_settings(llm_mode="deepseek"))
 
-    result = asyncio.run(setup.llm.ainvoke_with_metadata(["hello"]))
-
     assert "DEEPSEEK_API_KEY" in setup.startup_error
-    assert result.content == "offline_stub"
+    with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
+        asyncio.run(setup.llm.ainvoke_with_metadata(["hello"]))

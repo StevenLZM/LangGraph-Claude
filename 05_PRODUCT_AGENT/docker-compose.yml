@@ -9,7 +9,11 @@ services:
     environment:
       - APP_NAME=production-agent-customer-service
       - APP_VERSION=0.1.0
-      - LLM_MODE=offline_stub
+      - LLM_MODE=${LLM_MODE:-deepseek}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      - DEEPSEEK_MAX_MODEL=${DEEPSEEK_MAX_MODEL:-deepseek-v4-pro}
+      - DEEPSEEK_LIGHT_MODEL=${DEEPSEEK_LIGHT_MODEL:-deepseek-v4-flash}
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=postgresql://customer_service:${POSTGRES_PASSWORD:-customer_service}@postgres:5432/customer_service
       - CHECKPOINTER_DB=/app/data/sessions.db

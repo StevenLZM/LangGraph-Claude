@@ -22,7 +22,7 @@
 
 ## 1. 项目一句话介绍
 
-`05_PRODUCT_AGENT` 是一个生产级 AI 客服系统的渐进式实现。当前阶段已经跑通可测试、可部署、可评测的客服服务：用户从 UI 或 API 发起咨询，FastAPI 做协议校验、限流和 Token 预算，加载会话与用户记忆，进入 LangGraph 状态流，规则型客服决策调用 Mock 业务工具或 FAQ/RAG 适配层，配置 DeepSeek 时再基于工具结果生成最终话术，最后保存会话、评估回答质量、记录 Prometheus 兼容指标并返回响应。M5 提供 Docker Compose、Prometheus、Grafana 和 Locust 压测入口，M6 补齐 DeepSeek、管理接口和 100 题自动评测。
+`05_PRODUCT_AGENT` 是一个生产级 AI 客服系统的渐进式实现。当前阶段已经跑通可测试、可部署、可评测的客服服务：用户从 UI 或 API 发起咨询，FastAPI 做协议校验、限流和 Token 预算，加载会话与用户记忆，进入 LangGraph 状态流，规则型客服决策调用 Mock 业务工具或 FAQ/RAG 适配层，然后必须通过 DeepSeek/真实 LLM 基于工具结果生成最终话术，最后保存会话、评估回答质量、记录 Prometheus 兼容指标并返回响应。M5 提供 Docker Compose、Prometheus、Grafana 和 Locust 压测入口，M6 补齐 DeepSeek、管理接口和 100 题自动评测。
 
 面试讲法：
 
@@ -1017,13 +1017,7 @@ const response = await fetch("/chat", {
 
 ### 18.1 M6 如何接入 DeepSeek
 
-默认离线模式仍是：
-
-```text
-agent_node -> handle_customer_message -> intent/tools
-```
-
-配置 `LLM_MODE=deepseek` 后是：
+当前 `/chat` 运行路径是：
 
 ```text
 agent_node -> handle_customer_message -> intent/tools/FAQ-RAG -> ResilientLLM -> DeepSeek final answer
@@ -1031,8 +1025,8 @@ agent_node -> handle_customer_message -> intent/tools/FAQ-RAG -> ResilientLLM ->
 
 原因：
 
-- 当前阶段优先保证客服业务闭环、限流、记忆、观测和质量评估稳定。
-- 默认规则型路径离线可测，不依赖外部密钥。
+- 规则层负责客服安全边界和工具上下文，例如退款二次确认、投诉转人工和订单查询。
+- 用户可见最终回答必须由真实 LLM 生成；DeepSeek 未配置或调用失败时 `/chat` 返回 `503 llm_unavailable`。
 - `ResilientLLM` 统一承接 DeepSeek 主备模型、重试和熔断，Agent 节点不直接调用裸 provider。
 
 ### 18.2 当前没有 LangGraph 原生 Checkpointer
@@ -1075,17 +1069,17 @@ agent -> tools -> agent -> finalizer
 
 面试讲法：
 
-> 我会明确区分已实现和计划实现。当前 M5 已经完成客服闭环、记忆、限流、预算、弹性测试层、指标、质量评估、Docker Compose、Grafana provisioning 和 Locust 压测入口；但真实 LLM 主路径、原生 checkpointer、ToolNode、正式压测报告和 24 小时长稳验证还在后续阶段。
+> 我会明确区分已实现和计划实现。当前 M6 已经完成客服闭环、记忆、限流、预算、弹性层、指标、质量评估、DeepSeek 必经主路径、FAQ/RAG、Docker Compose、Grafana provisioning、Locust 压测入口和 100 题评测；但原生 checkpointer、ToolNode、正式压测报告和 24 小时长稳验证还在后续阶段。
 
 ---
 
 ## 19. 面试高频问题与回答
 
-### Q1：为什么这个项目叫生产级 Agent，但客服主路径还不用真实 LLM？
+### Q1：为什么还保留规则型客服决策，而不是全部交给 LLM？
 
 回答：
 
-> 生产级不等于第一步就调用真实模型。生产级更重要的是接口稳定、行为可测、安全边界清楚、成本控制、可观测和可降级。当前先用规则路径把客服业务、安全规则、记忆、限流和质量评估跑稳，再把 agent 节点替换或扩展为真实 LLM。
+> 当前 `/chat` 已经要求最终回答必须走真实 LLM，但退款、投诉、法律和转人工这些高风险动作仍由规则层先固定安全边界。这样既能利用 LLM 生成自然话术，也不会让模型自由决定是否提交退款或忽略人工诉求。
 
 ### Q2：为什么要用 LangGraph，而不是 FastAPI 里一个函数写完？
 
@@ -1111,11 +1105,11 @@ agent -> tools -> agent -> finalizer
 
 > Token 预算超限是可预期的生产情况，不是服务崩溃。返回降级 200 可以让用户得到明确提示，同时调用方通过 `degraded=true` 和 `degrade_reason` 知道本轮走了简化路径。
 
-### Q6：M6 的 DeepSeek 为什么仍保留离线模式？
+### Q6：M6 为什么禁用运行时离线模式？
 
 回答：
 
-> 默认离线是为了保持本地测试稳定；配置 `LLM_MODE=deepseek` 和 `DEEPSEEK_API_KEY` 后，`/chat` 会通过 `ResilientLLM` 调用 `deepseek-v4-pro`，备用为 `deepseek-v4-flash`。模型失败时仍回落到规则结果。
+> 05 项目现在用于演示真实 LLM 客服链路，所以运行时 `offline_stub` 会被拒绝。pytest 通过注入 fake LLM 保持稳定；真实运行必须配置 `LLM_MODE=deepseek` 和 `DEEPSEEK_API_KEY`。如果模型不可用，`/chat` 返回 `503 llm_unavailable`，避免把规则草稿当成真实模型回答。
 
 ### Q7：`quality_score` 现在怎么来的？
 
@@ -1293,9 +1287,9 @@ pytest tests -q
 
 ### 误区 2：把规则型决策说成 LLM Agent
 
-默认离线模式不是 LLM 推理型 Agent，而是 LangGraph 编排下的规则型客服系统；M6 配置 DeepSeek 后会在规则/工具结果基础上生成最终客服话术。更准确的说法是：
+当前不是让 LLM 自由执行所有业务动作，而是 LangGraph 编排下的规则 guardrail + DeepSeek 最终话术生成。更准确的说法是：
 
-> 当前用规则型决策固定客服安全边界和工具上下文，配置 DeepSeek 后再生成最终话术；同时接入记忆、限流、质量评估、指标、管理接口和自动评测。
+> 当前用规则型决策固定客服安全边界和工具上下文，最终客服话术必须通过 DeepSeek/真实 LLM 生成；同时接入记忆、限流、质量评估、指标、管理接口和自动评测。
 
 ### 误区 3：忽略降级路径
 

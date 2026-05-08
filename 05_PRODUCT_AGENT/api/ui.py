@@ -104,7 +104,7 @@ CUSTOMER_SERVICE_UI = """<!doctype html>
 <body>
   <header>
     <h1>智能客服工作台</h1>
-    <div class="status"><span class="dot"></span><span>offline_stub</span></div>
+    <div class="status"><span class="dot"></span><span>DeepSeek</span></div>
   </header>
   <main>
     <aside>

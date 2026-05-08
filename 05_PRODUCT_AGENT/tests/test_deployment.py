@@ -27,6 +27,9 @@ def test_compose_defines_m5_runtime_stack():
         assert service_name in compose
     assert "env_file:" in compose
     assert "- .env" in compose
+    assert "LLM_MODE=${LLM_MODE:-deepseek}" in compose
+    assert "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}" in compose
+    assert "LLM_MODE=offline_stub" not in compose
     assert "REDIS_URL=redis://redis:6379/0" in compose
     assert "pgvector/pgvector:pg16" in compose
     assert "./infra/prometheus.yml:/etc/prometheus/prometheus.yml" in compose
@@ -79,6 +82,7 @@ def test_env_example_does_not_contain_real_secrets():
     assert "LANGCHAIN_API_KEY=" in env_example
     assert "LANGCHAIN_TRACING_V2=true" in env_example
     assert "LANGCHAIN_PROJECT=production-agent-customer-service" in env_example
+    assert "LLM_MODE=deepseek" in env_example
     assert "GRAFANA_ADMIN_PASSWORD=admin" in env_example
     assert "REDIS_URL=" in env_example
     assert "lsv2_" not in env_example

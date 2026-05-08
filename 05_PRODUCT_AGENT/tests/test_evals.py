@@ -126,6 +126,7 @@ def test_eval_run_script_can_execute_from_project_root(tmp_path):
             str(dataset_path),
             "--output-root",
             str(output_root),
+            "--dry-run",
         ],
         cwd=Path(__file__).resolve().parents[1],
         text=True,

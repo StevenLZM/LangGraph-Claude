@@ -4,12 +4,12 @@ from api.settings import Settings
 
 
 def test_settings_defaults_are_local_development_friendly():
-    settings = Settings()
+    settings = Settings(_env_file=None)
 
     assert settings.app_name == "production-agent-customer-service"
     assert settings.api_host == "0.0.0.0"
     assert settings.api_port == 8000
-    assert settings.llm_mode == "offline_stub"
+    assert settings.llm_mode == "deepseek"
     assert settings.redis_url == ""
     assert settings.database_url == ""
     assert settings.user_rate_limit_per_minute == 10

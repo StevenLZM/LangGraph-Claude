@@ -4,6 +4,14 @@
 
 ## 本地运行
 
+`/chat` 现在只走真实 LLM 路径。启动前先复制配置并填入 DeepSeek key：
+
+```bash
+cd 05_PRODUCT_AGENT
+cp .env.example .env
+# 编辑 .env，设置 DEEPSEEK_API_KEY=sk-...
+```
+
 ```bash
 cd 05_PRODUCT_AGENT
 pip install -r requirements.txt
@@ -58,7 +66,7 @@ curl http://127.0.0.1:8000/admin/stats/transfers
 
 ## M6 DeepSeek 与 FAQ/RAG
 
-本地测试默认使用 `LLM_MODE=offline_stub`。真实模型路径参考 03 项目，使用 DeepSeek 的 OpenAI-compatible API：
+运行时默认使用 DeepSeek 的 OpenAI-compatible API；`offline_stub` 已禁用，真实 LLM 未配置或调用失败时 `/chat` 会返回 `503 llm_unavailable`，不会静默回落到规则答案：
 
 ```bash
 LLM_MODE=deepseek
@@ -131,7 +139,7 @@ docker compose down -v
 - 全局每秒最多 `100` 次 `/chat` 请求，超限返回 `503`。
 - 单次对话预算 `4000` tokens，全局每小时预算 `500000` tokens。
 - Token 预算超限不崩溃，`/chat` 返回简化回复，并设置 `degraded=true` 和 `degrade_reason`。
-- `llm/resilient_llm.py` 提供可注入的主备模型、指数退避重试和熔断器；M3 保持客服主路径为离线规则型实现。
+- `llm/resilient_llm.py` 提供可注入的主备模型、指数退避重试和熔断器；当前 `/chat` 正常客服回答必须通过真实 LLM。
 
 ## M4 可观测性与质量评估
 
@@ -168,7 +176,7 @@ docker compose --profile loadtest run --rm locust \
 pytest tests -q
 ```
 
-M6 默认仍支持离线规则型客服决策、本地 SQLite 记忆存储和确定性质量评估器；配置 `LLM_MODE=deepseek` 后，客服回复会在规则/工具结果基础上调用 DeepSeek 生成最终话术。Compose 会启动 Redis、Postgres/pgvector、Prometheus 和 Grafana，pgvector 记忆迁移仍留给后续优化。
+M6 的业务 guardrail 仍由规则层负责，包括退款二次确认、转人工优先级和工具上下文构造；用户可见客服回答必须由真实 LLM 基于规则/工具结果生成。pytest 通过注入 fake LLM 保持离线稳定，不再依赖 `offline_stub` 作为运行模式。Compose 会启动 Redis、Postgres/pgvector、Prometheus 和 Grafana，pgvector 记忆迁移仍留给后续优化。
 
 ## 教学文档
 

@@ -335,18 +335,18 @@ Prometheus 指标出口。
 - 新增 `agent/`：`CustomerServiceState`、最小 LangGraph 工作流、离线固定客服回复节点。
 - 新增 `memory/`、`llm/`、`monitoring/`、`mcp_servers/`、`infra/`：后续迭代占位模块。
 - 新增 `.env.example`、`requirements.txt`、`README.md`。
-- 新增 `tests/`：覆盖健康检查、配置默认值、图编译和离线调用。
+- 新增 `tests/`：覆盖健康检查、配置默认值、图编译和当时的离线调用。
 
 **验收结果**
 - `pytest 05_PRODUCT_AGENT/tests -q`：4 passed。
 - `cd 05_PRODUCT_AGENT && pytest tests -q`：4 passed。
 - `cd 05_PRODUCT_AGENT && uvicorn api.main:app --host 127.0.0.1 --port 8000`：可启动。
-- `GET /health`：返回 `status=ok`、`graph_ready=true`、`llm=offline_stub`。
+- `GET /health`：M0 阶段返回 `status=ok`、`graph_ready=true`、`llm=offline_stub`。
 
 **遗留到 M1**
 - `/chat` 尚未实现。
 - 业务工具仍为空占位，订单、物流、商品、退款 Mock 数据将在 M1 接入。
-- 当前图使用离线固定回复，不调用真实 LLM。
+- M0 阶段图使用离线固定回复，不调用真实 LLM；当前 M6 已切换为真实 LLM 必经路径。
 
 ---
 
@@ -366,7 +366,7 @@ Prometheus 指标出口。
 
 **遗留到 M2**
 - 会话历史仍未持久化，M2 需要引入短期记忆窗口和会话状态恢复。
-- 当前客服决策是离线规则实现，真实 LLM 与工具调用路由留到后续迭代接入。
+- M1 阶段客服决策是离线规则实现，真实 LLM 与工具调用路由留到后续迭代接入；当前 M6 已要求最终客服回答必须由真实 LLM 生成。
 - 质量分和 Token 用量仍是轻量占位，M4 需要接入正式评估和 Prometheus 指标。
 
 ---
@@ -416,7 +416,7 @@ Prometheus 指标出口。
 - `ResilientLLM` 在主模型失败后切换备用模型，连续失败达到阈值后熔断器开启。
 
 **遗留到 M4**
-- 当前 `ResilientLLM` 作为可测试弹性层存在，客服主路径仍是离线规则型；后续可按配置接入真实 LLM。
+- M3 阶段 `ResilientLLM` 作为可测试弹性层存在，客服主路径仍是离线规则型；当前 M6 已将 `/chat` 切到真实 LLM 必经路径。
 - Token 仍为轻量估算，M4 可结合真实模型 usage 和 Prometheus 指标做成本统计。
 - Redis 集成未加入 Docker Compose；M5 部署阶段需要补齐 Redis 服务和压测配置。
 
@@ -468,6 +468,7 @@ Prometheus 指标出口。
 
 **实际交付**
 - 新增 DeepSeek 真实 LLM 主路径：`LLM_MODE=deepseek` 时通过 `ChatOpenAI(base_url=https://api.deepseek.com)` 调用 `deepseek-v4-pro`，备用为 `deepseek-v4-flash`。
+- 禁用运行时 `offline_stub`：`/chat` 正常返回用户答案前必须调用真实 LLM；DeepSeek 未配置或调用失败时返回 `503 llm_unavailable`，不再静默回落到规则答案。
 - 新增 FAQ/RAG 适配层：`rag/faq_tool.py` 尝试复用 `01_RAG` hybrid retriever，索引或依赖不可用时返回显式未命中，不影响 `/chat`。
 - 新增管理接口：`GET /admin/sessions`、`GET /admin/users/{user_id}/memories`、`GET /admin/stats/transfers`。
 - 新增 100 题评测集与自动评测报告：`evals/dataset.jsonl`、`evals/run.py`、`evals/report.py`。

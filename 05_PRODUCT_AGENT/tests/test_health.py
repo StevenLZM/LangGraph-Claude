@@ -21,7 +21,7 @@ def test_health_returns_runtime_status():
         "redis": "not_configured",
         "database": "not_configured",
         "memory": "sqlite",
-        "llm": "offline_stub",
+        "llm": "deepseek",
         "llm_startup_error": "",
         "rate_limiter": "memory",
     }

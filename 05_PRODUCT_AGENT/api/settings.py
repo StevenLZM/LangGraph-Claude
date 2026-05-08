@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
-    llm_mode: str = "offline_stub"
+    llm_mode: str = "deepseek"
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_max_model: str = "deepseek-v4-pro"

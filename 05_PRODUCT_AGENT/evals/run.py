@@ -98,15 +98,30 @@ def _call_local_chat(case: dict[str, Any]) -> dict[str, Any]:
     return response.json()
 
 
+def _call_dry_run_chat(case: dict[str, Any]) -> dict[str, Any]:
+    expected_keywords = list(case.get("expected_keywords") or [])
+    return {
+        "answer": " ".join(expected_keywords) or "dry-run answer",
+        "needs_human_transfer": bool(case.get("expected_transfer", False)),
+        "llm_trace": {"tool_name": case.get("expected_tool", "")},
+        "quality_score": 90,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default="evals/dataset.jsonl")
     parser.add_argument("--output-root", default="evals/results")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate the eval pipeline without calling the /chat API.",
+    )
     args = parser.parse_args()
     run_dir = run_evaluation(
         dataset_path=Path(args.dataset),
         output_root=Path(args.output_root),
-        chat_callable=_call_local_chat,
+        chat_callable=_call_dry_run_chat if args.dry_run else _call_local_chat,
     )
     print(run_dir)
 

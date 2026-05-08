@@ -132,26 +132,34 @@ async def chat(req: ChatRequest) -> ChatResponse:
     )
     last_message = result["messages"][-1]
     answer = last_message.content if isinstance(last_message, AIMessage) else str(last_message)
-    llm_trace = _offline_llm_trace(settings.llm_mode, result.get("tool_name", ""), user_memories)
-    if settings.llm_mode != "offline_stub":
-        llm_answer, llm_trace = await _maybe_generate_llm_answer(
+    try:
+        llm_answer, llm_trace = await _generate_required_llm_answer(
             question=req.message,
             draft_answer=answer,
             user_memories=user_memories,
             result=result,
         )
-        if llm_answer:
-            answer = llm_answer
-            result_messages = list(result.get("messages", []))
-            if result_messages and isinstance(result_messages[-1], AIMessage):
-                result_messages[-1] = AIMessage(
-                    content=answer,
-                    additional_kwargs={
-                        **result_messages[-1].additional_kwargs,
-                        "llm_trace": llm_trace,
-                    },
-                )
-                result = {**result, "messages": result_messages}
+    except RuntimeError as exc:
+        record_chat_error(status="llm_unavailable", session_id=req.session_id)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "llm_unavailable",
+                "message": "真实 LLM 不可用，请检查 DeepSeek 配置或模型服务状态。",
+                "reason": _llm_error_message(exc),
+            },
+        ) from exc
+    answer = llm_answer
+    result_messages = list(result.get("messages", []))
+    if result_messages and isinstance(result_messages[-1], AIMessage):
+        result_messages[-1] = AIMessage(
+            content=answer,
+            additional_kwargs={
+                **result_messages[-1].additional_kwargs,
+                "llm_trace": llm_trace,
+            },
+        )
+        result = {**result, "messages": result_messages}
     memory_summary = _extract_memory_summary(result.get("messages", []))
     response_time_ms = result.get("response_time_ms", 0)
     token_used = result.get("token_used", 0)
@@ -310,7 +318,7 @@ def _degraded_answer(reason: str) -> str:
     )
 
 
-async def _maybe_generate_llm_answer(
+async def _generate_required_llm_answer(
     *,
     question: str,
     draft_answer: str,
@@ -319,10 +327,7 @@ async def _maybe_generate_llm_answer(
 ) -> tuple[str, dict]:
     trace = _offline_llm_trace(settings.llm_mode, result.get("tool_name", ""), user_memories)
     if customer_service_llm_setup.startup_error:
-        return draft_answer, {
-            **trace,
-            "reasoning_summary": f"LLM 未启用，已使用规则回答：{customer_service_llm_setup.startup_error}",
-        }
+        raise RuntimeError(customer_service_llm_setup.startup_error)
     prompt_messages = _build_llm_messages(
         question=question,
         draft_answer=draft_answer,
@@ -341,13 +346,7 @@ async def _maybe_generate_llm_answer(
             "reasoning_summary": _reasoning_summary(result.get("tool_name", ""), user_memories),
         }
     except Exception as exc:
-        return draft_answer, {
-            **trace,
-            "used_llm": False,
-            "model_used": "offline",
-            "fallback_used": False,
-            "reasoning_summary": f"LLM 调用失败，已使用规则回答：{_llm_error_message(exc)}",
-        }
+        raise RuntimeError(_llm_error_message(exc)) from exc
 
     return metadata_result.content, {
         **trace,
