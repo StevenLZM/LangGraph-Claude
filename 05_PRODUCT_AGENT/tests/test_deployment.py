@@ -31,6 +31,8 @@ def test_compose_defines_m5_runtime_stack():
     assert "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}" in compose
     assert "LLM_MODE=offline_stub" not in compose
     assert "REDIS_URL=redis://redis:6379/0" in compose
+    assert "STORAGE_BACKEND=postgres" in compose
+    assert "CHECKPOINTER_BACKEND=postgres" in compose
     assert "pgvector/pgvector:pg16" in compose
     assert "./infra/prometheus.yml:/etc/prometheus/prometheus.yml" in compose
     assert "./infra/grafana/provisioning:/etc/grafana/provisioning" in compose

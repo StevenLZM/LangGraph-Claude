@@ -1,6 +1,6 @@
 # 05_PRODUCT_AGENT
 
-生产级 AI Agent 平台的智能客服项目。当前已完成 M6 收尾强化：`/chat`、内置客服工作台、Mock 工具、规则型客服 Agent、短期记忆窗口、SQLite 会话和用户长期记忆、限流与 Token 预算降级、DeepSeek 真实 LLM 主路径、LLM fallback 与熔断测试层、FAQ/RAG 适配、管理接口、100 题自动评测、LangSmith trace metadata、Prometheus 兼容指标、Grafana 看板编排和 Locust 压测入口。
+生产级 AI Agent 平台的智能客服项目。当前已完成 M6 收尾强化和存储后端升级：`/chat`、内置客服工作台、Mock 工具、规则型客服 Agent、短期记忆窗口、SQLite/Postgres 会话和用户长期记忆、LangGraph Postgres/Redis checkpointer、限流与 Token 预算降级、DeepSeek 真实 LLM 主路径、LLM fallback 与熔断测试层、FAQ/RAG 适配、管理接口、100 题自动评测、LangSmith trace metadata、Prometheus 兼容指标、Grafana 看板编排和 Locust 压测入口。
 
 ## 本地运行
 
@@ -100,6 +100,8 @@ cp .env.example .env
 docker compose up --build
 ```
 
+Compose 默认会覆盖本地 `.env.example` 的轻量存储设置，使用 `STORAGE_BACKEND=postgres` 和 `CHECKPOINTER_BACKEND=postgres`。Postgres 同时承载业务会话/用户记忆表和 LangGraph checkpoint 表；Redis 用于限流计数，也可通过 `CHECKPOINTER_BACKEND=redis` 作为可选 checkpoint 后端。
+
 如果要在 LangSmith 网站看到当前项目，先在 `.env` 中配置：
 
 ```bash
@@ -141,6 +143,18 @@ docker compose down -v
 - Token 预算超限不崩溃，`/chat` 返回简化回复，并设置 `degraded=true` 和 `degrade_reason`。
 - `llm/resilient_llm.py` 提供可注入的主备模型、指数退避重试和熔断器；当前 `/chat` 正常客服回答必须通过真实 LLM。
 
+## 存储后端
+
+本地默认 `STORAGE_BACKEND=sqlite`、`CHECKPOINTER_BACKEND=none`，会话和用户记忆写入 `MEMORY_DB`。Docker Compose 默认使用 Postgres：
+
+- `STORAGE_BACKEND=postgres`：`SessionStore` 和 `UserMemoryManager` 写入 `DATABASE_URL`。
+- `CHECKPOINTER_BACKEND=postgres`：LangGraph 原生 checkpoint 写入 `DATABASE_URL`，首次启动会执行 `setup()`。
+- `CHECKPOINTER_BACKEND=redis`：可选使用 Redis checkpoint，适合短期可恢复状态；长期业务记忆仍建议使用 Postgres。
+- `CHECKPOINTER_URL`：可覆盖 checkpoint 连接串；为空时 Postgres checkpoint 复用 `DATABASE_URL`，Redis checkpoint 复用 `REDIS_URL`。
+- `CHECKPOINTER_SETUP=false`：适合生产环境已由迁移任务预建表/索引时关闭自动 `setup()`。
+
+本地 SQLite 模式适合 pytest 和离线演示；Compose Postgres 模式更接近多实例部署。当前长期记忆仍是关键词召回，不是 pgvector 语义检索；后续如接 Mem0/pgvector，应复用现有 `UserMemoryManager` 接口，避免改动 `/chat` 和管理接口契约。
+
 ## M4 可观测性与质量评估
 
 `/chat` 现在会在 API 边界记录运营指标和质量评估结果，保持本地离线可测，不依赖外部 Prometheus Server、Grafana 或真实 LangSmith 服务。
@@ -176,7 +190,7 @@ docker compose --profile loadtest run --rm locust \
 pytest tests -q
 ```
 
-M6 的业务 guardrail 仍由规则层负责，包括退款二次确认、转人工优先级和工具上下文构造；用户可见客服回答必须由真实 LLM 基于规则/工具结果生成。pytest 通过注入 fake LLM 保持离线稳定，不再依赖 `offline_stub` 作为运行模式。Compose 会启动 Redis、Postgres/pgvector、Prometheus 和 Grafana，pgvector 记忆迁移仍留给后续优化。
+M6 的业务 guardrail 仍由规则层负责，包括退款二次确认、转人工优先级和工具上下文构造；用户可见客服回答必须由真实 LLM 基于规则/工具结果生成。pytest 通过注入 fake LLM 保持离线稳定，不再依赖 `offline_stub` 作为运行模式。Compose 会启动 Redis、Postgres/pgvector、Prometheus 和 Grafana；Postgres 业务存储和 LangGraph checkpoint 已接入，pgvector/Mem0 语义记忆仍留给后续优化。
 
 ## 教学文档
 

@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     database_url: str = ""
     checkpointer_db: str = str(ROOT / "data" / "sessions.db")
     memory_db: str = str(ROOT / "data" / "memory.db")
+    storage_backend: str = "sqlite"
+    checkpointer_backend: str = "none"
+    checkpointer_url: str = ""
+    checkpointer_setup: bool = True
 
     user_rate_limit_per_minute: int = 10
     global_qps_limit: int = 100

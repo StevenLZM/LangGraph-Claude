@@ -16,6 +16,10 @@ services:
       - DEEPSEEK_LIGHT_MODEL=${DEEPSEEK_LIGHT_MODEL:-deepseek-v4-flash}
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=postgresql://customer_service:${POSTGRES_PASSWORD:-customer_service}@postgres:5432/customer_service
+      - STORAGE_BACKEND=postgres
+      - CHECKPOINTER_BACKEND=postgres
+      - CHECKPOINTER_URL=${CHECKPOINTER_URL:-}
+      - CHECKPOINTER_SETUP=${CHECKPOINTER_SETUP:-true}
       - CHECKPOINTER_DB=/app/data/sessions.db
       - MEMORY_DB=/app/data/memory.db
       - USER_RATE_LIMIT_PER_MINUTE=${USER_RATE_LIMIT_PER_MINUTE:-10}

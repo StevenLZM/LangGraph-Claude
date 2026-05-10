@@ -8,6 +8,9 @@ langchain-anthropic
 fastapi
 uvicorn[standard]
 redis
+psycopg[binary,pool]
+langgraph-checkpoint-postgres
+langgraph-checkpoint-redis
 
 # Settings
 pydantic>=2

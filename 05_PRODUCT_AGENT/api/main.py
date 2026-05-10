@@ -1,30 +1,33 @@
 from __future__ import annotations
 
 import time
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages import SystemMessage
 
+from agent.checkpointing import build_checkpointer, close_checkpointer_resources
 from agent.graph import build_customer_service_graph
 from api.middleware.rate_limiter import RateLimiter, TokenBudgetExceeded
 from api.routers.admin import create_admin_router
 from api.schemas import ChatRequest, ChatResponse, DeleteMemoriesResponse
 from api.settings import settings
 from api.ui import CUSTOMER_SERVICE_UI
-from memory.long_term import UserMemoryManager
-from memory.session_store import SessionStore
+from memory.factory import build_session_store, build_user_memory_manager
 from memory.short_term import ContextWindowManager
 from llm.factory import build_customer_service_llm
 from monitoring.evaluator import AutoQualityEvaluator
 from monitoring.metrics import record_chat_error, record_chat_request, render_prometheus_metrics
 from monitoring.tracing import build_trace_config, configure_langsmith
 
-customer_service_graph = build_customer_service_graph()
+checkpointer = build_checkpointer(settings)
+customer_service_graph = build_customer_service_graph(checkpointer=checkpointer)
 context_window_manager = ContextWindowManager()
-session_store = SessionStore(settings.memory_db)
-user_memory_manager = UserMemoryManager(settings.memory_db)
+session_store = build_session_store(settings)
+user_memory_manager = build_user_memory_manager(settings)
 quality_evaluator = AutoQualityEvaluator(alert_threshold=settings.quality_alert_threshold)
 customer_service_llm_setup = build_customer_service_llm(settings)
 customer_service_llm = customer_service_llm_setup.llm
@@ -36,7 +39,17 @@ rate_limiter = RateLimiter(
     global_hourly_token_budget=settings.global_hourly_token_budget,
 )
 
-app = FastAPI(title=settings.app_name, version=settings.app_version)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    del app
+    try:
+        yield
+    finally:
+        close_checkpointer_resources()
+
+
+app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)
 app.include_router(
     create_admin_router(
         session_store=session_store,
@@ -67,7 +80,8 @@ async def health() -> dict:
             "api": "ok",
             "redis": "configured" if settings.redis_url else "not_configured",
             "database": "configured" if settings.database_url else "not_configured",
-            "memory": "sqlite",
+            "memory": settings.storage_backend,
+            "checkpointer": settings.checkpointer_backend,
             "llm": settings.llm_mode,
             "llm_startup_error": customer_service_llm_setup.startup_error,
             "rate_limiter": rate_limiter.backend,
