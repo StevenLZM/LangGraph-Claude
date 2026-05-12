@@ -2,8 +2,8 @@
 
 > 本文档是 05_PRODUCT_AGENT 的工程进度入口。后续开发都在 `main` 分支进行，并以本文档记录迭代目标、验收状态、关键决策和未竟事项。
 >
-> 最后更新：2026-05-10
-> 当前阶段：**M6 已完成 + 存储后端升级**（DeepSeek 主路径、FAQ/RAG、管理接口、自动评测、Postgres 业务存储和 LangGraph checkpointer 已接入）
+> 最后更新：2026-05-11
+> 当前阶段：**M6 已完成 + 存储后端升级 + RocketMQ 业务消息接入**（DeepSeek 主路径、FAQ/RAG、管理接口、自动评测、Postgres 业务存储、LangGraph checkpointer 和 RocketMQ 跨项目消息已接入）
 
 ---
 
@@ -16,10 +16,10 @@
 | 定位 | 面向真实流量的生产级客服 Agent，重点验证并发、记忆、限流、成本、监控、降级、评估和部署能力 |
 | PRD | `05_production_agent_customer_service.md` |
 | 工程设计 | `05_production_engineering.md` |
-| 当前代码状态 | 已完成 M6 + 存储升级：FastAPI `/chat`、内置客服 UI、Mock 工具、规则型客服 Agent、短期记忆窗口、SQLite/Postgres 会话状态、SQLite/Postgres 用户长期记忆、LangGraph Postgres/Redis checkpointer 工厂、Hybrid 限流、Token 预算降级、DeepSeek 真实 LLM 主路径、LLM fallback/熔断测试层、FAQ/RAG 适配、管理接口、100 题自动评测、Prometheus 兼容指标、LangSmith trace metadata、自动质量评估、Docker Compose、Grafana provisioning、Locust 压测入口、pytest 测试 |
+| 当前代码状态 | 已完成 M6 + 存储升级 + RocketMQ 消息接入：FastAPI `/chat`、内置客服 UI、Mock 工具、规则型客服 Agent、短期记忆窗口、SQLite/Postgres 会话状态、SQLite/Postgres 用户长期记忆、LangGraph Postgres/Redis checkpointer 工厂、RocketMQ outbox 与跨项目消息契约、Hybrid 限流、Token 预算降级、DeepSeek 真实 LLM 主路径、LLM fallback/熔断测试层、FAQ/RAG 适配、管理接口、100 题自动评测、Prometheus 兼容指标、LangSmith trace metadata、自动质量评估、Docker Compose、Grafana provisioning、Locust 压测入口、pytest 测试 |
 | 开发分支 | `main` |
 | API 默认端口 | `8000` |
-| 主要技术栈 | FastAPI、LangGraph、Redis、PostgreSQL/pgvector、SQLite、LangSmith、Prometheus、Grafana、Docker Compose |
+| 主要技术栈 | FastAPI、LangGraph、RocketMQ、Redis、PostgreSQL/pgvector、SQLite、LangSmith、Prometheus、Grafana、Docker Compose |
 
 05 的目标不是再证明 Agent 能“跑起来”，而是把 Agent 放到真实客服系统里，具备上线运营所需的稳定性、成本控制、质量追踪和恢复能力。
 
@@ -330,6 +330,7 @@ Prometheus 指标出口。
 - [x] M5 部署与压测
 - [x] M6 收尾强化
 - [x] 存储后端升级：Postgres 业务存储、LangGraph Postgres/Redis checkpointer、Compose 默认 Postgres
+- [x] RocketMQ 业务消息接入：ChatCompleted/PostprocessRequested 事件、outbox、Docker Compose nameserver/broker
 
 ---
 
@@ -512,6 +513,23 @@ Prometheus 指标出口。
 - Postgres 业务存储保存的是结构化会话/记忆表，不是 pgvector 语义检索；长期记忆召回仍是关键词和规则评分。
 - LangGraph checkpointer 已可接 Postgres/Redis，但真实容器启动、表初始化和恢复路径仍需在 Docker/CI 环境做端到端验证。
 - `CHECKPOINTER_SETUP=true` 适合本地和演示；正式生产建议迁移任务预建表/索引后设置为 `false`。
+
+### 2026-05-11：RocketMQ 业务消息接入完成
+
+**实际交付**
+- 新增 `messaging/`：RocketMQ 事件模型、消息 envelope、outbox、publisher、对话后处理 handler。
+- `/chat` 在生成真实 LLM 最终回答并保存会话后，发布 `ChatCompleted` 普通消息和 `PostprocessRequested` FIFO 消息；转人工场景额外发布 `HumanTransferReminderRequested` 延迟消息。
+- `PostprocessRequested` 使用 `session_id` 作为 message group，展示会话内顺序后处理语义。
+- `MessageOutboxStore` 记录消息状态，发送失败标记 `enqueue_failed`，不阻塞用户响应。
+- 新增 `GET /admin/messages/outbox` 查看消息 outbox。
+- Docker Compose 增加 `rocketmq-namesrv` 和 `rocketmq-broker`，Compose 默认启用 `ROCKETMQ_ENABLED=true`。
+
+**验收结果**
+- `cd 05_PRODUCT_AGENT && pytest tests/test_rocketmq_messaging.py tests/test_deployment.py tests/test_health.py tests/test_admin_api.py -q`：15 passed。
+
+**当前边界**
+- 当前消费者 handler 已可被测试调用；真实 RocketMQ 消费 worker 和 DLQ 重放界面可作为下一步专项。
+- 事务消息、延迟消息已在 topic/config 契约中预留，尚未接入真实业务场景。
 
 ---
 

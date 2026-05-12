@@ -23,7 +23,16 @@ def test_dockerfile_runs_fastapi_application():
 def test_compose_defines_m5_runtime_stack():
     compose = _read("docker-compose.yml")
 
-    for service_name in ("api:", "redis:", "postgres:", "prometheus:", "grafana:", "locust:"):
+    for service_name in (
+        "api:",
+        "redis:",
+        "postgres:",
+        "rocketmq-namesrv:",
+        "rocketmq-broker:",
+        "prometheus:",
+        "grafana:",
+        "locust:",
+    ):
         assert service_name in compose
     assert "env_file:" in compose
     assert "- .env" in compose
@@ -31,6 +40,8 @@ def test_compose_defines_m5_runtime_stack():
     assert "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}" in compose
     assert "LLM_MODE=offline_stub" not in compose
     assert "REDIS_URL=redis://redis:6379/0" in compose
+    assert "ROCKETMQ_ENABLED=${ROCKETMQ_ENABLED:-true}" in compose
+    assert "ROCKETMQ_ENDPOINT=rocketmq-namesrv:9876" in compose
     assert "STORAGE_BACKEND=postgres" in compose
     assert "CHECKPOINTER_BACKEND=postgres" in compose
     assert "pgvector/pgvector:pg16" in compose
@@ -87,5 +98,7 @@ def test_env_example_does_not_contain_real_secrets():
     assert "LLM_MODE=deepseek" in env_example
     assert "GRAFANA_ADMIN_PASSWORD=admin" in env_example
     assert "REDIS_URL=" in env_example
+    assert "ROCKETMQ_ENABLED=false" in env_example
+    assert "ROCKETMQ_ENDPOINT=localhost:9876" in env_example
     assert "lsv2_" not in env_example
     assert "sk-" not in env_example

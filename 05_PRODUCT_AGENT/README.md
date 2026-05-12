@@ -1,6 +1,6 @@
 # 05_PRODUCT_AGENT
 
-生产级 AI Agent 平台的智能客服项目。当前已完成 M6 收尾强化和存储后端升级：`/chat`、内置客服工作台、Mock 工具、规则型客服 Agent、短期记忆窗口、SQLite/Postgres 会话和用户长期记忆、LangGraph Postgres/Redis checkpointer、限流与 Token 预算降级、DeepSeek 真实 LLM 主路径、LLM fallback 与熔断测试层、FAQ/RAG 适配、管理接口、100 题自动评测、LangSmith trace metadata、Prometheus 兼容指标、Grafana 看板编排和 Locust 压测入口。
+生产级 AI Agent 平台的智能客服项目。当前已完成 M6 收尾强化、存储后端升级和 RocketMQ 业务消息接入：`/chat`、内置客服工作台、Mock 工具、规则型客服 Agent、短期记忆窗口、SQLite/Postgres 会话和用户长期记忆、LangGraph Postgres/Redis checkpointer、限流与 Token 预算降级、DeepSeek 真实 LLM 主路径、LLM fallback 与熔断测试层、FAQ/RAG 适配、RocketMQ 跨项目业务消息、管理接口、100 题自动评测、LangSmith trace metadata、Prometheus 兼容指标、Grafana 看板编排和 Locust 压测入口。
 
 ## 本地运行
 
@@ -94,13 +94,13 @@ python evals/run.py --dataset evals/dataset.jsonl
 cp .env.example .env
 ```
 
-一键启动 API、Redis、Postgres/pgvector、Prometheus、Grafana：
+一键启动 API、Redis、Postgres/pgvector、RocketMQ、Prometheus、Grafana：
 
 ```bash
 docker compose up --build
 ```
 
-Compose 默认会覆盖本地 `.env.example` 的轻量存储设置，使用 `STORAGE_BACKEND=postgres` 和 `CHECKPOINTER_BACKEND=postgres`。Postgres 同时承载业务会话/用户记忆表和 LangGraph checkpoint 表；Redis 用于限流计数，也可通过 `CHECKPOINTER_BACKEND=redis` 作为可选 checkpoint 后端。
+Compose 默认会覆盖本地 `.env.example` 的轻量存储设置，使用 `STORAGE_BACKEND=postgres`、`CHECKPOINTER_BACKEND=postgres` 和 `ROCKETMQ_ENABLED=true`。Postgres 同时承载业务会话/用户记忆表和 LangGraph checkpoint 表；Redis 用于限流计数，也可通过 `CHECKPOINTER_BACKEND=redis` 作为可选 checkpoint 后端；RocketMQ 用于跨项目业务消息。
 
 如果要在 LangSmith 网站看到当前项目，先在 `.env` 中配置：
 
@@ -155,6 +155,22 @@ docker compose down -v
 
 本地 SQLite 模式适合 pytest 和离线演示；Compose Postgres 模式更接近多实例部署。当前长期记忆仍是关键词召回，不是 pgvector 语义检索；后续如接 Mem0/pgvector，应复用现有 `UserMemoryManager` 接口，避免改动 `/chat` 和管理接口契约。
 
+## RocketMQ 业务消息
+
+本地默认 `ROCKETMQ_ENABLED=false`，不会要求启动 RocketMQ；Docker Compose 默认启用 RocketMQ nameserver/broker，展示生产级业务消息能力。`/chat` 在完成用户可见回复后发布两类消息：
+
+- `ChatCompleted`：普通消息，topic `agent-customer-service-normal-v1`，用于跨项目订阅客服对话完成事件。
+- `PostprocessRequested`：FIFO 顺序消息，topic `agent-customer-service-fifo-v1`，按 `session_id` 设置 message group，供质量评估、长期记忆提炼、运营统计等后处理消费者使用。
+- `HumanTransferReminderRequested`：延迟消息，topic `agent-customer-service-delay-v1`，转人工场景下用于超时提醒或回访任务。
+
+消息采用统一 envelope：`event_id`、`event_type`、`event_version`、`producer`、`occurred_at`、`trace_id`、`aggregate_id` 和 `payload`。生产端写入 `MESSAGE_OUTBOX_DB` 后再发送 RocketMQ，发送失败不会阻塞 `/chat`，管理接口可查看 outbox：
+
+```bash
+curl http://127.0.0.1:8000/admin/messages/outbox
+```
+
+后续接入其他项目时，建议按 RocketMQ 特性拆 topic：普通消息用于跨项目事件，FIFO 用于会话内顺序后处理，Delay 用于回访/超时提醒，Transaction 用于演示“本地业务写库 + 消息发送”的最终一致性。
+
 ## M4 可观测性与质量评估
 
 `/chat` 现在会在 API 边界记录运营指标和质量评估结果，保持本地离线可测，不依赖外部 Prometheus Server、Grafana 或真实 LangSmith 服务。
@@ -190,7 +206,7 @@ docker compose --profile loadtest run --rm locust \
 pytest tests -q
 ```
 
-M6 的业务 guardrail 仍由规则层负责，包括退款二次确认、转人工优先级和工具上下文构造；用户可见客服回答必须由真实 LLM 基于规则/工具结果生成。pytest 通过注入 fake LLM 保持离线稳定，不再依赖 `offline_stub` 作为运行模式。Compose 会启动 Redis、Postgres/pgvector、Prometheus 和 Grafana；Postgres 业务存储和 LangGraph checkpoint 已接入，pgvector/Mem0 语义记忆仍留给后续优化。
+M6 的业务 guardrail 仍由规则层负责，包括退款二次确认、转人工优先级和工具上下文构造；用户可见客服回答必须由真实 LLM 基于规则/工具结果生成。pytest 通过注入 fake LLM 保持离线稳定，不再依赖 `offline_stub` 作为运行模式。Compose 会启动 Redis、Postgres/pgvector、RocketMQ、Prometheus 和 Grafana；Postgres 业务存储、LangGraph checkpoint 和 RocketMQ outbox 已接入，pgvector/Mem0 语义记忆仍留给后续优化。
 
 ## 教学文档
 

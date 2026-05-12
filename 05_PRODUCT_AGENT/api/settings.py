@@ -35,10 +35,21 @@ class Settings(BaseSettings):
     database_url: str = ""
     checkpointer_db: str = str(ROOT / "data" / "sessions.db")
     memory_db: str = str(ROOT / "data" / "memory.db")
+    message_outbox_db: str = str(ROOT / "data" / "message_outbox.db")
     storage_backend: str = "sqlite"
     checkpointer_backend: str = "none"
     checkpointer_url: str = ""
     checkpointer_setup: bool = True
+
+    rocketmq_enabled: bool = False
+    rocketmq_endpoint: str = "localhost:9876"
+    rocketmq_producer_group: str = "PID_05_PRODUCT_AGENT"
+    rocketmq_access_key: str = ""
+    rocketmq_secret_key: str = ""
+    rocketmq_normal_topic: str = "agent-customer-service-normal-v1"
+    rocketmq_fifo_topic: str = "agent-customer-service-fifo-v1"
+    rocketmq_delay_topic: str = "agent-customer-service-delay-v1"
+    rocketmq_transaction_topic: str = "agent-customer-service-tx-v1"
 
     user_rate_limit_per_minute: int = 10
     global_qps_limit: int = 100

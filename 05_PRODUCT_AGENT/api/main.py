@@ -19,6 +19,13 @@ from api.ui import CUSTOMER_SERVICE_UI
 from memory.factory import build_session_store, build_user_memory_manager
 from memory.short_term import ContextWindowManager
 from llm.factory import build_customer_service_llm
+from messaging.events import (
+    build_chat_completed_event,
+    build_human_transfer_reminder_event,
+    build_postprocess_requested_event,
+)
+from messaging.outbox import MessageOutboxStore
+from messaging.publisher import build_message_publisher
 from monitoring.evaluator import AutoQualityEvaluator
 from monitoring.metrics import record_chat_error, record_chat_request, render_prometheus_metrics
 from monitoring.tracing import build_trace_config, configure_langsmith
@@ -31,6 +38,8 @@ user_memory_manager = build_user_memory_manager(settings)
 quality_evaluator = AutoQualityEvaluator(alert_threshold=settings.quality_alert_threshold)
 customer_service_llm_setup = build_customer_service_llm(settings)
 customer_service_llm = customer_service_llm_setup.llm
+message_outbox_store = MessageOutboxStore(settings.message_outbox_db)
+message_publisher = build_message_publisher(settings, outbox_store=message_outbox_store)
 rate_limiter = RateLimiter(
     redis_url=settings.redis_url,
     user_rate_limit_per_minute=settings.user_rate_limit_per_minute,
@@ -54,6 +63,7 @@ app.include_router(
     create_admin_router(
         session_store=session_store,
         user_memory_manager=user_memory_manager,
+        message_outbox_store=message_outbox_store,
     )
 )
 configure_langsmith(
@@ -85,6 +95,7 @@ async def health() -> dict:
             "llm": settings.llm_mode,
             "llm_startup_error": customer_service_llm_setup.startup_error,
             "rate_limiter": rate_limiter.backend,
+            "rocketmq": "enabled" if message_publisher.enabled else "disabled",
         },
     }
 
@@ -215,6 +226,15 @@ async def chat(req: ChatRequest) -> ChatResponse:
         quality_score=quality_score,
         needs_human_transfer=result.get("needs_human_transfer", False),
     )
+    _publish_chat_events(
+        req=req,
+        answer=answer,
+        result=result,
+        token_used=token_used,
+        response_time_ms=response_time_ms,
+        quality_score=quality_score,
+        trace_id=_trace_id_for(req.session_id, started_at),
+    )
     return ChatResponse(
         session_id=result.get("session_id", req.session_id),
         user_id=result.get("user_id", req.user_id),
@@ -330,6 +350,54 @@ def _degraded_answer(reason: str) -> str:
         "当前系统已达到全局 Token 预算，为控制成本先给出简化回复："
         "我可以继续帮你查询订单、物流、商品库存或退款；请稍后重试获取完整处理结果。"
     )
+
+
+def _publish_chat_events(
+    *,
+    req: ChatRequest,
+    answer: str,
+    result: dict,
+    token_used: int,
+    response_time_ms: int,
+    quality_score: int | None,
+    trace_id: str,
+) -> None:
+    events = [
+        build_chat_completed_event(
+            session_id=req.session_id,
+            user_id=req.user_id,
+            question=req.message,
+            answer=answer,
+            token_used=token_used,
+            response_time_ms=response_time_ms,
+            quality_score=quality_score,
+            needs_human_transfer=result.get("needs_human_transfer", False),
+            transfer_reason=result.get("transfer_reason", ""),
+            order_context=result.get("order_context"),
+            trace_id=trace_id,
+        ),
+        build_postprocess_requested_event(
+            session_id=req.session_id,
+            user_id=req.user_id,
+            question=req.message,
+            answer=answer,
+            trace_id=trace_id,
+        ),
+    ]
+    if result.get("needs_human_transfer", False):
+        events.append(
+            build_human_transfer_reminder_event(
+                session_id=req.session_id,
+                user_id=req.user_id,
+                transfer_reason=result.get("transfer_reason", ""),
+                trace_id=trace_id,
+            )
+        )
+    message_publisher.publish_many(events)
+
+
+def _trace_id_for(session_id: str, started_at: float) -> str:
+    return f"{session_id}:{int(started_at * 1000)}"
 
 
 async def _generate_required_llm_answer(

@@ -11,6 +11,7 @@ redis
 psycopg[binary,pool]
 langgraph-checkpoint-postgres
 langgraph-checkpoint-redis
+rocketmq-python-client
 
 # Settings
 pydantic>=2
