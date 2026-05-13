@@ -265,7 +265,6 @@ def run_plan_and_execute(
     event_callback: EventCallback | None = None,
 ) -> AgentRunResult:
     if event_callback is not None:
-        print(f"run_plan_and_execute._run_plan_and_execute_with_event_callback:{event_callback}")
         return _run_plan_and_execute_with_event_callback(
             user_input,
             planner=planner,
@@ -273,7 +272,7 @@ def run_plan_and_execute(
             max_steps=max_steps,
             event_callback=event_callback,
         )
-    print("run_plan_and_execute.buildgraph")
+    
     graph = build_plan_execute_graph(planner=planner, executor=executor, max_steps=max_steps)
     state = graph.invoke({"input": user_input})
 

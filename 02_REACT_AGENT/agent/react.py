@@ -59,8 +59,15 @@ def build_react_graph(llm: Any | None = None, tools: list[Any] | None = None, ma
 def _events_from_messages(messages: list[BaseMessage]) -> list[AgentEvent]:
     events: list[AgentEvent] = []
     for message in messages:
+        print(f"llm message类型:{message.__class__}")
+        print(f"llm message:{message}")
         if isinstance(message, SystemMessage | HumanMessage):
             continue
+        # -graph里如果是LLM输出
+        #   -有toolcall：调用工具(一次一个或多个)
+        #   -没有toolcall：final answer
+        # -graph里tool输出
+        #   -工具结果(一个结果一条message)
         if isinstance(message, AIMessage):
             tool_calls = getattr(message, "tool_calls", None) or []
             if tool_calls:

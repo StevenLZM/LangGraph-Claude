@@ -108,6 +108,8 @@ async def metrics() -> str:
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     started_at = time.perf_counter()
+
+    # 1. 限流检查（按 user_id 隔离）
     try:
         await rate_limiter.check_user_rate(req.user_id)
         await rate_limiter.check_global_qps()
@@ -115,10 +117,17 @@ async def chat(req: ChatRequest) -> ChatResponse:
         status = "rate_limited" if exc.status_code == 429 else "error"
         record_chat_error(status=status, session_id=req.session_id)
         raise
+    # 存储	                    Key	                        共享范围	        用途
+    # user_memories表	        user_id	                    同一用户跨会话共享	 长期记忆
+    # sessions表	            session_id	                仅当前会话	        对话记录持久化
+    # LangGraph Checkpointer	thread_id (= session_id)    仅当前会话	        图执行状态
 
+    # 2. 加载历史会话（按 session_id 隔离）
     loaded_session = session_store.load_session(req.session_id)
     prior_messages = loaded_session["messages"] if loaded_session else []
+    # 3. 加载长期记忆（按 user_id 跨会话共享）
     user_memories = user_memory_manager.load_memories(req.user_id, req.message)
+    # 4. 短期记忆裁剪（按 session_id 内的消息列表）
     messages = context_window_manager.trim(
         [*prior_messages, HumanMessage(content=req.message)]
     )
@@ -142,6 +151,8 @@ async def chat(req: ChatRequest) -> ChatResponse:
         environment=settings.observability_env,
         app_version=settings.app_version,
     )
+    # 5. LangGraph 执行（按 thread_id=session_id 隔离状态）
+    # result就是customer_service_graph里定义的CustomerServiceState
     result = customer_service_graph.invoke(
         {
             "session_id": req.session_id,
@@ -198,10 +209,12 @@ async def chat(req: ChatRequest) -> ChatResponse:
             "user_memories": user_memories,
         },
     )
+    # 6. 保存长期记忆（按 user_id）
     quality_score = evaluation.score
     saved_memories = user_memory_manager.save_from_turn(req.user_id, req.message, answer)
     if saved_memories:
         user_memories = user_memory_manager.load_memories(req.user_id, req.message)
+    # 7. 保存会话记录（按 session_id）
     session_store.save_session(
         session_id=req.session_id,
         user_id=req.user_id,
