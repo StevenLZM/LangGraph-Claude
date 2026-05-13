@@ -66,4 +66,16 @@ def build_graph(checkpointer: Optional[object] = None):
 
     # 变成可执行 Agent
     # checkpointer = 状态持久化（断点恢复 / HITL 必备）
-    return wf.compile(checkpointer=checkpointer)
+    # return wf.compile(checkpointer=checkpointer)
+    graph = wf.compile(checkpointer=checkpointer)
+    
+    # 或者保存为 PNG 图片（需要安装 pygraphviz）
+    try:
+        png_data = graph.get_graph().draw_mermaid_png()
+        with open("multiagent_graph.png", "wb") as f:
+            f.write(png_data)
+        print("图已保存到 multiagent_graph.png")
+    except Exception as e:
+        print(f"生成 PNG 失败（可忽略，文本模式可用）: {e}")
+    
+    return graph
