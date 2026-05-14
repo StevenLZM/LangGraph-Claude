@@ -4,14 +4,14 @@ from fastapi import APIRouter
 
 from memory.long_term import UserMemoryManager
 from memory.session_store import SessionStore
-from messaging.outbox import MessageOutboxStore
+from messaging.outbox import MessageOutboxStore, PostgresMessageOutboxStore
 
 
 def create_admin_router(
     *,
     session_store: SessionStore,
     user_memory_manager: UserMemoryManager,
-    message_outbox_store: MessageOutboxStore | None = None,
+    message_outbox_store: MessageOutboxStore | PostgresMessageOutboxStore | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/admin", tags=["admin"])
 

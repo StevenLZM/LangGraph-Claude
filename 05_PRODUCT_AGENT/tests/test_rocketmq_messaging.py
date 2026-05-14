@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -139,6 +140,7 @@ def test_chat_publishes_chat_completed_and_postprocess_events(monkeypatch):
         json={
             "user_id": "mq_user",
             "session_id": "mq_session",
+            "request_id": uuid.uuid4().hex,
             "message": "我的订单 ORD123456 到哪了？",
         },
     )

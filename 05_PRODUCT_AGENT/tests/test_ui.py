@@ -21,3 +21,5 @@ def test_root_serves_customer_service_workspace():
     assert "工具路径" in response.text
     assert "处理摘要" in response.text
     assert "清除记忆" in response.text
+    assert "crypto.randomUUID" in response.text
+    assert "request_id" in response.text

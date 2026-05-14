@@ -4,9 +4,11 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from api.settings import Settings
+from api.idempotency import ChatRequestStore, PostgresChatRequestStore, build_chat_request_store
 from memory.factory import build_session_store, build_user_memory_manager
 from memory.long_term import PostgresUserMemoryManager, UserMemoryManager
 from memory.session_store import PostgresSessionStore, SessionStore
+from messaging.outbox import MessageOutboxStore, PostgresMessageOutboxStore, build_message_outbox_store
 
 
 class FakeCursor:
@@ -40,11 +42,13 @@ class FakePostgresConnection:
 
         if normalized.startswith("insert into sessions"):
             session_id, user_id, messages_json, metadata_json = params
+            current = self.sessions.get(session_id)
             self.sessions[session_id] = {
                 "session_id": session_id,
                 "user_id": user_id,
                 "messages_json": messages_json,
                 "metadata_json": metadata_json,
+                "version": int(current["version"]) + 1 if current else 1,
                 "updated_at": "2026-05-10 10:00:00+00",
             }
             return FakeCursor(rowcount=1)
@@ -88,6 +92,8 @@ def test_storage_factory_uses_sqlite_by_default(tmp_path):
 
     assert isinstance(build_session_store(settings), SessionStore)
     assert isinstance(build_user_memory_manager(settings), UserMemoryManager)
+    assert isinstance(build_chat_request_store(settings), ChatRequestStore)
+    assert isinstance(build_message_outbox_store(settings), MessageOutboxStore)
 
 
 def test_storage_factory_uses_postgres_when_configured():
@@ -99,6 +105,8 @@ def test_storage_factory_uses_postgres_when_configured():
 
     assert isinstance(build_session_store(settings), PostgresSessionStore)
     assert isinstance(build_user_memory_manager(settings), PostgresUserMemoryManager)
+    assert isinstance(build_chat_request_store(settings), PostgresChatRequestStore)
+    assert isinstance(build_message_outbox_store(settings), PostgresMessageOutboxStore)
 
 
 def test_postgres_storage_requires_database_url():

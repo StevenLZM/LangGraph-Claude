@@ -3,7 +3,7 @@ from __future__ import annotations
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from memory.long_term import UserMemoryManager
-from memory.session_store import SessionStore
+from memory.session_store import SessionStore, SessionVersionConflict
 from memory.short_term import ContextWindowManager
 
 
@@ -42,6 +42,42 @@ def test_session_store_persists_messages_across_instances(tmp_path):
     assert loaded["metadata"]["summary"] == "首轮问候"
     assert loaded["messages"][0].content == "你好"
     assert loaded["messages"][1].content == "你好，我是客服"
+
+
+def test_session_store_rejects_stale_expected_version(tmp_path):
+    db_path = tmp_path / "sessions.db"
+    store = SessionStore(str(db_path))
+    store.save_session(
+        session_id="session_001",
+        user_id="user_001",
+        messages=[HumanMessage(content="第一条")],
+        metadata={},
+        expected_version=0,
+    )
+    loaded = store.load_session("session_001")
+    assert loaded is not None
+    assert loaded["version"] == 1
+
+    store.save_session(
+        session_id="session_001",
+        user_id="user_001",
+        messages=[HumanMessage(content="第二条")],
+        metadata={},
+        expected_version=loaded["version"],
+    )
+
+    try:
+        store.save_session(
+            session_id="session_001",
+            user_id="user_001",
+            messages=[HumanMessage(content="旧写入")],
+            metadata={},
+            expected_version=loaded["version"],
+        )
+    except SessionVersionConflict:
+        pass
+    else:  # pragma: no cover - pytest will fail here when conflict detection is missing
+        raise AssertionError("stale expected_version should raise SessionVersionConflict")
 
 
 def test_user_memory_manager_saves_searches_and_deletes_memories(tmp_path):

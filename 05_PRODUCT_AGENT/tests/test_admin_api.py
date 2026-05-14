@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 from fastapi.testclient import TestClient
 
 from api.main import app
@@ -18,6 +20,7 @@ def test_admin_sessions_lists_quality_token_and_transfer_fields():
         json={
             "user_id": "admin_user_001",
             "session_id": session_id,
+            "request_id": uuid.uuid4().hex,
             "message": "我要投诉，给我转人工",
         },
     )
@@ -45,6 +48,7 @@ def test_admin_user_memories_returns_saved_memory_rows():
         json={
             "user_id": user_id,
             "session_id": "admin_memory_session_001",
+            "request_id": uuid.uuid4().hex,
             "message": "我喜欢顺丰配送，以后发货优先顺丰",
         },
     )
@@ -65,6 +69,7 @@ def test_admin_transfer_stats_summarizes_sessions():
         json={
             "user_id": "admin_stats_user_001",
             "session_id": "admin_stats_session_001",
+            "request_id": uuid.uuid4().hex,
             "message": "我要投诉，给我转人工",
         },
     )

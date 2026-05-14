@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from messaging.events import RocketMQEvent, RocketMQMessage, event_to_message
-from messaging.outbox import MessageOutboxStore
+from messaging.outbox import MessageOutboxStore, PostgresMessageOutboxStore, build_message_outbox_store
 
 
 class MessageProducer(Protocol):
@@ -26,7 +26,12 @@ class NoopMessagePublisher:
 class RocketMQPublisher:
     enabled = True
 
-    def __init__(self, *, outbox_store: MessageOutboxStore, producer: MessageProducer) -> None:
+    def __init__(
+        self,
+        *,
+        outbox_store: MessageOutboxStore | PostgresMessageOutboxStore,
+        producer: MessageProducer,
+    ) -> None:
         self.outbox_store = outbox_store
         self.producer = producer
 
@@ -88,11 +93,11 @@ class RocketMQSDKProducer:
 def build_message_publisher(
     settings: Any,
     *,
-    outbox_store: MessageOutboxStore | None = None,
+    outbox_store: MessageOutboxStore | PostgresMessageOutboxStore | None = None,
 ) -> RocketMQPublisher | NoopMessagePublisher:
     if not getattr(settings, "rocketmq_enabled", False):
         return NoopMessagePublisher()
-    outbox = outbox_store or MessageOutboxStore(getattr(settings, "message_outbox_db", "data/message_outbox.db"))
+    outbox = outbox_store or build_message_outbox_store(settings)
     producer = RocketMQSDKProducer(
         endpoint=getattr(settings, "rocketmq_endpoint", "localhost:9876"),
         producer_group=getattr(settings, "rocketmq_producer_group", "PID_05_PRODUCT_AGENT"),

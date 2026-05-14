@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 class ChatRequest(BaseModel):
     user_id: str = Field(..., min_length=1)
     session_id: str = Field(..., min_length=1)
+    request_id: str = Field(..., min_length=1)
     message: str = Field(..., min_length=1)
 
     @field_validator("message")
@@ -21,6 +22,8 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     session_id: str
     user_id: str
+    request_id: str
+    request_status: str = "processed"
     answer: str
     needs_human_transfer: bool
     transfer_reason: str

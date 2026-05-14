@@ -16,6 +16,7 @@ def test_settings_defaults_are_local_development_friendly():
     assert settings.checkpointer_backend == "none"
     assert settings.checkpointer_url == ""
     assert settings.checkpointer_setup is True
+    assert settings.chat_request_db.endswith("chat_requests.db")
     assert settings.user_rate_limit_per_minute == 10
     assert settings.global_qps_limit == 100
     assert settings.single_request_token_budget == 4000

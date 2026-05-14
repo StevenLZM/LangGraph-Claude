@@ -35,7 +35,15 @@ http://127.0.0.1:8000/
 ```bash
 curl -X POST http://127.0.0.1:8000/chat \
   -H 'Content-Type: application/json' \
-  -d '{"user_id":"user_001","session_id":"session_001","message":"我的订单 ORD123456 到哪了？"}'
+  -d '{"user_id":"user_001","session_id":"session_001","request_id":"req_001","message":"我的订单 ORD123456 到哪了？"}'
+```
+
+客户端重试同一条消息时，请复用同一个 `request_id`。服务端会按 `(user_id, session_id, request_id)` 做幂等去重，完成后的重复请求会返回第一次结果，并将 `request_status` 标记为 `replayed`。
+
+请求状态查询：
+
+```bash
+curl "http://127.0.0.1:8000/chat/requests/req_001?user_id=user_001&session_id=session_001"
 ```
 
 查询会话：

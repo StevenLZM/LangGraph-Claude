@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     database_url: str = ""
     checkpointer_db: str = str(ROOT / "data" / "sessions.db")
     memory_db: str = str(ROOT / "data" / "memory.db")
+    chat_request_db: str = str(ROOT / "data" / "chat_requests.db")
     message_outbox_db: str = str(ROOT / "data" / "message_outbox.db")
     storage_backend: str = "sqlite"
     checkpointer_backend: str = "none"

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import time
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
@@ -11,12 +13,15 @@ from langchain_core.messages import SystemMessage
 
 from agent.checkpointing import build_checkpointer, close_checkpointer_resources
 from agent.graph import build_customer_service_graph
+from api.idempotency import IdempotencyConflict, build_chat_request_store, chat_message_hash
 from api.middleware.rate_limiter import RateLimiter, TokenBudgetExceeded
 from api.routers.admin import create_admin_router
 from api.schemas import ChatRequest, ChatResponse, DeleteMemoriesResponse
+from api.session_lock import SessionLockManager
 from api.settings import settings
 from api.ui import CUSTOMER_SERVICE_UI
 from memory.factory import build_session_store, build_user_memory_manager
+from memory.session_store import SessionVersionConflict
 from memory.short_term import ContextWindowManager
 from llm.factory import build_customer_service_llm
 from messaging.events import (
@@ -24,7 +29,7 @@ from messaging.events import (
     build_human_transfer_reminder_event,
     build_postprocess_requested_event,
 )
-from messaging.outbox import MessageOutboxStore
+from messaging.outbox import build_message_outbox_store
 from messaging.publisher import build_message_publisher
 from monitoring.evaluator import AutoQualityEvaluator
 from monitoring.metrics import record_chat_error, record_chat_request, render_prometheus_metrics
@@ -34,11 +39,13 @@ checkpointer = build_checkpointer(settings)
 customer_service_graph = build_customer_service_graph(checkpointer=checkpointer)
 context_window_manager = ContextWindowManager()
 session_store = build_session_store(settings)
+chat_request_store = build_chat_request_store(settings)
+session_lock_manager = SessionLockManager(redis_url=settings.redis_url)
 user_memory_manager = build_user_memory_manager(settings)
 quality_evaluator = AutoQualityEvaluator(alert_threshold=settings.quality_alert_threshold)
 customer_service_llm_setup = build_customer_service_llm(settings)
 customer_service_llm = customer_service_llm_setup.llm
-message_outbox_store = MessageOutboxStore(settings.message_outbox_db)
+message_outbox_store = build_message_outbox_store(settings)
 message_publisher = build_message_publisher(settings, outbox_store=message_outbox_store)
 rate_limiter = RateLimiter(
     redis_url=settings.redis_url,
@@ -95,6 +102,9 @@ async def health() -> dict:
             "llm": settings.llm_mode,
             "llm_startup_error": customer_service_llm_setup.startup_error,
             "rate_limiter": rate_limiter.backend,
+            "session_lock": session_lock_manager.backend,
+            "idempotency": getattr(chat_request_store, "backend", "unknown"),
+            "message_outbox": getattr(message_outbox_store, "backend", "unknown"),
             "rocketmq": "enabled" if message_publisher.enabled else "disabled",
         },
     }
@@ -107,6 +117,107 @@ async def metrics() -> str:
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
+    message_hash = chat_message_hash(
+        user_id=req.user_id,
+        session_id=req.session_id,
+        message=req.message,
+    )
+    try:
+        started = chat_request_store.start_request(
+            user_id=req.user_id,
+            session_id=req.session_id,
+            request_id=req.request_id,
+            message_hash=message_hash,
+        )
+    except IdempotencyConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "idempotency_key_conflict",
+                "message": "同一个 request_id 不能用于不同消息。",
+            },
+        ) from exc
+
+    if not started.acquired:
+        return await _replay_chat_request(req)
+
+    lock = await session_lock_manager.acquire(req.session_id)
+    if lock is None:
+        detail = {
+            "error": "session_busy",
+            "message": "当前会话正在处理其他请求，请稍后重试。",
+        }
+        chat_request_store.complete_failure(
+            user_id=req.user_id,
+            session_id=req.session_id,
+            request_id=req.request_id,
+            status_code=409,
+            detail=detail,
+        )
+        raise HTTPException(status_code=409, detail=detail)
+
+    try:
+        response = await _process_chat(req)
+        chat_request_store.complete_success(
+            user_id=req.user_id,
+            session_id=req.session_id,
+            request_id=req.request_id,
+            response=response.model_dump(mode="json"),
+        )
+        return response
+    except HTTPException as exc:
+        chat_request_store.complete_failure(
+            user_id=req.user_id,
+            session_id=req.session_id,
+            request_id=req.request_id,
+            status_code=exc.status_code,
+            detail=exc.detail,
+        )
+        raise
+    except SessionVersionConflict as exc:
+        detail = {
+            "error": "session_version_conflict",
+            "message": "会话已被其他请求更新，请重新发送。",
+        }
+        chat_request_store.complete_failure(
+            user_id=req.user_id,
+            session_id=req.session_id,
+            request_id=req.request_id,
+            status_code=409,
+            detail=detail,
+        )
+        raise HTTPException(status_code=409, detail=detail) from exc
+    finally:
+        await session_lock_manager.release(lock)
+
+
+@app.get("/chat/requests/{request_id}")
+async def get_chat_request(request_id: str, user_id: str, session_id: str) -> dict:
+    record = chat_request_store.get_request(
+        user_id=user_id,
+        session_id=session_id,
+        request_id=request_id,
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail="request not found")
+    response = {
+        "user_id": record.user_id,
+        "session_id": record.session_id,
+        "request_id": record.request_id,
+        "status": record.status,
+        "message_hash": record.message_hash,
+        "created_at": getattr(record, "created_at", ""),
+        "updated_at": getattr(record, "updated_at", ""),
+    }
+    if record.status == "succeeded":
+        response["response"] = json.loads(record.response_json or "{}")
+    elif record.status == "failed":
+        response["error_status_code"] = record.error_status_code
+        response["error_detail"] = json.loads(record.error_detail_json or "{}")
+    return response
+
+
+async def _process_chat(req: ChatRequest) -> ChatResponse:
     started_at = time.perf_counter()
 
     # 1. 限流检查（按 user_id 隔离）
@@ -125,6 +236,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
     # 2. 加载历史会话（按 session_id 隔离）
     loaded_session = session_store.load_session(req.session_id)
     prior_messages = loaded_session["messages"] if loaded_session else []
+    expected_session_version = loaded_session["version"] if loaded_session else 0
     # 3. 加载长期记忆（按 user_id 跨会话共享）
     user_memories = user_memory_manager.load_memories(req.user_id, req.message)
     # 4. 短期记忆裁剪（按 session_id 内的消息列表）
@@ -143,6 +255,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
             reason=exc.reason,
             token_used=exc.token_count,
             started_at=started_at,
+            expected_session_version=expected_session_version,
         )
 
     trace_config = build_trace_config(
@@ -230,6 +343,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
             "trace_metadata": trace_config["metadata"],
             "llm_trace": llm_trace,
         },
+        expected_version=expected_session_version,
     )
     record_chat_request(
         status="transferred" if result.get("needs_human_transfer", False) else "success",
@@ -251,6 +365,8 @@ async def chat(req: ChatRequest) -> ChatResponse:
     return ChatResponse(
         session_id=result.get("session_id", req.session_id),
         user_id=result.get("user_id", req.user_id),
+        request_id=req.request_id,
+        request_status="processed",
         answer=answer,
         needs_human_transfer=result.get("needs_human_transfer", False),
         transfer_reason=result.get("transfer_reason", ""),
@@ -280,6 +396,55 @@ async def delete_user_memories(user_id: str) -> DeleteMemoriesResponse:
     return DeleteMemoriesResponse(user_id=user_id, deleted=deleted)
 
 
+async def _replay_chat_request(req: ChatRequest) -> ChatResponse:
+    record = chat_request_store.get_request(
+        user_id=req.user_id,
+        session_id=req.session_id,
+        request_id=req.request_id,
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail="request not found")
+    if record.status == "failed":
+        raise HTTPException(
+            status_code=record.error_status_code or 500,
+            detail=json.loads(record.error_detail_json or "{}"),
+        )
+    if record.status == "processing":
+        record = await _wait_for_request_completion(req)
+    if record is None or record.status == "processing":
+        raise HTTPException(
+            status_code=202,
+            detail={
+                "error": "request_processing",
+                "message": "请求正在处理中，请稍后重试。",
+                "request_id": req.request_id,
+            },
+        )
+    if record.status == "failed":
+        raise HTTPException(
+            status_code=record.error_status_code or 500,
+            detail=json.loads(record.error_detail_json or "{}"),
+        )
+    payload = json.loads(record.response_json or "{}")
+    payload["request_status"] = "replayed"
+    return ChatResponse.model_validate(payload)
+
+
+async def _wait_for_request_completion(req: ChatRequest, timeout_seconds: float = 1.5) -> object | None:
+    deadline = time.monotonic() + timeout_seconds
+    record = None
+    while time.monotonic() < deadline:
+        record = chat_request_store.get_request(
+            user_id=req.user_id,
+            session_id=req.session_id,
+            request_id=req.request_id,
+        )
+        if record is None or record.status != "processing":
+            return record
+        await asyncio.sleep(0.05)
+    return record
+
+
 def _extract_memory_summary(messages: list[object]) -> str:
     for message in messages:
         if isinstance(message, SystemMessage) and message.additional_kwargs.get("type") == "summary":
@@ -296,6 +461,7 @@ def _build_degraded_chat_response(
     reason: str,
     token_used: int,
     started_at: float,
+    expected_session_version: int,
 ) -> ChatResponse:
     answer = _degraded_answer(reason)
     response_messages = [
@@ -327,6 +493,7 @@ def _build_degraded_chat_response(
             "degrade_reason": reason,
             "llm_trace": _offline_llm_trace(settings.llm_mode, "degraded", user_memories),
         },
+        expected_version=expected_session_version,
     )
     record_chat_request(
         status="degraded",
@@ -338,6 +505,8 @@ def _build_degraded_chat_response(
     return ChatResponse(
         session_id=req.session_id,
         user_id=req.user_id,
+        request_id=req.request_id,
+        request_status="degraded",
         answer=answer,
         needs_human_transfer=False,
         transfer_reason="",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,7 +19,12 @@ def _rate_limiter_class():
 def _post_chat(client: TestClient, *, user_id: str, session_id: str, message: str = "我的订单 ORD123456 到哪了？"):
     return client.post(
         "/chat",
-        json={"user_id": user_id, "session_id": session_id, "message": message},
+        json={
+            "user_id": user_id,
+            "session_id": session_id,
+            "request_id": uuid.uuid4().hex,
+            "message": message,
+        },
     )
 
 

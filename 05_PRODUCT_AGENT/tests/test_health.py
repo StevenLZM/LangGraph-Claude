@@ -25,5 +25,8 @@ def test_health_returns_runtime_status():
         "llm": "deepseek",
         "llm_startup_error": "",
         "rate_limiter": "memory",
+        "session_lock": "memory",
+        "idempotency": "sqlite",
+        "message_outbox": "sqlite",
         "rocketmq": "disabled",
     }

@@ -170,9 +170,17 @@ CUSTOMER_SERVICE_UI = """<!doctype html>
       messages.scrollTop = messages.scrollHeight;
     }
 
+    function newRequestId() {
+      if (window.crypto && typeof window.crypto.randomUUID === "function") {
+        return window.crypto.randomUUID();
+      }
+      return `req_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    }
+
     async function sendMessage(text) {
       const message = text.trim();
       if (!message) return;
+      const requestId = newRequestId();
       addMessage(message, "user");
       input.value = "";
       const response = await fetch("/chat", {
@@ -181,10 +189,15 @@ CUSTOMER_SERVICE_UI = """<!doctype html>
         body: JSON.stringify({
           user_id: document.querySelector("#userId").value,
           session_id: document.querySelector("#sessionId").value,
+          request_id: requestId,
           message,
         }),
       });
       const payload = await response.json();
+      if (response.status === 202 && payload.detail) {
+        addMessage(payload.detail.message || "请求正在处理中，请稍后重试。", "assistant");
+        return;
+      }
       addMessage(payload.answer || "请求失败", "assistant");
       document.querySelector("#quality").textContent = payload.quality_score ?? "-";
       document.querySelector("#tokens").textContent = payload.token_used ?? "-";

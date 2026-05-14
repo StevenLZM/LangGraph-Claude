@@ -22,6 +22,7 @@ services:
       - CHECKPOINTER_SETUP=${CHECKPOINTER_SETUP:-true}
       - CHECKPOINTER_DB=/app/data/sessions.db
       - MEMORY_DB=/app/data/memory.db
+      - CHAT_REQUEST_DB=/app/data/chat_requests.db
       - MESSAGE_OUTBOX_DB=/app/data/message_outbox.db
       - ROCKETMQ_ENABLED=${ROCKETMQ_ENABLED:-true}
       - ROCKETMQ_ENDPOINT=rocketmq-namesrv:9876

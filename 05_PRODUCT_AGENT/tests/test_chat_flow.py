@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -26,6 +27,7 @@ def _chat(message: str, session_id: str = "session_001") -> dict:
         json={
             "user_id": "user_001",
             "session_id": session_id,
+            "request_id": uuid.uuid4().hex,
             "message": message,
         },
     )
@@ -40,6 +42,7 @@ def _chat_for_user(user_id: str, session_id: str, message: str) -> dict:
         json={
             "user_id": user_id,
             "session_id": session_id,
+            "request_id": uuid.uuid4().hex,
             "message": message,
         },
     )
@@ -106,7 +109,12 @@ def test_chat_rejects_empty_message():
 
     response = client.post(
         "/chat",
-        json={"user_id": "user_001", "session_id": "session_001", "message": "   "},
+        json={
+            "user_id": "user_001",
+            "session_id": "session_001",
+            "request_id": uuid.uuid4().hex,
+            "message": "   ",
+        },
     )
 
     assert response.status_code == 422
@@ -188,6 +196,7 @@ def test_chat_calls_injected_llm_and_returns_trace(monkeypatch):
         json={
             "user_id": "llm_user_001",
             "session_id": "llm_session_001",
+            "request_id": uuid.uuid4().hex,
             "message": "给我送货用什么快递？",
         },
     )
@@ -219,6 +228,7 @@ def test_real_llm_startup_error_returns_503_instead_of_rule_answer(monkeypatch):
         json={
             "user_id": "llm_startup_error_user_001",
             "session_id": "llm_startup_error_session_001",
+            "request_id": uuid.uuid4().hex,
             "message": "给我送货用什么快递？",
         },
     )

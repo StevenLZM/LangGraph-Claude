@@ -15,6 +15,10 @@ TEST_MEMORY_DB = Path("/private/tmp/05_product_agent_pytest_memory.db")
 if TEST_MEMORY_DB.exists():
     TEST_MEMORY_DB.unlink()
 os.environ.setdefault("MEMORY_DB", str(TEST_MEMORY_DB))
+TEST_CHAT_REQUEST_DB = Path("/private/tmp/05_product_agent_pytest_chat_requests.db")
+if TEST_CHAT_REQUEST_DB.exists():
+    TEST_CHAT_REQUEST_DB.unlink()
+os.environ.setdefault("CHAT_REQUEST_DB", str(TEST_CHAT_REQUEST_DB))
 os.environ["LLM_MODE"] = "deepseek"
 os.environ.setdefault("DEEPSEEK_API_KEY", "sk-test")
 os.environ["REDIS_URL"] = ""

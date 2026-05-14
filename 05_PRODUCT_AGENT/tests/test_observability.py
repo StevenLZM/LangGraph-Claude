@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 from fastapi.testclient import TestClient
 
 import api.main as main
@@ -14,7 +16,12 @@ def _post_chat(
 ):
     return client.post(
         "/chat",
-        json={"user_id": user_id, "session_id": session_id, "message": message},
+        json={
+            "user_id": user_id,
+            "session_id": session_id,
+            "request_id": uuid.uuid4().hex,
+            "message": message,
+        },
     )
 
 

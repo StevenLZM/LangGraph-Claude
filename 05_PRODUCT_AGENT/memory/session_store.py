@@ -35,6 +35,10 @@ def message_from_dict(payload: dict[str, Any]) -> BaseMessage:
     return SystemMessage(content=content, additional_kwargs=additional_kwargs)
 
 
+class SessionVersionConflict(Exception):
+    """Raised when a session write is based on a stale version."""
+
+
 class SessionStore:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
@@ -47,33 +51,77 @@ class SessionStore:
         user_id: str,
         messages: list[BaseMessage],
         metadata: dict[str, Any] | None = None,
-    ) -> None:
+        expected_version: int | None = None,
+    ) -> int:
         metadata = dict(metadata or {})
         message_payload = [message_to_dict(message) for message in messages]
         with self._connect() as conn:
-            conn.execute(
+            if expected_version is None:
+                conn.execute(
+                    """
+                    INSERT INTO sessions(session_id, user_id, messages_json, metadata_json, version, updated_at)
+                    VALUES(?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        user_id=excluded.user_id,
+                        messages_json=excluded.messages_json,
+                        metadata_json=excluded.metadata_json,
+                        version=sessions.version + 1,
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    (
+                        session_id,
+                        user_id,
+                        json.dumps(message_payload, ensure_ascii=False),
+                        json.dumps(metadata, ensure_ascii=False),
+                    ),
+                )
+                return self._load_version(conn, session_id)
+            if expected_version == 0:
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO sessions(
+                        session_id, user_id, messages_json, metadata_json, version, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+                    """,
+                    (
+                        session_id,
+                        user_id,
+                        json.dumps(message_payload, ensure_ascii=False),
+                        json.dumps(metadata, ensure_ascii=False),
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise SessionVersionConflict(f"stale session version for {session_id}")
+                return 1
+
+            cursor = conn.execute(
                 """
-                INSERT INTO sessions(session_id, user_id, messages_json, metadata_json, updated_at)
-                VALUES(?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(session_id) DO UPDATE SET
-                    user_id=excluded.user_id,
-                    messages_json=excluded.messages_json,
-                    metadata_json=excluded.metadata_json,
+                UPDATE sessions
+                SET user_id=?,
+                    messages_json=?,
+                    metadata_json=?,
+                    version=version + 1,
                     updated_at=CURRENT_TIMESTAMP
+                WHERE session_id=? AND version=?
                 """,
                 (
-                    session_id,
                     user_id,
                     json.dumps(message_payload, ensure_ascii=False),
                     json.dumps(metadata, ensure_ascii=False),
+                    session_id,
+                    expected_version,
                 ),
             )
+            if cursor.rowcount != 1:
+                raise SessionVersionConflict(f"stale session version for {session_id}")
+            return expected_version + 1
 
     def load_session(self, session_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT session_id, user_id, messages_json, metadata_json, updated_at
+                SELECT session_id, user_id, messages_json, metadata_json, version, updated_at
                 FROM sessions
                 WHERE session_id = ?
                 """,
@@ -88,6 +136,7 @@ class SessionStore:
             "user_id": row["user_id"],
             "messages": messages,
             "metadata": metadata,
+            "version": int(row["version"]),
             "updated_at": row["updated_at"],
         }
 
@@ -100,6 +149,7 @@ class SessionStore:
         return {
             "session_id": loaded["session_id"],
             "user_id": loaded["user_id"],
+            "version": loaded["version"],
             "messages": [message_to_dict(message) for message in messages],
             "window_size": len(messages),
             "total_turns": sum(1 for message in messages if isinstance(message, HumanMessage)),
@@ -117,7 +167,7 @@ class SessionStore:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT session_id, user_id, messages_json, metadata_json, updated_at
+                SELECT session_id, user_id, messages_json, metadata_json, version, updated_at
                 FROM sessions
                 ORDER BY updated_at DESC
                 LIMIT ?
@@ -132,6 +182,7 @@ class SessionStore:
                 {
                     "session_id": row["session_id"],
                     "user_id": row["user_id"],
+                    "version": int(row["version"]),
                     "updated_at": row["updated_at"],
                     "window_size": len(messages),
                     "total_turns": sum(1 for message in messages if isinstance(message, HumanMessage)),
@@ -178,6 +229,13 @@ class SessionStore:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @staticmethod
+    def _load_version(conn: sqlite3.Connection, session_id: str) -> int:
+        row = conn.execute("SELECT version FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+        if row is None:  # pragma: no cover - defensive
+            raise SessionVersionConflict(f"session {session_id} was not saved")
+        return int(row["version"])
+
     def _ensure_schema(self) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -187,10 +245,14 @@ class SessionStore:
                     user_id TEXT NOT NULL,
                     messages_json TEXT NOT NULL,
                     metadata_json TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+            if "version" not in columns:
+                conn.execute("ALTER TABLE sessions ADD COLUMN version INTEGER NOT NULL DEFAULT 0")
 
 
 class PostgresSessionStore:
@@ -208,35 +270,78 @@ class PostgresSessionStore:
         user_id: str,
         messages: list[BaseMessage],
         metadata: dict[str, Any] | None = None,
-    ) -> None:
+        expected_version: int | None = None,
+    ) -> int:
         self._ensure_schema_once()
         metadata = dict(metadata or {})
         message_payload = [message_to_dict(message) for message in messages]
         with self._connect() as conn:
-            conn.execute(
+            if expected_version is None:
+                conn.execute(
+                    """
+                    INSERT INTO sessions(session_id, user_id, messages_json, metadata_json, version, updated_at)
+                    VALUES(%s, %s, %s, %s, 1, CURRENT_TIMESTAMP)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        user_id=EXCLUDED.user_id,
+                        messages_json=EXCLUDED.messages_json,
+                        metadata_json=EXCLUDED.metadata_json,
+                        version=sessions.version + 1,
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    (
+                        session_id,
+                        user_id,
+                        json.dumps(message_payload, ensure_ascii=False),
+                        json.dumps(metadata, ensure_ascii=False),
+                    ),
+                )
+                return self._load_version(conn, session_id)
+            if expected_version == 0:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO sessions(session_id, user_id, messages_json, metadata_json, version, updated_at)
+                    VALUES(%s, %s, %s, %s, 1, CURRENT_TIMESTAMP)
+                    ON CONFLICT(session_id) DO NOTHING
+                    """,
+                    (
+                        session_id,
+                        user_id,
+                        json.dumps(message_payload, ensure_ascii=False),
+                        json.dumps(metadata, ensure_ascii=False),
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise SessionVersionConflict(f"stale session version for {session_id}")
+                return 1
+
+            cursor = conn.execute(
                 """
-                INSERT INTO sessions(session_id, user_id, messages_json, metadata_json, updated_at)
-                VALUES(%s, %s, %s, %s, CURRENT_TIMESTAMP)
-                ON CONFLICT(session_id) DO UPDATE SET
-                    user_id=EXCLUDED.user_id,
-                    messages_json=EXCLUDED.messages_json,
-                    metadata_json=EXCLUDED.metadata_json,
+                UPDATE sessions
+                SET user_id=%s,
+                    messages_json=%s,
+                    metadata_json=%s,
+                    version=version + 1,
                     updated_at=CURRENT_TIMESTAMP
+                WHERE session_id=%s AND version=%s
                 """,
                 (
-                    session_id,
                     user_id,
                     json.dumps(message_payload, ensure_ascii=False),
                     json.dumps(metadata, ensure_ascii=False),
+                    session_id,
+                    expected_version,
                 ),
             )
+            if cursor.rowcount != 1:
+                raise SessionVersionConflict(f"stale session version for {session_id}")
+            return expected_version + 1
 
     def load_session(self, session_id: str) -> dict[str, Any] | None:
         self._ensure_schema_once()
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT session_id, user_id, messages_json, metadata_json, updated_at
+                SELECT session_id, user_id, messages_json, metadata_json, version, updated_at
                 FROM sessions
                 WHERE session_id = %s
                 """,
@@ -251,6 +356,7 @@ class PostgresSessionStore:
             "user_id": row["user_id"],
             "messages": messages,
             "metadata": metadata,
+            "version": int(row["version"]),
             "updated_at": str(row["updated_at"]),
         }
 
@@ -263,6 +369,7 @@ class PostgresSessionStore:
         return {
             "session_id": loaded["session_id"],
             "user_id": loaded["user_id"],
+            "version": loaded["version"],
             "messages": [message_to_dict(message) for message in messages],
             "window_size": len(messages),
             "total_turns": sum(1 for message in messages if isinstance(message, HumanMessage)),
@@ -281,7 +388,7 @@ class PostgresSessionStore:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT session_id, user_id, messages_json, metadata_json, updated_at
+                SELECT session_id, user_id, messages_json, metadata_json, version, updated_at
                 FROM sessions
                 ORDER BY updated_at DESC
                 LIMIT %s
@@ -296,6 +403,7 @@ class PostgresSessionStore:
                 {
                     "session_id": row["session_id"],
                     "user_id": row["user_id"],
+                    "version": int(row["version"]),
                     "updated_at": str(row["updated_at"]),
                     "window_size": len(messages),
                     "total_turns": sum(1 for message in messages if isinstance(message, HumanMessage)),
@@ -345,6 +453,13 @@ class PostgresSessionStore:
             raise RuntimeError("psycopg is required for Postgres session storage") from exc
         return psycopg.connect(self.database_url, row_factory=dict_row)
 
+    @staticmethod
+    def _load_version(conn: Any, session_id: str) -> int:
+        row = conn.execute("SELECT version FROM sessions WHERE session_id = %s", (session_id,)).fetchone()
+        if row is None:  # pragma: no cover - defensive
+            raise SessionVersionConflict(f"session {session_id} was not saved")
+        return int(row["version"])
+
     def _ensure_schema(self) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -354,10 +469,12 @@ class PostgresSessionStore:
                     user_id TEXT NOT NULL,
                     messages_json TEXT NOT NULL,
                     metadata_json TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 0,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
+            conn.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 0")
 
     def _ensure_schema_once(self) -> None:
         if self._schema_ready:
