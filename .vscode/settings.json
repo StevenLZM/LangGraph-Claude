@@ -9,7 +9,8 @@
     "02_REACT_AGENT",
     "03_MULTI_AGENT",
     "04_HUMAN_IN_THE_LOOP",
-    "05_PRODUCT_AGENT"
+    "05_PRODUCT_AGENT",
+    "06_HARNESS_ENGINEERING"
   ],
   "python.analysis.exclude": [
     "**/.worktrees/**",

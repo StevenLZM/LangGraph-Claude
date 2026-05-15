@@ -96,9 +96,14 @@ class ParentChildHybridRetriever:
     time_intent: Optional[dict] = None
 
     def invoke(self, query: str) -> List[Document]:
-        child_hits = self.ensemble_retriever.invoke(
-            query, config={"callbacks": [RetrievalLoggingHandler()]}
-        )
+        try:
+            child_hits = self.ensemble_retriever.invoke(
+                query, config={"callbacks": [RetrievalLoggingHandler()]}
+            )
+        except TypeError as exc:
+            if "config" not in str(exc):
+                raise
+            child_hits = self.ensemble_retriever.invoke(query)
         return hydrate_parent_results(
             child_hits,
             parent_docstore=self.parent_docstore,

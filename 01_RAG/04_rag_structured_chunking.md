@@ -231,6 +231,20 @@ res = chunk_documents(docs)
 | 1 | 2 |
 ```
 
+结构化切分上线后还需要跑离线评测，避免只验证"表格没被切坏"，却忽略检索排序质量：
+
+```bash
+python -m evals.run --dry-run
+python -m evals.run
+```
+
+重点观察：
+
+- `Context Completeness`：命中的 parent 是否包含回答所需关键词
+- `Parent Hit Rate`：child 召回后是否能回填到正确 parent
+- `nDCG@5 / MRR`：结构化 section 调整后相关 parent 是否排得更靠前
+- 表格/代码类样本应单独放入 `evals/dataset.jsonl`，避免被普通文本样本掩盖
+
 ## 8. 与现有文档的关系
 
 - `02_rag_chunking_v2_design.md`：定义 parent-child 结构与 ID 规则，本次升级**完全沿用**

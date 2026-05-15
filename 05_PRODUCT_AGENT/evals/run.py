@@ -86,16 +86,18 @@ def _call_local_chat(case: dict[str, Any]) -> dict[str, Any]:
     from api.main import app
 
     client = TestClient(app)
-    response = client.post(
-        "/chat",
-        json={
-            "user_id": case.get("user_id", f"eval_{case['category']}"),
-            "session_id": case.get("session_id", f"eval_{case['id']}"),
-            "message": case["message"],
-        },
-    )
+    response = client.post("/chat", json=_chat_payload_for_case(case))
     response.raise_for_status()
     return response.json()
+
+
+def _chat_payload_for_case(case: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "user_id": case.get("user_id", f"eval_{case['category']}"),
+        "session_id": case.get("session_id", f"eval_{case['id']}"),
+        "request_id": case.get("request_id", f"eval_{case['id']}"),
+        "message": case["message"],
+    }
 
 
 def _call_dry_run_chat(case: dict[str, Any]) -> dict[str, Any]:

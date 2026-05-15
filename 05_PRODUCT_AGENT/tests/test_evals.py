@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from evals.report import build_report
-from evals.run import evaluate_case, load_dataset, run_evaluation
+from evals.run import _chat_payload_for_case, evaluate_case, load_dataset, run_evaluation
 
 
 def test_m6_dataset_contains_100_balanced_customer_service_cases():
@@ -95,6 +95,23 @@ def test_run_evaluation_writes_results_and_markdown_report(tmp_path):
     report = build_report(results_path)
     assert "order" in report
     assert "100.0" in report
+
+
+def test_local_chat_payload_includes_stable_request_id():
+    case = {
+        "id": "order_001",
+        "category": "order",
+        "user_id": "eval_user",
+        "session_id": "eval_session",
+        "message": "我的订单 ORD123456 到哪了？",
+    }
+
+    payload = _chat_payload_for_case(case)
+
+    assert payload["request_id"] == "eval_order_001"
+    assert payload["user_id"] == "eval_user"
+    assert payload["session_id"] == "eval_session"
+    assert payload["message"] == case["message"]
 
 
 def test_eval_run_script_can_execute_from_project_root(tmp_path):

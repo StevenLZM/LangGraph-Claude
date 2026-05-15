@@ -22,7 +22,7 @@
           ┌────────────▼───┐   ┌───────▼────────────┐
           │  Redis 缓存层   │   │   消息队列 (可选)   │
           │ - 限流计数器    │   │   Celery/ARQ       │
-          │ - 热点会话缓存  │   │   (异步任务)        │
+          │ - 会话分布式锁  │   │   RocketMQ 事件     │
           └────────────┬───┘   └───────────────────┘
                        │
           ┌────────────▼──────────────────────────────┐
@@ -36,8 +36,8 @@
                              │
           ┌──────────────────▼────────────────────────┐
           │              LLM 调用层                     │
-          │  主: Claude claude-sonnet-4-6  备: GPT-4o-mini │
-          │  (带重试 + 指数退避 + 熔断)                │
+          │  DeepSeek / OpenAI-compatible / Anthropic   │
+          │  (主备模型 + 重试 + 指数退避 + 熔断)        │
           └──────────────────┬────────────────────────┘
                              │
           ┌──────────────────▼────────────────────────┐
@@ -48,16 +48,130 @@
           
           ┌──────────────────────────────────────────┐
           │          基础设施层                        │
-          │  PostgreSQL(用户记忆) SQLite(会话状态)     │
-          │  Docker Compose 容器编排                   │
+          │  PostgreSQL(会话/记忆/幂等/outbox)          │
+          │  Redis(限流/锁) + RocketMQ + Compose       │
           └──────────────────────────────────────────┘
 ```
 
 ---
 
-## 二、LangGraph Agent 设计
+## 二、生产并发与幂等设计
 
-### 2.1 状态定义
+多实例部署时，`/chat` 不是普通读接口：一次请求会调用 LLM、保存会话、提取长期记忆、记录指标并发布业务消息。客户端超时后重试、浏览器重复点击、网关重放、同一会话并发发送，都可能导致重复扣费、重复消息、会话覆盖或顺序错乱。因此 API 边界必须把“同一条消息只处理一次”和“同一会话有序写入”作为基础能力。
+
+### 2.1 客户端协议：稳定 `request_id`
+
+`POST /chat` 请求包含四个必填字段：
+
+```json
+{
+  "user_id": "user_001",
+  "session_id": "session_001",
+  "request_id": "req_001",
+  "message": "我的订单 ORD123456 到哪了？"
+}
+```
+
+约定：
+
+- 客户端每发送一条新消息生成一个新的 `request_id`，浏览器 UI 使用 `crypto.randomUUID()`。
+- 同一条消息重试时必须复用同一个 `request_id`。
+- 幂等作用域是 `(user_id, session_id, request_id)`，避免不同用户或不同会话之间误判重复。
+- 服务端额外计算 `message_hash = sha256(user_id + session_id + message)`；同一个 `request_id` 如果换了消息内容，返回 `409 idempotency_key_conflict`。
+
+响应中会回传：
+
+- `request_id`：便于客户端和日志对齐。
+- `request_status`：`processed` 表示首次处理，`replayed` 表示重复请求返回了首次结果，`degraded` 表示 Token 预算降级。
+
+### 2.2 服务端幂等表：Postgres 为生产主路径
+
+幂等状态由 `api/idempotency.py` 管理，本地测试用 SQLite，生产 `STORAGE_BACKEND=postgres` 时使用 Postgres：
+
+```text
+chat_requests
+  user_id
+  session_id
+  request_id
+  message_hash
+  status              processing / succeeded / failed
+  response_json       首次成功响应快照
+  error_status_code
+  error_detail_json
+  created_at
+  updated_at
+  PRIMARY KEY(user_id, session_id, request_id)
+```
+
+处理流程：
+
+```text
+1. start_request() 尝试插入 processing
+2. 插入成功：当前实例拥有该逻辑请求，继续处理
+3. 插入失败：说明是重复请求，读取已有记录
+4. message_hash 不一致：409 idempotency_key_conflict
+5. 已 succeeded：反序列化 response_json，返回 request_status=replayed
+6. 已 failed：按首次失败的 status/detail 返回
+7. 仍 processing：最多等待 1.5s；若仍未完成，返回 202 request_processing
+```
+
+这个设计解决客户端重试同一条消息的问题：客户端可以安全重试，不会重复调用 LLM，也不会重复发布客服完成事件。`GET /chat/requests/{request_id}?user_id=...&session_id=...` 用于查询请求状态，适合客户端收到 `202` 后轮询或运维排障。
+
+### 2.3 同会话并发：Redis 分布式锁 + 会话乐观锁
+
+幂等解决“同一条消息重复处理”，但不能解决“同一会话两条不同消息同时处理”。例如用户连续发送 A、B，两台 API 实例同时加载同一个旧会话，如果都写回，后写入可能覆盖先写入。
+
+当前使用两层保护：
+
+```text
+SessionLockManager
+  Redis: SET lock:chat_session:{session_id} <token> NX PX <lease>
+  release: Lua 校验 token 后删除
+  local tests: asyncio.Lock fallback
+
+SessionStore.save_session(expected_version=N)
+  load_session() 返回 version
+  保存时 WHERE session_id=? AND version=?
+  stale version 返回 SessionVersionConflict -> 409
+```
+
+Redis 锁让同一个 `session_id` 的新请求串行进入核心处理，减少 LLM 和工具链路的竞态。乐观锁是最后一道数据库一致性保护：即便锁租约过期、实例重启或未来有旁路写入，也不会静默覆盖会话。
+
+### 2.4 业务消息一致性：Postgres Outbox
+
+`/chat` 成功生成用户可见回答后，会发布 RocketMQ 事件：
+
+- `ChatCompleted`
+- `PostprocessRequested`
+- `HumanTransferReminderRequested`
+
+生产模式下 outbox 也落到 Postgres，避免 API 多实例各自写本地 SQLite 文件。流程是：
+
+```text
+1. 构造 RocketMQ event，event_id 全局唯一
+2. 写入 message_outbox，event_id 为主键，重复写入忽略
+3. 发送 RocketMQ
+4. 成功后标记 published；失败后标记 enqueue_failed 并记录 last_error
+5. /admin/messages/outbox 可查看 outbox 状态
+```
+
+当前发布器仍是请求内发送，因此它是“本地 outbox + 可观测失败”的实现，不是完整独立 relay worker。生产进一步增强时，应把 outbox pending/enqueue_failed 事件交给独立 worker 重试，并用 `FOR UPDATE SKIP LOCKED` 控制多 worker 并发。
+
+### 2.5 为什么选 Redis + Postgres
+
+生产选型：
+
+- Postgres：承担幂等记录、会话状态、用户长期记忆、RocketMQ outbox 和 LangGraph Postgres checkpoint。它提供唯一约束、事务更新、乐观锁和可查询审计记录。
+- Redis：承担高频、短 TTL、跨实例共享的限流计数和会话分布式锁。它适合 `INCR/EXPIRE`、`SET NX PX` 这类低延迟协调，不适合保存长期业务事实。
+- SQLite / in-memory：只用于本地演示和 pytest，不作为多实例生产选型。
+
+核心原则是：业务事实放 Postgres，短期协调放 Redis，跨系统通知走 RocketMQ，客户端重试通过 `request_id` 明确语义。
+
+---
+
+## 三、LangGraph Agent 设计
+
+### 3.1 状态定义
 
 ```python
 # agent/state.py
@@ -89,7 +203,7 @@ class CustomerServiceState(TypedDict):
     quality_score: Optional[int]              # 自动评估分数
 ```
 
-### 2.2 Graph 结构
+### 3.2 Graph 结构
 
 ```python
 # agent/graph.py
@@ -146,9 +260,9 @@ def route_agent_output(state: CustomerServiceState) -> str:
 
 ---
 
-## 三、记忆系统设计
+## 四、记忆系统设计
 
-### 3.1 短期记忆：Token 窗口管理
+### 4.1 短期记忆：Token 窗口管理
 
 ```python
 # memory/short_term.py
@@ -227,7 +341,7 @@ async def context_trimmer_node(state: CustomerServiceState) -> dict:
     }
 ```
 
-### 3.2 长期记忆：跨会话用户记忆
+### 4.2 长期记忆：跨会话用户记忆
 
 ```python
 # memory/long_term.py
@@ -311,7 +425,7 @@ async def memory_saver_node(state: CustomerServiceState) -> dict:
 
 ---
 
-## 四、限流设计
+## 五、限流设计
 
 ```python
 # middleware/rate_limiter.py
@@ -377,7 +491,7 @@ class RateLimiter:
 
 ---
 
-## 五、LLM 降级与重试
+## 六、LLM 降级与重试
 
 ```python
 # llm/resilient_llm.py
@@ -462,9 +576,9 @@ class CircuitBreaker:
 
 ---
 
-## 六、监控与可观测性
+## 七、监控与可观测性
 
-### 6.1 LangSmith 链路追踪
+### 7.1 LangSmith 链路追踪
 
 ```python
 # monitoring/tracing.py
@@ -487,7 +601,7 @@ def get_session_tracer(session_id: str, user_id: str) -> LangChainTracer:
     )
 ```
 
-### 6.2 Prometheus 指标
+### 7.2 Prometheus 指标
 
 ```python
 # monitoring/metrics.py
@@ -529,7 +643,7 @@ from prometheus_client import make_asgi_app
 metrics_app = make_asgi_app()
 ```
 
-### 6.3 自动质量评估
+### 7.3 自动质量评估
 
 ```python
 # monitoring/evaluator.py
@@ -588,9 +702,9 @@ class AutoQualityEvaluator:
 
 ---
 
-## 七、MCP 集成设计
+## 八、MCP 集成设计
 
-### 7.1 业务工具 MCP Server
+### 8.1 业务工具 MCP Server
 
 ```python
 # mcp_servers/order_server.py
@@ -653,7 +767,7 @@ async def list_tools():
     ]
 ```
 
-### 7.2 MCP 配置
+### 8.2 MCP 配置
 
 ```json
 {
@@ -682,7 +796,7 @@ async def list_tools():
 
 ---
 
-## 八、System Prompt 工程设计
+## 九、System Prompt 工程设计
 
 ```python
 # agent/prompts.py
@@ -731,7 +845,7 @@ def build_system_prompt(user_id: str, user_memories: List[str]) -> str:
 
 ---
 
-## 九、Docker Compose 部署
+## 十、Docker Compose 部署
 
 ```yaml
 # docker-compose.yml
@@ -792,7 +906,7 @@ volumes:
 
 ---
 
-## 十、目录结构
+## 十一、目录结构
 
 ```
 05_production_customer_service/
@@ -840,10 +954,12 @@ volumes:
 
 ---
 
-## 十一、性能基准测试
+## 十二、性能基准测试
 
 ```python
 # tests/load_test.py - 使用 locust
+import time
+
 from locust import HttpUser, task, between
 
 class CustomerServiceUser(HttpUser):
@@ -853,6 +969,8 @@ class CustomerServiceUser(HttpUser):
     def ask_order_status(self):
         self.client.post("/chat", json={
             "user_id": "test_user_001",
+            "session_id": "test_user_001_session_order",
+            "request_id": f"test_user_001_order_{time.time_ns()}",
             "message": "我的订单ORD123456到哪了？"
         })
     
@@ -860,6 +978,8 @@ class CustomerServiceUser(HttpUser):
     def ask_product_info(self):
         self.client.post("/chat", json={
             "user_id": "test_user_002",
+            "session_id": "test_user_002_session_product",
+            "request_id": f"test_user_002_product_{time.time_ns()}",
             "message": "这个商品支持7天无理由退货吗？"
         })
     
@@ -867,6 +987,8 @@ class CustomerServiceUser(HttpUser):
     def request_refund(self):
         self.client.post("/chat", json={
             "user_id": "test_user_003",
+            "session_id": "test_user_003_session_refund",
+            "request_id": f"test_user_003_refund_{time.time_ns()}",
             "message": "我要申请退款，商品有质量问题"
         })
 

@@ -163,6 +163,44 @@ def test_parent_child_hybrid_retriever_hydrates_and_deduplicates():
     assert results[0].metadata["section_path"] == "第一章 产品概述"
 
 
+def test_parent_child_hybrid_retriever_supports_simple_invoke_without_config():
+    from rag.retriever import ParentChildHybridRetriever
+
+    class FakeEnsemble:
+        def invoke(self, query):
+            assert query == "保修期"
+            return [
+                Document(
+                    page_content="child",
+                    metadata={
+                        "doc_id": "doc-001",
+                        "parent_id": "p-1",
+                        "child_id": "c-1",
+                        "section_path": "第一章 产品概述",
+                    },
+                )
+            ]
+
+    class FakeParentDocstore:
+        def get_parents(self, parent_ids):
+            return {
+                "p-1": Document(
+                    page_content="父块：产品保修期为 12 个月。",
+                    metadata={
+                        "parent_id": "p-1",
+                        "doc_id": "doc-001",
+                        "source": "spec.pdf",
+                        "section_path": "第一章 产品概述",
+                    },
+                )
+            }
+
+    results = ParentChildHybridRetriever(FakeEnsemble(), FakeParentDocstore()).invoke("保修期")
+
+    assert len(results) == 1
+    assert results[0].metadata["parent_id"] == "p-1"
+
+
 def test_format_docs_for_context_uses_page_range_for_parent_docs():
     from rag.chain import format_docs_for_context
 

@@ -59,6 +59,13 @@
 - **F09** 可调整 Top-K 召回数量（默认 4）
 - **F10** 支持相似度阈值过滤，低于阈值的结果不采用
 
+### 3.4 离线评价
+
+- **F11** 提供人工金标评测集，用于稳定回归检索效果
+- **F12** 支持检索层指标：Recall@K、MRR、nDCG@5、Parent Hit、Source Hit、时间意图准确率、时间过滤准确率
+- **F13** 支持生成层规则评价：答案关键词覆盖率、来源引用正确率、拒答行为、禁用词命中
+- **F14** 支持可选 LLM Judge，用于发布前语义质量复核，不作为默认 CI 依赖
+
 ---
 
 ## 四、非功能需求
@@ -68,6 +75,8 @@
 | 响应时间 | 单次问答 ≤ 8 秒 |
 | 文档解析 | 100 页 PDF ≤ 30 秒完成向量化 |
 | 准确率 | 答案来源可追溯，不凭空捏造 |
+| 检索评价 | 离线评测报告可复跑，默认不依赖 LLM API |
+| 回归门槛 | Recall@5、MRR、Parent Hit、时间过滤准确率可量化对比 |
 
 ---
 
@@ -149,13 +158,16 @@ sources = [(doc.metadata["source"], doc.metadata["page"]) for doc in docs]
 
 ## 七、评估标准
 
-问答系统上线前需通过以下测试：
+问答系统上线前需通过以下测试和离线评价：
 
 - [ ] 上传 3 份不同类型 PDF，均能正确解析
 - [ ] 针对文档内容提问 10 个问题，≥8 个答案来源可追溯
 - [ ] 提问超出文档范围时，系统拒绝回答而非编造
 - [ ] 多轮对话连续 5 轮，上下文理解正确
 - [ ] 删除文档后，相关问题不再从该文档中检索
+- [ ] `python -m evals.run --dry-run` 可生成评测报告
+- [ ] `python -m evals.run` 可输出检索层硬指标
+- [ ] 发布前按需运行 `python -m evals.run --with-generation` 检查答案关键词、引用来源和拒答质量
 
 ---
 
@@ -165,8 +177,11 @@ sources = [(doc.metadata["source"], doc.metadata["page"]) for doc in docs]
 2. `rag/loader.py` — PDF 解析与分块
 3. `rag/vectorstore.py` — 向量库管理
 4. `rag/chain.py` — RAG 链构建
-5. `README.md` — 部署说明与使用截图
-6. `.env.example` — 环境变量模板
+5. `evals/run.py` — 离线检索与生成评价入口
+6. `evals/metrics.py` — Recall、MRR、nDCG、Parent Hit、生成规则指标
+7. `evals/dataset.jsonl` — 初始人工金标样本
+8. `README.md` — 部署说明与使用截图
+9. `.env.example` — 环境变量模板
 
 ---
 
@@ -175,4 +190,5 @@ sources = [(doc.metadata["source"], doc.metadata["page"]) for doc in docs]
 - 支持 Word、Excel、网页 URL 等多种数据源
 - 引入 HyDE（假设文档嵌入）提升检索质量
 - 使用 Reranker 对召回结果二次排序
+- 扩展评测集到 80-120 条，并把检索指标纳入参数调优门槛
 - 部署到云端，支持多用户隔离的知识库

@@ -34,6 +34,7 @@ class CustomerServiceUser(HttpUser):
             json={
                 "user_id": self.user_id,
                 "session_id": f"{self.user_id}_session_{index}",
+                "request_id": f"{self.user_id}_req_{index}",
                 "message": message,
             },
         )

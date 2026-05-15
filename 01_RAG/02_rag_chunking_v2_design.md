@@ -118,17 +118,19 @@
 - `list_documents()` 暴露 `parent_count` / `child_count`
 - `ParentChildHybridRetriever` 能聚合 child 并回填 parent
 - `format_docs_for_context()` 按 parent 文档展示 `page_range`
+- `tests/test_retrieval_evals.py` 覆盖 Recall、MRR、nDCG、Parent Hit、上下文完整度和评测报告生成
 - 原有 `tests/test_rag_pipeline.py` 全量非慢测试保持通过
 
 当前验收基线：
 
 - `pytest tests/ -q -m 'not slow'`
+- `python -m evals.run --dry-run`
 
 ## 6. 后续建议
 
 下一阶段优先事项：
 
 1. 为 `section` 切分引入更强的标题层级识别
-2. 引入基于评测集的 `Recall@K / MRR / answer hit` 评估
+2. 扩展 `evals/dataset.jsonl` 到 80-120 条，并按概念题、术语题、跨页题、时间题分组看指标
 3. 增加增量重建与内容哈希变更检测
 4. 视文档质量决定是否补充 OCR / 表格专项处理

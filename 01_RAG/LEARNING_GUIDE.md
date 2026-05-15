@@ -1196,22 +1196,342 @@ Dense/BM25 child 召回
 
 ### 6.6 检索评估应该怎么做
 
-建议至少维护 3 组样本：
+评估体系的目标不是“跑出一个分数”，而是让你每次改 chunk、TopK、Dense/BM25 权重、时间过滤或 rerank 时，都能回答：
+
+- 召回有没有变好？
+- 相关 parent 是否排得更靠前？
+- 时间类问题有没有被正确过滤？
+- 答案是否基于正确来源，而不是 LLM 自己编？
+
+建议至少维护 6 组样本：
 
 1. 概念解释题
 2. 精确术语题
 3. 跨段落/跨页问题
+4. 数字、版本号、金额类问题
+5. 时间意图问题
+6. 无答案拒答问题
 
 指标分两层看：
 
 - **Retrieval**
   - Recall@K
   - MRR
+  - nDCG@5
   - parent hit rate
+  - source hit rate
+  - time filter accuracy
+  - context completeness
 - **Generation**
-  - 答案完整性
-  - 来源正确性
-  - 幻觉率
+  - 答案关键词覆盖率
+  - 来源引用正确率
+  - 无答案问题是否拒答
+  - 禁用词 / 幻觉风险命中率
+  - 可选 LLM Judge 语义评分
+
+当前项目已经提供 `evals/` 离线评测入口：
+
+```bash
+python -m evals.run --dry-run          # 验证评测管道
+python -m evals.run                    # 检索层硬指标
+python -m evals.run --with-generation  # 检索 + 生成规则指标
+python -m evals.run --with-generation --with-judge  # 发布前可选 LLM Judge
+```
+
+调参时先看检索层硬指标。只有当 Recall 和 Parent Hit 稳定后，再用生成层指标判断答案完整性、引用和拒答质量。
+
+### 6.7 如何使用当前评估体系
+
+第一步，维护人工金标数据集。
+
+文件：`evals/dataset.jsonl`
+
+每一行是一条 JSON 样本，最小格式如下：
+
+```json
+{
+  "id": "manual_langgraph",
+  "category": "precise",
+  "query_type": "keyword",
+  "question": "LangGraph 开发手册里提到的状态图是什么？",
+  "expected_sources": ["LangGraph_开发手册.pdf"],
+  "expected_keywords": ["LangGraph", "状态图"],
+  "answer_keywords": ["LangGraph", "状态"],
+  "forbidden_keywords": ["AutoGen"]
+}
+```
+
+字段含义：
+
+| 字段 | 用途 |
+|------|------|
+| `id` | 样本唯一标识，报告和结果文件用它定位问题 |
+| `category` | 分组统计，例如 `conceptual`、`precise`、`time`、`cross_section` |
+| `query_type` | 更细的题型标签，用于后续分析 |
+| `question` | 用户真实问题或人工设计问题 |
+| `expected_sources` | 期望命中的来源文档 |
+| `expected_parent_ids` | 如果知道准确 parent，优先标它，评价比 source 更严格 |
+| `expected_sections` | 期望章节路径 |
+| `expected_keywords` | 检索上下文中应该覆盖的关键词 |
+| `answer_keywords` | 生成答案中应该出现的要点 |
+| `forbidden_keywords` | 不应该出现在答案里的词，用于发现幻觉或串题 |
+
+时间类问题可以额外标：
+
+```json
+{
+  "id": "invoice_2024",
+  "category": "time",
+  "question": "2024 年的发票",
+  "expected_sources": ["珠海发票.pdf"],
+  "expected_time_intent": {
+    "type": "year",
+    "field": "doc_date",
+    "range": {"gte": 20240101, "lte": 20241231},
+    "sort": null
+  },
+  "expected_time_range": {
+    "field": "doc_date",
+    "gte": 20240101,
+    "lte": 20241231
+  }
+}
+```
+
+第二步，先跑 dry-run。
+
+```bash
+python -m evals.run --dry-run
+```
+
+dry-run 不访问向量库、不调用 LLM，只验证：
+
+- 数据集 JSONL 能被加载
+- 金标字段合法
+- 指标计算不报错
+- `results.jsonl`、`summary.json`、`REPORT.md` 能生成
+
+如果 dry-run 失败，先修数据集或评测脚本，不要急着调检索参数。
+
+第三步，跑检索层评估。
+
+```bash
+python -m evals.run
+```
+
+这一步会走当前真实检索链路：
+
+```text
+question
+  → rewrite_query(use_llm=False)
+  → retrieve_with_hybrid()
+  → evaluate_retrieval_case()
+  → report
+```
+
+重点看 `REPORT.md` 里的：
+
+- `Recall@5`：相关内容有没有被召回
+- `MRR`：第一个相关结果排得靠不靠前
+- `Parent Hit Rate`：child 命中后是否回填到正确 parent
+- `Time Intent Accuracy`：时间意图解析是否正确
+- `Time Filter Accuracy`：返回文档是否满足时间范围
+
+第四步，按需跑生成层评估。
+
+```bash
+python -m evals.run --with-generation
+```
+
+这一步会调用完整 RAG Chain，适合发布前看：
+
+- 答案关键词覆盖率
+- 引用来源正确率
+- 无答案问题是否拒答
+- 禁用词是否命中
+
+第五步，发布前可选 LLM Judge。
+
+```bash
+python -m evals.run --with-generation --with-judge
+```
+
+这个模式依赖真实模型 API，适合人工复核或发布前跑，不建议作为默认 CI。它的价值是判断“表达不同但语义正确”的答案，弥补关键词规则的不足。
+
+第六步，阅读输出文件。
+
+每次运行会生成：
+
+```text
+evals/results/<run_id>/
+├── results.jsonl   # 每条样本的详细得分
+├── summary.json    # 聚合指标，适合做自动门槛
+└── REPORT.md       # 人工复盘报告
+```
+
+调参时的正确姿势：
+
+1. 先保存当前报告作为 baseline。
+2. 只改一个变量，例如 `SEMANTIC_WEIGHT` 或 `FINAL_TOP_K`。
+3. 重新跑 `python -m evals.run`。
+4. 对比 `summary.json` 和分类指标。
+5. 如果总分变高但某类样本明显下降，要按 category 分析，不能只看平均分。
+
+常见现象和排查方向：
+
+| 现象 | 优先排查 |
+|------|----------|
+| `Recall@5` 低 | chunk 边界、BM25 召回、query rewrite |
+| `MRR` 低但 Recall 高 | 排序或 rerank，而不是继续扩大 TopK |
+| `Parent Hit Rate` 低 | child 到 parent 的 `parent_id`、docstore 回填 |
+| `Context Completeness` 低 | parent 太短、section 切分过碎、关键词跨页 |
+| `Time Intent Accuracy` 低 | `query_rewriter.py` 的时间规则 |
+| `Time Filter Accuracy` 低 | 日期抽取 metadata 或 Chroma filter |
+| 生成关键词低但检索高 | prompt、上下文格式、答案后处理 |
+
+教学时可以这样总结：
+
+> 我把 RAG 评估拆成检索层和生成层。检索层用人工金标做硬门槛，看 Recall、MRR、nDCG、Parent Hit 和时间过滤；生成层用规则指标检查答案要点、引用和拒答，发布前再用可选 LLM Judge 做语义复核。这样调参时不会只凭感觉，而是能量化比较每次改动的收益和回归。
+
+### 6.8 生产级 RAG 测评怎么落地
+
+生产里不要把完整测评放进每一次用户请求。
+
+正确分工是：
+
+```text
+离线评测：判断系统能不能发版、参数有没有变好
+线上监控：判断发版后有没有出问题、用户真实问题分布有没有变化
+人工抽检：发现自动指标覆盖不到的坏 case，并沉淀新金标
+A/B 灰度：验证新策略在线上真实用户中的收益和成本
+```
+
+#### 6.8.1 为什么完整测评要离线做
+
+完整测评通常依赖：
+
+- 人工金标问题
+- 期望来源文档 / parent / section
+- 期望答案关键词
+- Recall、MRR、nDCG 等排名指标
+- 规则生成评价或 LLM Judge
+
+这些都不适合放在用户请求链路里：
+
+- 线上单条 query 通常没有金标，算不了 Recall/MRR
+- LLM Judge 成本高、延迟高、稳定性不如规则
+- 每次请求都打完整分会拖慢用户响应
+- 测评失败不应该影响主链路可用性
+
+所以完整评测应该在这些时机运行：
+
+- 改 chunk / section / parent-child 策略后
+- 改 embedding 模型后
+- 改 Dense/BM25 权重、TopK、相似度阈值后
+- 接入 rerank 或 query rewrite 后
+- 重建索引后
+- 发版前回归
+
+在当前项目中，对应命令是：
+
+```bash
+python -m evals.run
+python -m evals.run --with-generation
+```
+
+发布前需要更强语义判断时，再跑：
+
+```bash
+python -m evals.run --with-generation --with-judge
+```
+
+#### 6.8.2 线上每次调用应该做什么
+
+线上请求不要跑完整测评，但应该记录质量信号。
+
+每次调用建议记录：
+
+- `query`
+- `rewritten_query`
+- `time_intent`
+- 命中的 `doc_id / parent_id / child_id`
+- 来源文档、页码、章节
+- 每个结果的 rank、score、是否经过 filter/rerank
+- TopK、Dense/BM25 权重、rerank 模型版本
+- 检索耗时、生成耗时、总耗时
+- token 用量和模型名称
+- answer 和 cited sources
+- 是否拒答
+- 用户反馈：点赞、点踩、点击来源、追问、人工转接
+
+线上实时看的是趋势和异常，不是金标准确率：
+
+| 线上指标 | 说明 |
+|----------|------|
+| 空召回率 | 检索不到任何文档的比例 |
+| 低分召回率 | Top1/TopK 分数低于阈值的比例 |
+| 引用缺失率 | 答案没有来源或来源为空的比例 |
+| 拒答率 | 回答“未找到”的比例，过高/过低都要看 |
+| 用户点踩率 | 直接质量反馈 |
+| 来源点击率 | 用户是否愿意查看引用来源 |
+| 追问率 | 回答不完整时用户往往继续追问 |
+| 延迟 P50/P95/P99 | 检索、rerank、生成分开看 |
+| 成本 / token | 判断策略收益是否覆盖成本 |
+
+这些指标可以接 Prometheus/Grafana、日志平台或 LangSmith trace。它们的作用是发现线上问题，例如某次索引重建后空召回率突然升高，或 rerank 上线后 P95 延迟明显变差。
+
+#### 6.8.3 日志如何反哺离线评测
+
+生产闭环不是“离线评测一次就结束”，而是：
+
+```text
+线上日志
+  → 抽样高频问题 / 点踩问题 / 低分召回问题
+  → 人工标注 expected_sources / expected_keywords
+  → 加入 evals/dataset.jsonl
+  → 下次离线评测成为回归样本
+```
+
+优先沉淀这些 case：
+
+- 用户点踩但系统自认为回答成功
+- 用户连续追问同一问题
+- 检索为空但人工能在文档中找到答案
+- 时间类问题返回了错误年份
+- 引用来源和答案内容不一致
+- 新增文档类型，例如表格、发票、合同、技术手册
+
+这样评测集会越来越贴近真实业务，而不是停留在人工想象的问题。
+
+#### 6.8.4 A/B 和灰度怎么做
+
+当离线评测显示新策略更好时，不要直接全量上线。生产里更稳的方式是灰度：
+
+```text
+baseline 策略：当前线上参数
+candidate 策略：新 chunk / 新 embedding / 新 rerank / 新权重
+```
+
+线上对比：
+
+- 满意度 / 点赞率
+- 点踩率
+- 来源点击率
+- 追问率
+- 人工转接率
+- 延迟 P95
+- token 成本
+- 错误率
+
+判断逻辑：
+
+- 离线指标提升，但线上延迟和成本暴涨，不一定值得上线。
+- 平均分提升，但某类问题下降，要按业务重要性决定。
+- 线上用户反馈变差，即使离线分数高，也要回滚或继续分析。
+
+#### 6.8.5 一句话生产讲法
+
+> 生产级 RAG 测评是“离线评测为主，线上监控为辅”。离线金标评测决定能不能发版，线上 trace 和用户反馈决定发版后有没有出问题。完整测评不进用户请求链路，线上只记录低成本质量信号，再把真实坏 case 沉淀回离线评测集，形成持续迭代闭环。
 
 ---
 
@@ -1364,31 +1684,46 @@ RAG 的解决方案：不让 LLM "凭感觉"回答，而是先从知识库里检
 
 **回答思路：**
 
-RAG 评估分两层：
+RAG 评估分两层，先评检索，再评生成。
 
 **检索层（Retrieval）：**
 - `Recall@K`：K个结果里有几个是相关的
 - `MRR（Mean Reciprocal Rank）`：相关结果排在第几位
-- `NDCG`：考虑排名顺序的精度指标
+- `nDCG@K`：考虑排名顺序的精度指标
+- `Parent Hit Rate`：最终送入 LLM 的 parent 是否包含目标答案
+- `Time Intent / Filter Accuracy`：时间类问题是否解析和过滤正确
 
 **生成层（Generation）：**
-- `Faithfulness`：答案是否基于检索内容（防幻觉）
-- `Answer Relevance`：答案是否回答了问题
-- `Context Precision`：检索到的内容有多少是有用的
-
-如果是 parent-child 架构，我还会额外看一个指标：
-
-- `Parent Hit Rate`：最终送入 LLM 的 parent 是否真的包含目标答案
+- 答案关键词覆盖率：是否回答了关键要点
+- 来源引用正确率：引用是否来自期望文档
+- 拒答正确性：无答案问题是否明确说找不到
+- 禁用词命中：是否出现明显幻觉或串题内容
 
 因为现在“检索命中一个 child”不等于“最终上下文已经足够完整”。
 
-工具上可以用：
+当前项目自建了 `evals/` 评估体系：
 
-- 自建离线评估集
-- `RAGAs`
-- 人工 spot check
+- `evals/dataset.jsonl` 放人工金标样本
+- `python -m evals.run` 跑检索层硬指标
+- `python -m evals.run --with-generation` 跑生成层规则评价
+- `--with-judge` 用于发布前可选语义复核
 
-三者结合。
+生产上我不会每次用户请求都跑完整评测。完整评测放在线下或发布前；线上实时记录 query、rewrite、命中文档、rank、score、引用、延迟、token 和用户反馈，用来做监控和抽样。
+
+完整闭环是：
+
+```text
+线上日志与用户反馈
+  → 抽样人工标注
+  → 加入 eval_dataset
+  → 离线回归评测
+  → 调参/发版
+  → 线上监控和 A/B 验证
+```
+
+面试表达可以落到一句话：
+
+> 我不会只说“答案看起来不错”，而是维护一批人工金标样本，用 Recall、MRR、nDCG 和 Parent Hit 评价检索，用关键词、引用、拒答和可选 LLM Judge 评价生成。生产中完整评测离线做，线上只做低成本质量监控和 trace 采集，再把真实坏 case 回流到评测集。
 
 ---
 

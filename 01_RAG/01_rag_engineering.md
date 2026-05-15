@@ -341,6 +341,12 @@ chain_with_history = RunnableWithMessageHistory(
 │   ├── vectorstore.py        # ChromaDB 管理
 │   ├── retriever.py          # 混合检索器
 │   └── chain.py              # LCEL RAG 链
+├── evals/
+│   ├── dataset.jsonl         # 人工金标评测集
+│   ├── metrics.py            # 检索/生成评价指标
+│   ├── run.py                # 离线评测入口
+│   ├── report.py             # Markdown/JSON 报告生成
+│   └── judge.py              # 可选 LLM Judge
 ├── memory/
 │   └── session.py            # 会话记忆管理
 ├── mcp/
@@ -384,6 +390,8 @@ RAG_CONFIG = {
 
 ## 八、测试方案
 
+### 8.1 功能测试
+
 ```python
 # tests/test_rag.py
 
@@ -406,3 +414,46 @@ assert "iPhone 15" in get_rewritten_question()
 results = retriever.get_relevant_documents("完全不相关的内容xyz")
 assert all(r.metadata["score"] > 0.3 for r in results)
 ```
+
+### 8.2 离线评价体系
+
+检索效果不能只靠人工观察答案，应使用 `evals/` 固定评测集做可复跑对比：
+
+```bash
+# 验证评测管道，不访问向量库或 LLM
+python -m evals.run --dry-run
+
+# 只评检索层，适合日常调参和 CI
+python -m evals.run
+
+# 检索 + 生成规则评价，适合发布前检查
+python -m evals.run --with-generation
+
+# 可选语义裁判，依赖 LLM API
+python -m evals.run --with-generation --with-judge
+```
+
+评测输出：
+
+- `results.jsonl`：每条样本的检索排名、命中、上下文完整度和生成质量
+- `summary.json`：平均分、分类指标和时间意图/过滤准确率
+- `REPORT.md`：面向人工复盘的 Markdown 报告
+
+检索层硬指标：
+
+- `Recall@3 / Recall@5`
+- `MRR`
+- `nDCG@5`
+- `Parent Hit Rate`
+- `Source Hit Rate`
+- `Time Intent Accuracy`
+- `Time Filter Accuracy`
+- `Context Completeness`
+
+生成层辅助指标：
+
+- 答案关键词覆盖率
+- 引用来源正确率
+- 无答案问题是否拒答
+- 禁用词 / 幻觉风险命中
+- 可选 LLM Judge 分数

@@ -166,6 +166,24 @@ pytest tests/ -v -m slow
 pytest tests/ --cov=rag --cov=memory --cov=mcp --cov-report=term-missing
 ```
 
+### 离线检索评测
+
+```bash
+# 验证评测管道和报告生成，不访问向量库或 LLM
+python -m evals.run --dry-run
+
+# 只评检索层：Recall@K、MRR、nDCG、Parent Hit、时间过滤准确率
+python -m evals.run
+
+# 同时评生成层：答案关键词、引用来源、拒答与禁用词
+python -m evals.run --with-generation
+
+# 发布前可选：增加 LLM Judge 语义评分
+python -m evals.run --with-generation --with-judge
+```
+
+评测结果写入 `evals/results/<run_id>/`，包含 `results.jsonl`、`summary.json` 和 `REPORT.md`。
+
 ---
 
 ## 💡 面试亮点总结
@@ -175,4 +193,5 @@ pytest tests/ --cov=rag --cov=memory --cov=mcp --cov-report=term-missing
 3. **相似度阈值过滤**：防止低质量检索结果污染 LLM 输入，有效降低幻觉
 4. **幂等索引**：文档重新上传时先删旧版本再插入，保证数据一致性
 5. **MCP 集成**：体现对 Claude Agent 技术栈的理解
-6. **测试驱动**：核心模块均有单元测试，无需 API Key 即可验证
+6. **离线评测体系**：用人工金标样本量化 Recall、MRR、Parent Hit 和生成引用质量
+7. **测试驱动**：核心模块均有单元测试，无需 API Key 即可验证

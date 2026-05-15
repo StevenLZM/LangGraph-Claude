@@ -220,6 +220,27 @@ HARD_FILTER_K_MULTIPLIER: int = 2
 - 检索耗时对比：方案A（硬过滤）应 ≤ baseline；方案B（召回扩大化）增长 ≤ 30%。
 - BM25 wrapper post-filter 召回率：过滤后剩余 / 原 K ≥ 0.8。
 
+### 8.4 离线评价接入
+
+日期感知检索必须进入 `evals/` 评测体系，而不是只看日志：
+
+- `expected_time_intent`：标注期望的 `type / field / range / sort`，用于计算 `Time Intent Accuracy`。
+- `expected_time_range`：标注文档应满足的日期区间，用于计算 `Time Filter Accuracy`。
+- `category=time`：时间类样本单独分组，避免被普通概念题平均分掩盖。
+
+推荐命令：
+
+```bash
+python -m evals.run --dry-run
+python -m evals.run
+```
+
+日期检索上线门槛建议：
+
+- `Time Intent Accuracy >= 0.90`
+- `Time Filter Accuracy >= 0.90`
+- 时间类样本 `Recall@5` 不低于普通样本 5 个百分点以上
+
 ## 9. 实施顺序
 
 1. `query_rewriter.py`（可独立验证，不依赖索引重建）

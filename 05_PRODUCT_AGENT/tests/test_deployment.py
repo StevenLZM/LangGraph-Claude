@@ -87,6 +87,7 @@ def test_locustfile_covers_core_customer_service_scenarios():
     assert "ORD123456" in locustfile
     assert "退款" in locustfile
     assert "转人工" in locustfile
+    assert "request_id" in locustfile
     assert "/metrics" in locustfile
 
 
