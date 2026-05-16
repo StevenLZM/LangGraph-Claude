@@ -47,6 +47,15 @@
     └── test_rag_pipeline.py  # 完整测试套件（无 API 单元测试 + 集成测试）
 ```
 
+### 设计文档索引
+
+- `01_rag_knowledge_base.md`：PRD、功能范围和验收标准
+- `01_rag_engineering.md`：系统工程设计、链路拆分和目录结构
+- `02_rag_chunking_v2_design.md`：parent-child chunking 设计
+- `03_rag_date_aware_retrieval_design.md`：日期感知检索设计
+- `04_rag_structured_chunking.md`：结构化切分设计
+- `05_rag_ragas_evaluation_design.md`：RAGAS-only 评估体系设计
+
 ---
 
 ## 🚀 快速开始
@@ -166,23 +175,23 @@ pytest tests/ -v -m slow
 pytest tests/ --cov=rag --cov=memory --cov=mcp --cov-report=term-missing
 ```
 
-### 离线检索评测
+### RAGAS 离线评估
 
 ```bash
-# 验证评测管道和报告生成，不访问向量库或 LLM
+# 验证 RAGAS 数据格式、报告生成和 dry-run 管道，不访问向量库或 LLM
 python -m evals.run --dry-run
 
-# 只评检索层：Recall@K、MRR、nDCG、Parent Hit、时间过滤准确率
+# 真实评估：检索、语义和端到端质量全部交给 RAGAS 打分
 python -m evals.run
-
-# 同时评生成层：答案关键词、引用来源、拒答与禁用词
-python -m evals.run --with-generation
-
-# 发布前可选：增加 LLM Judge 语义评分
-python -m evals.run --with-generation --with-judge
 ```
 
-评测结果写入 `evals/results/<run_id>/`，包含 `results.jsonl`、`summary.json` 和 `REPORT.md`。
+评估结果写入 `evals/results/<run_id>/`，包含 `ragas_results.jsonl`、`summary.json` 和 `REPORT.md`。当前评估体系已经放弃自定义 Recall/MRR/关键词规则分，统一使用 RAGAS 指标：
+
+- 检索质量：`context_precision`、`context_recall`
+- 语义质量：`answer_relevancy`、`semantic_similarity`
+- 端到端质量：`faithfulness`、`answer_correctness`
+
+完整设计见 `05_rag_ragas_evaluation_design.md`，教学讲解见 `LEARNING_GUIDE.md` 的“如何使用当前 RAGAS 评估体系”和“生产级 RAG 测评怎么落地”。
 
 ---
 
@@ -193,5 +202,5 @@ python -m evals.run --with-generation --with-judge
 3. **相似度阈值过滤**：防止低质量检索结果污染 LLM 输入，有效降低幻觉
 4. **幂等索引**：文档重新上传时先删旧版本再插入，保证数据一致性
 5. **MCP 集成**：体现对 Claude Agent 技术栈的理解
-6. **离线评测体系**：用人工金标样本量化 Recall、MRR、Parent Hit 和生成引用质量
+6. **RAGAS 离线评估体系**：用人工 reference 样本统一评价检索、语义相关性、忠实度和端到端答案正确性
 7. **测试驱动**：核心模块均有单元测试，无需 API Key 即可验证

@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import sys
 
 from langchain_core.documents import Document
@@ -7,175 +8,89 @@ from langchain_core.documents import Document
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-def test_retrieval_metrics_rank_and_parent_hits():
-    from evals.metrics import evaluate_retrieval_case
-
-    case = {
-        "id": "warranty_001",
-        "category": "precise",
-        "question": "产品保修期多久？",
-        "expected_parent_ids": ["parent-warranty"],
-        "expected_sources": ["spec.pdf"],
-        "expected_sections": ["第一章 产品概述"],
-        "expected_keywords": ["保修期", "12 个月"],
-    }
-    docs = [
-        Document(
-            page_content="系统要求 Python 3.9+。",
-            metadata={
-                "parent_id": "parent-tech",
-                "source": "spec.pdf",
-                "section_path": "第二章 技术规格",
-            },
-        ),
-        Document(
-            page_content="产品保修期为 12 个月，从购买之日起计算。",
-            metadata={
-                "parent_id": "parent-warranty",
-                "source": "spec.pdf",
-                "section_path": "第一章 产品概述",
-            },
-        ),
-    ]
-
-    result = evaluate_retrieval_case(case, docs, k_values=[1, 2])
-
-    assert result["recall@1"] == 0.0
-    assert result["recall@2"] == 1.0
-    assert result["mrr"] == 0.5
-    assert result["parent_hit"] is True
-    assert result["source_hit"] is True
-    assert result["context_completeness"] == 1.0
-
-
-def test_retrieval_metrics_time_filter_accuracy():
-    from evals.metrics import evaluate_retrieval_case
-
-    case = {
-        "id": "invoice_2024",
-        "category": "time",
-        "question": "2024 年的发票",
-        "expected_parent_ids": ["invoice-2024"],
-        "expected_time_range": {"field": "doc_date", "gte": 20240101, "lte": 20241231},
-    }
-    docs = [
-        Document(
-            page_content="2024 年珠海发票",
-            metadata={
-                "parent_id": "invoice-2024",
-                "source": "珠海发票.pdf",
-                "has_doc_date": True,
-                "doc_date_min": 20240401,
-                "doc_date_max": 20240401,
-            },
-        ),
-        Document(
-            page_content="2023 年新疆发票",
-            metadata={
-                "parent_id": "invoice-2023",
-                "source": "新疆发票.pdf",
-                "has_doc_date": True,
-                "doc_date_min": 20231201,
-                "doc_date_max": 20231201,
-            },
-        ),
-    ]
-
-    result = evaluate_retrieval_case(case, docs, k_values=[2])
-
-    assert result["time_filter_accuracy"] == 0.5
-
-
-def test_retrieval_metrics_time_intent_accuracy():
-    from evals.metrics import evaluate_retrieval_case
-
-    case = {
-        "id": "invoice_2024",
-        "category": "time",
-        "question": "2024 年的发票",
-        "expected_sources": ["珠海发票.pdf"],
-        "expected_time_intent": {
-            "type": "year",
-            "field": "doc_date",
-            "range": {"gte": 20240101, "lte": 20241231},
-            "sort": None,
-        },
-        "actual_time_intent": {
-            "type": "year",
-            "field": "doc_date",
-            "range": {"gte": 20240101, "lte": 20241231},
-            "sort": None,
-        },
-    }
-
-    result = evaluate_retrieval_case(case, [], k_values=[1])
-
-    assert result["time_intent_accuracy"] == 1.0
-
-
-def test_generation_metrics_use_keywords_sources_and_forbidden_terms():
-    from evals.metrics import evaluate_generation_case
-
-    case = {
-        "id": "warranty_answer",
-        "category": "precise",
-        "answer_keywords": ["保修期", "12 个月"],
-        "forbidden_keywords": ["24 个月"],
-        "expected_sources": ["spec.pdf"],
-    }
-    response = {
-        "answer": "产品保修期为 12 个月。[来源: spec.pdf, 第1页]",
-        "sources": [
-            Document(page_content="产品保修期为 12 个月。", metadata={"source": "spec.pdf"})
-        ],
-    }
-
-    result = evaluate_generation_case(case, response)
-
-    assert result["answer_keyword_coverage"] == 1.0
-    assert result["forbidden_keyword_hits"] == []
-    assert result["citation_source_accuracy"] == 1.0
-    assert result["generation_score"] == 100
-
-
-def test_dataset_loader_validates_required_fields(tmp_path):
+def test_dataset_loader_requires_ragas_reference(tmp_path):
     from evals.run import load_dataset
 
     dataset_path = tmp_path / "dataset.jsonl"
     dataset_path.write_text(
         '{"id":"case_001","category":"precise","question":"保修期多久？",'
-        '"expected_sources":["spec.pdf"],"expected_keywords":["保修期"]}\n',
+        '"reference":"产品保修期为 12 个月。"}\n',
         encoding="utf-8",
     )
 
     cases = load_dataset(dataset_path)
 
-    assert cases[0]["id"] == "case_001"
+    assert cases[0]["reference"] == "产品保修期为 12 个月。"
 
 
-def test_dataset_loader_rejects_missing_gold_fields(tmp_path):
+def test_dataset_loader_rejects_missing_ragas_reference(tmp_path):
     import pytest
 
     from evals.run import load_dataset
 
     dataset_path = tmp_path / "dataset.jsonl"
     dataset_path.write_text(
-        '{"id":"case_001","category":"precise","question":"保修期多久？"}\n',
+        '{"id":"case_001","category":"precise","question":"保修期多久？",'
+        '"expected_sources":["spec.pdf"]}\n',
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="expected_"):
+    with pytest.raises(ValueError, match="reference"):
         load_dataset(dataset_path)
 
 
-def test_run_retrieval_evaluation_writes_results_and_report(tmp_path):
+def test_build_ragas_rows_preserves_retrieval_semantic_and_e2e_fields():
+    from evals.ragas_adapter import build_ragas_row
+
+    case = {
+        "id": "case_001",
+        "category": "precise",
+        "question": "产品保修期多久？",
+        "reference": "产品保修期为 12 个月。",
+        "query_type": "keyword",
+    }
+    docs = [
+        Document(
+            page_content="产品保修期为 12 个月，从购买之日起计算。",
+            metadata={"source": "spec.pdf", "parent_id": "parent-warranty"},
+        )
+    ]
+    response = {"answer": "产品保修期为 12 个月。", "sources": docs}
+
+    row = build_ragas_row(case, docs, response)
+
+    assert row["id"] == "case_001"
+    assert row["category"] == "precise"
+    assert row["user_input"] == "产品保修期多久？"
+    assert row["retrieved_contexts"] == ["产品保修期为 12 个月，从购买之日起计算。"]
+    assert row["response"] == "产品保修期为 12 个月。"
+    assert row["reference"] == "产品保修期为 12 个月。"
+    assert row["retrieved_sources"] == ["spec.pdf"]
+
+
+def test_ragas_result_aliases_are_normalized_to_project_metric_names():
+    from evals.ragas_adapter import _score_rows_to_dicts
+
+    rows = _score_rows_to_dicts(
+        [
+            {
+                "llm_context_precision_with_reference": 0.8,
+                "context_recall": 0.7,
+                "user_input": "ignored",
+            }
+        ]
+    )
+
+    assert rows == [{"context_precision": 0.8, "context_recall": 0.7}]
+
+
+def test_run_ragas_evaluation_writes_results_summary_and_report(tmp_path):
     from evals.run import run_evaluation
 
     dataset_path = tmp_path / "dataset.jsonl"
     dataset_path.write_text(
         '{"id":"case_001","category":"precise","question":"保修期多久？",'
-        '"expected_parent_ids":["parent-warranty"],"expected_sources":["spec.pdf"],'
-        '"expected_keywords":["保修期","12 个月"],"answer_keywords":["保修期","12 个月"]}\n',
+        '"reference":"产品保修期为 12 个月。"}\n',
         encoding="utf-8",
     )
 
@@ -184,23 +99,71 @@ def test_run_retrieval_evaluation_writes_results_and_report(tmp_path):
         return [
             Document(
                 page_content="产品保修期为 12 个月。",
-                metadata={"parent_id": "parent-warranty", "source": "spec.pdf"},
+                metadata={"source": "spec.pdf", "parent_id": "parent-warranty"},
             )
+        ]
+
+    def fake_generator(case, docs):
+        assert docs[0].page_content == "产品保修期为 12 个月。"
+        return {"answer": "产品保修期为 12 个月。", "sources": docs}
+
+    def fake_ragas_evaluator(rows, metric_names):
+        assert metric_names == [
+            "context_precision",
+            "context_recall",
+            "faithfulness",
+            "answer_correctness",
+            "answer_relevancy",
+            "semantic_similarity",
+        ]
+        assert rows[0]["user_input"] == "保修期多久？"
+        return [
+            {
+                **rows[0],
+                "context_precision": 1.0,
+                "context_recall": 1.0,
+                "faithfulness": 0.95,
+                "answer_correctness": 0.93,
+                "answer_relevancy": 0.9,
+                "semantic_similarity": 0.92,
+            }
         ]
 
     run_dir = run_evaluation(
         dataset_path=dataset_path,
         output_root=tmp_path / "results",
         retrieval_callable=fake_retriever,
+        generation_callable=fake_generator,
+        ragas_evaluator=fake_ragas_evaluator,
         run_id="unit-run",
-        with_generation=False,
     )
 
-    assert (run_dir / "results.jsonl").exists()
-    report = (run_dir / "REPORT.md").read_text(encoding="utf-8")
-    assert "# 01_RAG 检索效果评测报告" in report
-    assert "Recall@5" in report
-    assert "precise" in report
+    results_path = run_dir / "ragas_results.jsonl"
+    summary_path = run_dir / "summary.json"
+    report_path = run_dir / "REPORT.md"
+    assert results_path.exists()
+    assert summary_path.exists()
+    assert report_path.exists()
+
+    result = json.loads(results_path.read_text(encoding="utf-8").splitlines()[0])
+    assert result["context_precision"] == 1.0
+    assert result["semantic_similarity"] == 0.92
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["total"] == 1
+    assert summary["metrics"]["context_precision"]["average"] == 1.0
+    assert summary["metrics"]["faithfulness"]["average"] == 0.95
+    assert summary["metrics"]["answer_correctness"]["average"] == 0.93
+
+    report = report_path.read_text(encoding="utf-8")
+    assert "# 01_RAG RAGAS 评估报告" in report
+    assert "Context Precision" in report
+    assert "Answer Correctness" in report
+    assert "Semantic Similarity" in report
+    assert "Recall@5" not in report
+    assert "MRR" not in report
+    assert "Parent Hit" not in report
+    assert "关键词" not in report
 
 
 def test_packaged_eval_dataset_is_valid():
@@ -212,6 +175,7 @@ def test_packaged_eval_dataset_is_valid():
 
     assert len(cases) >= 5
     assert {case["category"] for case in cases} >= {"conceptual", "precise", "time"}
+    assert all(case.get("reference") for case in cases)
 
 
 def test_run_evaluation_dry_run_uses_packaged_dataset(tmp_path):
@@ -229,4 +193,6 @@ def test_run_evaluation_dry_run_uses_packaged_dataset(tmp_path):
     summary = (run_dir / "summary.json").read_text(encoding="utf-8")
     report = (run_dir / "REPORT.md").read_text(encoding="utf-8")
     assert '"total":' in summary
-    assert "01_RAG 检索效果评测报告" in report
+    assert "01_RAG RAGAS 评估报告" in report
+    assert "RAGAS 指标" in report
+    assert "dry_run_fixture" in (run_dir / "ragas_results.jsonl").read_text(encoding="utf-8")

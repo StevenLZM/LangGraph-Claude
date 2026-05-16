@@ -224,8 +224,8 @@ HARD_FILTER_K_MULTIPLIER: int = 2
 
 日期感知检索必须进入 `evals/` 评测体系，而不是只看日志：
 
-- `expected_time_intent`：标注期望的 `type / field / range / sort`，用于计算 `Time Intent Accuracy`。
-- `expected_time_range`：标注文档应满足的日期区间，用于计算 `Time Filter Accuracy`。
+- `reference`：用自然语言写清“应该按什么日期规则选择什么答案”，供 RAGAS 对比最终回答。
+- `expected_sources`：保留为人工排查字段，帮助定位时间类问题命中的来源文档。
 - `category=time`：时间类样本单独分组，避免被普通概念题平均分掩盖。
 
 推荐命令：
@@ -237,9 +237,11 @@ python -m evals.run
 
 日期检索上线门槛建议：
 
-- `Time Intent Accuracy >= 0.90`
-- `Time Filter Accuracy >= 0.90`
-- 时间类样本 `Recall@5` 不低于普通样本 5 个百分点以上
+- 时间类样本 `context_recall` 不低于普通样本 5 个百分点以上
+- 时间类样本 `answer_correctness` 不低于 0.85
+- 若 `context_recall` 高但 `answer_correctness` 低，优先排查 prompt 和日期比较逻辑
+
+RAGAS 评估体系的整体设计见 `05_rag_ragas_evaluation_design.md`。本设计文档只定义时间类样本如何进入该评估体系。
 
 ## 9. 实施顺序
 

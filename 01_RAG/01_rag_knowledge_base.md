@@ -61,10 +61,10 @@
 
 ### 3.4 离线评价
 
-- **F11** 提供人工金标评测集，用于稳定回归检索效果
-- **F12** 支持检索层指标：Recall@K、MRR、nDCG@5、Parent Hit、Source Hit、时间意图准确率、时间过滤准确率
-- **F13** 支持生成层规则评价：答案关键词覆盖率、来源引用正确率、拒答行为、禁用词命中
-- **F14** 支持可选 LLM Judge，用于发布前语义质量复核，不作为默认 CI 依赖
+- **F11** 提供人工 reference 评测集，用于稳定回归 RAG 效果
+- **F12** 使用 RAGAS 评估检索质量：`context_precision`、`context_recall`
+- **F13** 使用 RAGAS 评估语义质量：`answer_relevancy`、`semantic_similarity`
+- **F14** 使用 RAGAS 评估端到端质量：`faithfulness`、`answer_correctness`
 
 ---
 
@@ -75,8 +75,8 @@
 | 响应时间 | 单次问答 ≤ 8 秒 |
 | 文档解析 | 100 页 PDF ≤ 30 秒完成向量化 |
 | 准确率 | 答案来源可追溯，不凭空捏造 |
-| 检索评价 | 离线评测报告可复跑，默认不依赖 LLM API |
-| 回归门槛 | Recall@5、MRR、Parent Hit、时间过滤准确率可量化对比 |
+| RAGAS 评价 | 离线评估报告可复跑，dry-run 不依赖 LLM API，真实评估依赖评估模型和 Embedding |
+| 回归门槛 | `context_precision`、`context_recall`、`faithfulness`、`answer_correctness` 可量化对比 |
 
 ---
 
@@ -166,8 +166,10 @@ sources = [(doc.metadata["source"], doc.metadata["page"]) for doc in docs]
 - [ ] 多轮对话连续 5 轮，上下文理解正确
 - [ ] 删除文档后，相关问题不再从该文档中检索
 - [ ] `python -m evals.run --dry-run` 可生成评测报告
-- [ ] `python -m evals.run` 可输出检索层硬指标
-- [ ] 发布前按需运行 `python -m evals.run --with-generation` 检查答案关键词、引用来源和拒答质量
+- [ ] `python -m evals.run` 可输出 RAGAS 检索、语义和端到端指标
+- [ ] 发布前对比 `summary.json` 中 RAGAS 指标，确认候选策略不低于 baseline
+
+RAGAS 评估的详细设计见 `05_rag_ragas_evaluation_design.md`。当前 PRD 只定义评估目标和验收门槛，具体的数据字段、指标映射、dry-run/real-run 区别、生产落地方式均以该设计文档为准。
 
 ---
 
@@ -177,11 +179,12 @@ sources = [(doc.metadata["source"], doc.metadata["page"]) for doc in docs]
 2. `rag/loader.py` — PDF 解析与分块
 3. `rag/vectorstore.py` — 向量库管理
 4. `rag/chain.py` — RAG 链构建
-5. `evals/run.py` — 离线检索与生成评价入口
-6. `evals/metrics.py` — Recall、MRR、nDCG、Parent Hit、生成规则指标
-7. `evals/dataset.jsonl` — 初始人工金标样本
-8. `README.md` — 部署说明与使用截图
-9. `.env.example` — 环境变量模板
+5. `evals/run.py` — RAGAS 离线评估入口
+6. `evals/ragas_adapter.py` — RAGAS 数据转换、指标选择和 evaluate 调用
+7. `evals/dataset.jsonl` — 初始人工 reference 样本
+8. `05_rag_ragas_evaluation_design.md` — RAGAS 评估体系设计
+9. `README.md` — 部署说明与使用截图
+10. `.env.example` — 环境变量模板
 
 ---
 
@@ -190,5 +193,5 @@ sources = [(doc.metadata["source"], doc.metadata["page"]) for doc in docs]
 - 支持 Word、Excel、网页 URL 等多种数据源
 - 引入 HyDE（假设文档嵌入）提升检索质量
 - 使用 Reranker 对召回结果二次排序
-- 扩展评测集到 80-120 条，并把检索指标纳入参数调优门槛
+- 扩展评测集到 80-120 条，并把 RAGAS 指标纳入参数调优门槛
 - 部署到云端，支持多用户隔离的知识库

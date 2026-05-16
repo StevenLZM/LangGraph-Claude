@@ -240,10 +240,12 @@ python -m evals.run
 
 重点观察：
 
-- `Context Completeness`：命中的 parent 是否包含回答所需关键词
-- `Parent Hit Rate`：child 召回后是否能回填到正确 parent
-- `nDCG@5 / MRR`：结构化 section 调整后相关 parent 是否排得更靠前
+- `context_recall`：命中的上下文是否覆盖 reference 所需事实
+- `context_precision`：表格/代码 section 是否引入过多无关上下文
+- `answer_correctness`：结构化切分后最终回答是否比 baseline 更正确
 - 表格/代码类样本应单独放入 `evals/dataset.jsonl`，避免被普通文本样本掩盖
+
+完整 RAGAS 评估设计见 `05_rag_ragas_evaluation_design.md`。结构化切分只负责提高上下文质量，最终是否收益要由 RAGAS 离线评估确认。
 
 ## 8. 与现有文档的关系
 

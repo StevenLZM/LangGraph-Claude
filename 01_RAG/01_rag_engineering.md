@@ -342,11 +342,10 @@ chain_with_history = RunnableWithMessageHistory(
 │   ├── retriever.py          # 混合检索器
 │   └── chain.py              # LCEL RAG 链
 ├── evals/
-│   ├── dataset.jsonl         # 人工金标评测集
-│   ├── metrics.py            # 检索/生成评价指标
-│   ├── run.py                # 离线评测入口
-│   ├── report.py             # Markdown/JSON 报告生成
-│   └── judge.py              # 可选 LLM Judge
+│   ├── dataset.jsonl         # RAGAS 人工 reference 评测集
+│   ├── ragas_adapter.py      # RAGAS 数据转换与真实 evaluate 调用
+│   ├── run.py                # RAGAS 离线评估入口
+│   └── report.py             # Markdown/JSON 报告生成
 ├── memory/
 │   └── session.py            # 会话记忆管理
 ├── mcp/
@@ -417,43 +416,33 @@ assert all(r.metadata["score"] > 0.3 for r in results)
 
 ### 8.2 离线评价体系
 
-检索效果不能只靠人工观察答案，应使用 `evals/` 固定评测集做可复跑对比：
+检索和生成效果不能只靠人工观察答案，应使用 `evals/` 固定评测集做可复跑的 RAGAS 评估：
 
 ```bash
-# 验证评测管道，不访问向量库或 LLM
+# 验证 RAGAS 数据格式和报告管道，不访问向量库或 LLM
 python -m evals.run --dry-run
 
-# 只评检索层，适合日常调参和 CI
+# 真实评估：调用当前 RAG 链路，并由 RAGAS 统一评分
 python -m evals.run
-
-# 检索 + 生成规则评价，适合发布前检查
-python -m evals.run --with-generation
-
-# 可选语义裁判，依赖 LLM API
-python -m evals.run --with-generation --with-judge
 ```
 
 评测输出：
 
-- `results.jsonl`：每条样本的检索排名、命中、上下文完整度和生成质量
-- `summary.json`：平均分、分类指标和时间意图/过滤准确率
+- `ragas_results.jsonl`：每条样本的 RAGAS 输入、检索上下文、回答和指标分
+- `summary.json`：RAGAS 指标平均分和分类聚合
 - `REPORT.md`：面向人工复盘的 Markdown 报告
 
-检索层硬指标：
+RAGAS 指标分层：
 
-- `Recall@3 / Recall@5`
-- `MRR`
-- `nDCG@5`
-- `Parent Hit Rate`
-- `Source Hit Rate`
-- `Time Intent Accuracy`
-- `Time Filter Accuracy`
-- `Context Completeness`
+- 检索质量：`context_precision`、`context_recall`
+- 语义质量：`answer_relevancy`、`semantic_similarity`
+- 端到端质量：`faithfulness`、`answer_correctness`
 
-生成层辅助指标：
+工程边界：
 
-- 答案关键词覆盖率
-- 引用来源正确率
-- 无答案问题是否拒答
-- 禁用词 / 幻觉风险命中
-- 可选 LLM Judge 分数
+- `evals/run.py` 只负责串联数据集、检索、生成、RAGAS 和报告，不实现自定义评分。
+- `evals/ragas_adapter.py` 只负责 RAGAS schema 适配、指标加载、真实 `ragas.evaluate()` 调用和输出列名归一化。
+- `evals/report.py` 只聚合 RAGAS 指标，不再计算 Recall、MRR、Parent Hit 或关键词规则分。
+- `--dry-run` 使用固定 fixture 验证管道，不代表真实质量分。
+
+完整评估设计见 `05_rag_ragas_evaluation_design.md`。

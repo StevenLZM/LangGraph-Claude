@@ -35,3 +35,7 @@ pydantic
 httpx
 tenacity
 tiktoken
+
+# ── RAG 评估（RAGAS）─────────────────────────────────────────────
+ragas
+datasets

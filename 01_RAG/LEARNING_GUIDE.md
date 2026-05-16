@@ -1085,11 +1085,11 @@ overlap: 小 ←————————→ 大
 
 不要只看“切了多少块”，要看：
 
-- `Recall@K`
-- `MRR`
+- `context_recall`
+- `context_precision`
+- `answer_correctness`
 - `平均 child token`
 - `平均 parent token`
-- `命中后回答完整率`
 - `索引成本 / 速度`
 
 推荐最小评估集格式：
@@ -1098,9 +1098,8 @@ overlap: 小 ←————————→ 大
 eval_dataset = [
     {
         "question": "保修期多久",
-        "expected_source": "test_document.pdf",
-        "expected_section": "第一章 产品概述",
-        "expected_keywords": ["保修期", "12 个月"],
+        "reference": "产品保修期为 12 个月，从购买之日起计算。",
+        "expected_sources": ["test_document.pdf"],
     }
 ]
 ```
@@ -1139,7 +1138,7 @@ conceptual_questions = [...]
 keyword_questions = [...]
 ```
 
-然后分别观察 Recall，而不是把所有问题混在一起。
+然后分别观察 RAGAS 的 `context_recall` 和 `context_precision`，而不是把所有问题混在一起只看平均分。
 
 ### 6.3 `MAX_HYDRATED_PARENTS` 比旧的 `FINAL_TOP_K` 更关键
 
@@ -1212,37 +1211,32 @@ Dense/BM25 child 召回
 5. 时间意图问题
 6. 无答案拒答问题
 
-指标分两层看：
+当前项目已经放弃自定义 Recall/MRR/关键词规则分，统一用 RAGAS 做离线评估。指标分三层看：
 
-- **Retrieval**
-  - Recall@K
-  - MRR
-  - nDCG@5
-  - parent hit rate
-  - source hit rate
-  - time filter accuracy
-  - context completeness
-- **Generation**
-  - 答案关键词覆盖率
-  - 来源引用正确率
-  - 无答案问题是否拒答
-  - 禁用词 / 幻觉风险命中率
-  - 可选 LLM Judge 语义评分
+- **检索质量**
+  - `context_precision`：检索上下文里有多少内容真的有助于回答
+  - `context_recall`：reference 里的关键信息是否被检索上下文覆盖
+- **语义质量**
+  - `answer_relevancy`：回答是否围绕用户问题
+  - `semantic_similarity`：回答和 reference 的语义相似度
+- **端到端质量**
+  - `faithfulness`：回答是否忠实于检索上下文，是否减少幻觉
+  - `answer_correctness`：最终答案相对 reference 是否正确
 
-当前项目已经提供 `evals/` 离线评测入口：
+当前项目提供 `evals/` RAGAS 离线评估入口：
 
 ```bash
-python -m evals.run --dry-run          # 验证评测管道
-python -m evals.run                    # 检索层硬指标
-python -m evals.run --with-generation  # 检索 + 生成规则指标
-python -m evals.run --with-generation --with-judge  # 发布前可选 LLM Judge
+python -m evals.run --dry-run          # 验证 RAGAS 数据格式和报告管道
+python -m evals.run                    # 真实 RAGAS 评估
 ```
 
-调参时先看检索层硬指标。只有当 Recall 和 Parent Hit 稳定后，再用生成层指标判断答案完整性、引用和拒答质量。
+调参时先看 `context_precision/context_recall` 判断检索上下文，再看 `faithfulness/answer_correctness` 判断最终回答。不要再把旧的自定义 Recall、MRR、关键词覆盖率当作本项目的评估输出。
 
-### 6.7 如何使用当前评估体系
+完整设计文档见 `05_rag_ragas_evaluation_design.md`。教学时可以把 `LEARNING_GUIDE.md` 当作“怎么理解和使用”，把设计文档当作“为什么这么实现和如何维护”。
 
-第一步，维护人工金标数据集。
+### 6.7 如何使用当前 RAGAS 评估体系
+
+第一步，维护人工 reference 数据集。
 
 文件：`evals/dataset.jsonl`
 
@@ -1254,10 +1248,8 @@ python -m evals.run --with-generation --with-judge  # 发布前可选 LLM Judge
   "category": "precise",
   "query_type": "keyword",
   "question": "LangGraph 开发手册里提到的状态图是什么？",
-  "expected_sources": ["LangGraph_开发手册.pdf"],
-  "expected_keywords": ["LangGraph", "状态图"],
-  "answer_keywords": ["LangGraph", "状态"],
-  "forbidden_keywords": ["AutoGen"]
+  "reference": "LangGraph 的状态图用于把应用建模为节点和边组成的流程，节点处理状态，边决定执行路径。",
+  "expected_sources": ["LangGraph_开发手册.pdf"]
 }
 ```
 
@@ -1269,32 +1261,26 @@ python -m evals.run --with-generation --with-judge  # 发布前可选 LLM Judge
 | `category` | 分组统计，例如 `conceptual`、`precise`、`time`、`cross_section` |
 | `query_type` | 更细的题型标签，用于后续分析 |
 | `question` | 用户真实问题或人工设计问题 |
-| `expected_sources` | 期望命中的来源文档 |
-| `expected_parent_ids` | 如果知道准确 parent，优先标它，评价比 source 更严格 |
-| `expected_sections` | 期望章节路径 |
-| `expected_keywords` | 检索上下文中应该覆盖的关键词 |
-| `answer_keywords` | 生成答案中应该出现的要点 |
-| `forbidden_keywords` | 不应该出现在答案里的词，用于发现幻觉或串题 |
+| `reference` | RAGAS 使用的标准答案或标准事实陈述，必填 |
+| `expected_sources` | 可选调试字段，用于人工排查来源，不参与自定义打分 |
 
-时间类问题可以额外标：
+`reference` 的质量会直接影响 RAGAS 分数。写 reference 时注意：
+
+- 写“应该答出的事实”，不要写“应该包含某关键词”
+- 不要把措辞限定得过死，允许模型用不同表达回答同一事实
+- 多事实问题要把关键事实都写进去，否则 `answer_correctness` 会误判
+- 无答案样本也要写清楚期望行为，例如“应说明当前知识库未找到相关信息”
+- 时间类问题要写清比较规则，例如“按文档日期选择日期最大的发票”
+
+时间类问题也写成 reference，而不是写旧的时间打分字段：
 
 ```json
 {
-  "id": "invoice_2024",
+  "id": "invoice_latest",
   "category": "time",
-  "question": "2024 年的发票",
-  "expected_sources": ["珠海发票.pdf"],
-  "expected_time_intent": {
-    "type": "year",
-    "field": "doc_date",
-    "range": {"gte": 20240101, "lte": 20241231},
-    "sort": null
-  },
-  "expected_time_range": {
-    "field": "doc_date",
-    "gte": 20240101,
-    "lte": 20241231
-  }
+  "question": "最新的发票是哪一张？",
+  "reference": "知识库中的发票应按文档日期比较，选择日期最大的发票，并说明来源。",
+  "expected_sources": ["珠海发票.pdf", "延庆发票.pdf", "新疆发票.pdf"]
 }
 ```
 
@@ -1307,13 +1293,13 @@ python -m evals.run --dry-run
 dry-run 不访问向量库、不调用 LLM，只验证：
 
 - 数据集 JSONL 能被加载
-- 金标字段合法
-- 指标计算不报错
-- `results.jsonl`、`summary.json`、`REPORT.md` 能生成
+- RAGAS 必填字段合法
+- 可以生成 RAGAS schema 的样本行
+- `ragas_results.jsonl`、`summary.json`、`REPORT.md` 能生成
 
 如果 dry-run 失败，先修数据集或评测脚本，不要急着调检索参数。
 
-第三步，跑检索层评估。
+第三步，跑真实 RAGAS 评估。
 
 ```bash
 python -m evals.run
@@ -1325,48 +1311,30 @@ python -m evals.run
 question
   → rewrite_query(use_llm=False)
   → retrieve_with_hybrid()
-  → evaluate_retrieval_case()
-  → report
+  → create_chain_with_history()
+  → build_ragas_row(user_input, retrieved_contexts, response, reference)
+  → ragas.evaluate()
+  → REPORT.md
 ```
 
 重点看 `REPORT.md` 里的：
 
-- `Recall@5`：相关内容有没有被召回
-- `MRR`：第一个相关结果排得靠不靠前
-- `Parent Hit Rate`：child 命中后是否回填到正确 parent
-- `Time Intent Accuracy`：时间意图解析是否正确
-- `Time Filter Accuracy`：返回文档是否满足时间范围
+- `Context Precision`：检索内容是否噪声过多
+- `Context Recall`：reference 需要的信息是否被召回
+- `Faithfulness`：回答是否被上下文支撑
+- `Answer Correctness`：端到端答案是否正确
+- `Answer Relevancy`：回答是否贴合问题
+- `Semantic Similarity`：回答与 reference 的语义接近程度
 
-第四步，按需跑生成层评估。
-
-```bash
-python -m evals.run --with-generation
-```
-
-这一步会调用完整 RAG Chain，适合发布前看：
-
-- 答案关键词覆盖率
-- 引用来源正确率
-- 无答案问题是否拒答
-- 禁用词是否命中
-
-第五步，发布前可选 LLM Judge。
-
-```bash
-python -m evals.run --with-generation --with-judge
-```
-
-这个模式依赖真实模型 API，适合人工复核或发布前跑，不建议作为默认 CI。它的价值是判断“表达不同但语义正确”的答案，弥补关键词规则的不足。
-
-第六步，阅读输出文件。
+第四步，阅读输出文件。
 
 每次运行会生成：
 
 ```text
 evals/results/<run_id>/
-├── results.jsonl   # 每条样本的详细得分
-├── summary.json    # 聚合指标，适合做自动门槛
-└── REPORT.md       # 人工复盘报告
+├── ragas_results.jsonl   # 每条样本的 RAGAS 输入和指标分
+├── summary.json          # RAGAS 聚合指标，适合做自动门槛
+└── REPORT.md             # 人工复盘报告
 ```
 
 调参时的正确姿势：
@@ -1377,21 +1345,39 @@ evals/results/<run_id>/
 4. 对比 `summary.json` 和分类指标。
 5. 如果总分变高但某类样本明显下降，要按 category 分析，不能只看平均分。
 
+推荐对比顺序：
+
+1. 全局平均分：判断总体趋势。
+2. category 分组：判断概念题、精确题、时间题、跨段落题是否有局部回退。
+3. 单样本明细：定位具体 query、retrieved sources 和 response。
+4. `ragas_results.jsonl`：查看具体 `retrieved_contexts`，确认问题在检索还是生成。
+
+一个常见误区是只盯 `answer_correctness`。如果 `context_recall` 已经很低，说明答案所需事实没有进入上下文，这时调 prompt 或换更强模型通常治标不治本；应该先回到 chunk、TopK、BM25、query rewrite 或日期过滤。
+
 常见现象和排查方向：
 
 | 现象 | 优先排查 |
 |------|----------|
-| `Recall@5` 低 | chunk 边界、BM25 召回、query rewrite |
-| `MRR` 低但 Recall 高 | 排序或 rerank，而不是继续扩大 TopK |
-| `Parent Hit Rate` 低 | child 到 parent 的 `parent_id`、docstore 回填 |
-| `Context Completeness` 低 | parent 太短、section 切分过碎、关键词跨页 |
-| `Time Intent Accuracy` 低 | `query_rewriter.py` 的时间规则 |
-| `Time Filter Accuracy` 低 | 日期抽取 metadata 或 Chroma filter |
-| 生成关键词低但检索高 | prompt、上下文格式、答案后处理 |
+| `context_recall` 低 | chunk 边界、BM25 召回、query rewrite、TopK |
+| `context_precision` 低 | 噪声文档太多、排序弱、需要 rerank 或调权重 |
+| `faithfulness` 低 | prompt 约束弱、上下文格式差、回答补充了文档外信息 |
+| `answer_correctness` 低 | 检索漏信息、reference 写得不清、生成链路没有用对上下文 |
+| `answer_relevancy` 低 | 问题改写偏移、多轮上下文污染 |
+| 时间类样本低 | 日期抽取 metadata、时间意图解析或 Chroma filter |
+
+组合指标也很重要：
+
+| 指标组合 | 解释 |
+|----------|------|
+| `context_recall` 低，`context_precision` 高 | 找到的内容干净但不全，优先扩大召回或修 chunk |
+| `context_recall` 高，`context_precision` 低 | 相关内容被召回了，但噪声太多，优先调排序或 rerank |
+| `faithfulness` 低，`answer_correctness` 高 | 答案可能碰巧正确，但没有被上下文支撑，生产上仍有风险 |
+| `faithfulness` 高，`answer_correctness` 低 | 模型忠实于上下文，但上下文本身缺事实或 reference 更完整 |
+| `semantic_similarity` 高，`answer_correctness` 低 | 表达相近但关键事实错漏，要人工复查 reference 和答案 |
 
 教学时可以这样总结：
 
-> 我把 RAG 评估拆成检索层和生成层。检索层用人工金标做硬门槛，看 Recall、MRR、nDCG、Parent Hit 和时间过滤；生成层用规则指标检查答案要点、引用和拒答，发布前再用可选 LLM Judge 做语义复核。这样调参时不会只凭感觉，而是能量化比较每次改动的收益和回归。
+> 我把 RAG 评估统一交给 RAGAS：检索看 context precision/recall，语义看 answer relevancy/semantic similarity，端到端看 faithfulness/answer correctness。这样每次改 chunk、TopK、权重或 prompt，都能用同一套 reference 数据集做可复跑对比，而不是靠人工感觉或项目自定义规则分。
 
 ### 6.8 生产级 RAG 测评怎么落地
 
@@ -1410,16 +1396,16 @@ A/B 灰度：验证新策略在线上真实用户中的收益和成本
 
 完整测评通常依赖：
 
-- 人工金标问题
-- 期望来源文档 / parent / section
-- 期望答案关键词
-- Recall、MRR、nDCG 等排名指标
-- 规则生成评价或 LLM Judge
+- 人工 reference 问答集
+- 当前检索链路返回的 `retrieved_contexts`
+- 当前生成链路返回的 `response`
+- RAGAS 评估 LLM 和 Embedding
+- `context_precision`、`faithfulness`、`answer_correctness` 等语义指标
 
 这些都不适合放在用户请求链路里：
 
-- 线上单条 query 通常没有金标，算不了 Recall/MRR
-- LLM Judge 成本高、延迟高、稳定性不如规则
+- 线上单条 query 通常没有 reference，无法稳定计算 RAGAS 指标
+- RAGAS 评估需要额外模型调用，成本和延迟都高
 - 每次请求都打完整分会拖慢用户响应
 - 测评失败不应该影响主链路可用性
 
@@ -1436,14 +1422,20 @@ A/B 灰度：验证新策略在线上真实用户中的收益和成本
 
 ```bash
 python -m evals.run
-python -m evals.run --with-generation
 ```
 
-发布前需要更强语义判断时，再跑：
+`--dry-run` 只验证评估管道，不代表真实质量分；真实发布前要跑不带 `--dry-run` 的 RAGAS 评估。
 
-```bash
-python -m evals.run --with-generation --with-judge
-```
+生产中推荐的运行频率：
+
+| 时机 | 是否跑 RAGAS | 说明 |
+|------|--------------|------|
+| 每次用户请求 | 否 | 只记录 trace 和质量信号 |
+| 本地改一个参数 | 可选 | 小样本快速验证趋势 |
+| 合并到主分支前 | 是 | 跑固定评测集，防止回归 |
+| 重建索引后 | 是 | 检查 chunk、metadata、docstore 是否破坏检索 |
+| 模型或 embedding 切换 | 是 | 必须重新建立 baseline |
+| 线上异常后 | 是 | 把坏 case 写成 reference 后回归 |
 
 #### 6.8.2 线上每次调用应该做什么
 
@@ -1487,7 +1479,7 @@ python -m evals.run --with-generation --with-judge
 ```text
 线上日志
   → 抽样高频问题 / 点踩问题 / 低分召回问题
-  → 人工标注 expected_sources / expected_keywords
+  → 人工编写或修订 reference
   → 加入 evals/dataset.jsonl
   → 下次离线评测成为回归样本
 ```
@@ -1532,6 +1524,29 @@ candidate 策略：新 chunk / 新 embedding / 新 rerank / 新权重
 #### 6.8.5 一句话生产讲法
 
 > 生产级 RAG 测评是“离线评测为主，线上监控为辅”。离线金标评测决定能不能发版，线上 trace 和用户反馈决定发版后有没有出问题。完整测评不进用户请求链路，线上只记录低成本质量信号，再把真实坏 case 沉淀回离线评测集，形成持续迭代闭环。
+
+### 6.9 RAGAS 评估体系的维护边界
+
+当前项目的原则是：评估逻辑尽量薄，评分交给 RAGAS。
+
+不要重新加入这些自定义评分：
+
+- 手写 Recall/MRR/Parent Hit 总分
+- 答案关键词覆盖率
+- forbidden keyword 扣分
+- 自建 LLM Judge 分数
+
+可以保留这些调试信息：
+
+- `expected_sources`
+- `retrieved_sources`
+- `retrieved_parent_ids`
+- `retrieved_sections`
+- category 和 query_type
+
+原因是这些字段对人工排查很有用，但不应该重新变成另一套评分体系。否则系统会同时存在 RAGAS 分和自定义分，调参时很容易不知道该信哪个。
+
+新增指标时也要遵守一个原则：优先使用 RAGAS 原生指标，只有当 RAGAS 无法表达业务约束时，才把业务规则作为报告备注或人工检查项，而不是默认总分。
 
 ---
 
@@ -1684,29 +1699,27 @@ RAG 的解决方案：不让 LLM "凭感觉"回答，而是先从知识库里检
 
 **回答思路：**
 
-RAG 评估分两层，先评检索，再评生成。
+RAG 评估要同时看检索、语义和端到端答案质量。当前项目已经统一接入 RAGAS，不再使用自定义 Recall/MRR/关键词规则分。
 
-**检索层（Retrieval）：**
-- `Recall@K`：K个结果里有几个是相关的
-- `MRR（Mean Reciprocal Rank）`：相关结果排在第几位
-- `nDCG@K`：考虑排名顺序的精度指标
-- `Parent Hit Rate`：最终送入 LLM 的 parent 是否包含目标答案
-- `Time Intent / Filter Accuracy`：时间类问题是否解析和过滤正确
+**检索质量：**
+- `context_precision`：检索出来的上下文是否都是有用信息
+- `context_recall`：reference 需要的信息是否被上下文覆盖
 
-**生成层（Generation）：**
-- 答案关键词覆盖率：是否回答了关键要点
-- 来源引用正确率：引用是否来自期望文档
-- 拒答正确性：无答案问题是否明确说找不到
-- 禁用词命中：是否出现明显幻觉或串题内容
+**语义质量：**
+- `answer_relevancy`：回答是否贴合问题
+- `semantic_similarity`：回答和 reference 的语义是否接近
 
-因为现在“检索命中一个 child”不等于“最终上下文已经足够完整”。
+**端到端质量：**
+- `faithfulness`：回答是否能被检索上下文支撑
+- `answer_correctness`：最终回答相对 reference 是否正确
 
-当前项目自建了 `evals/` 评估体系：
+因为现在“检索命中一个 child”不等于“最终上下文足够完整”，而“上下文命中”也不等于“最终回答正确”。
 
-- `evals/dataset.jsonl` 放人工金标样本
-- `python -m evals.run` 跑检索层硬指标
-- `python -m evals.run --with-generation` 跑生成层规则评价
-- `--with-judge` 用于发布前可选语义复核
+当前项目的 `evals/` 体系：
+
+- `evals/dataset.jsonl` 放人工 reference 样本
+- `python -m evals.run --dry-run` 验证 RAGAS 数据格式和报告管道
+- `python -m evals.run` 调用真实 RAGAS 指标，输出 `ragas_results.jsonl`、`summary.json`、`REPORT.md`
 
 生产上我不会每次用户请求都跑完整评测。完整评测放在线下或发布前；线上实时记录 query、rewrite、命中文档、rank、score、引用、延迟、token 和用户反馈，用来做监控和抽样。
 
@@ -1714,16 +1727,16 @@ RAG 评估分两层，先评检索，再评生成。
 
 ```text
 线上日志与用户反馈
-  → 抽样人工标注
+  → 抽样人工编写 reference
   → 加入 eval_dataset
-  → 离线回归评测
+  → RAGAS 离线回归评测
   → 调参/发版
   → 线上监控和 A/B 验证
 ```
 
 面试表达可以落到一句话：
 
-> 我不会只说“答案看起来不错”，而是维护一批人工金标样本，用 Recall、MRR、nDCG 和 Parent Hit 评价检索，用关键词、引用、拒答和可选 LLM Judge 评价生成。生产中完整评测离线做，线上只做低成本质量监控和 trace 采集，再把真实坏 case 回流到评测集。
+> 我不会只说“答案看起来不错”，而是维护一批人工 reference 样本，用 RAGAS 统一评估 context precision/recall、answer relevancy、semantic similarity、faithfulness 和 answer correctness。生产中完整评估离线做，线上只做低成本质量监控和 trace 采集，再把真实坏 case 回流到评测集。
 
 ---
 
@@ -1815,7 +1828,7 @@ HNSW 是一种图索引结构，搜索复杂度 O(log N)，远优于暴力搜索
 | Section 识别增强 | 基础规则版 | 标题层级树、列表/表格/代码块专项切分 |
 | 语义断点增强 | 未做 embedding 级切点 | 在 section 内增加 semantic boundary detection |
 | 流式输出 | 无 | 使用 `chain.astream()` + Streamlit streaming |
-| 评估框架 | 无 | 集成 RAGAs 自动评估 |
+| 评估框架 | 已集成 RAGAS | 扩展评测集、接入 CI 门槛、沉淀线上坏 case |
 | 多模态 | 无 | 支持图片、表格提取 |
 | 索引迁移 | 已有版本化基础 | 增加双读双写、灰度切换、自动回滚 |
 | 文档更新通知 | 无 | Webhook 触发重新索引 |
@@ -1830,7 +1843,7 @@ HNSW 是一种图索引结构，搜索复杂度 O(log N)，远优于暴力搜索
 **工程实践：**
 - LangChain 官方文档的 RAG 章节
 - ChromaDB 官方文档（理解 Collection、Embedding Function、Distance Function）
-- `RAGAs` 评估框架文档
+- `RAGAS` 评估框架文档
 
 ### 8.3 学完本项目，下一步学什么
 
