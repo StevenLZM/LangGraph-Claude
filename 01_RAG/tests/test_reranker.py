@@ -7,12 +7,26 @@ from langchain_core.documents import Document
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-def test_rerank_config_disabled_by_default():
+def test_rerank_config_enabled_by_default_for_streamlit_app(monkeypatch):
+    monkeypatch.delenv("RERANK_ENABLED", raising=False)
+
     from config import RerankConfig
 
-    assert RerankConfig.ENABLED is False
+    assert RerankConfig.ENABLED is True
     assert RerankConfig.TOP_N == 4
     assert RerankConfig.MODEL
+
+
+def test_rerank_config_can_be_disabled_by_environment(monkeypatch):
+    import importlib
+
+    import config
+
+    monkeypatch.setenv("RERANK_ENABLED", "false")
+
+    reloaded_config = importlib.reload(config)
+
+    assert reloaded_config.RerankConfig.ENABLED is False
 
 
 def test_rerank_documents_disabled_preserves_order_and_does_not_score(monkeypatch):

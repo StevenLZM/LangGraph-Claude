@@ -114,7 +114,7 @@ class RAGConfig:
 
 
 class RerankConfig:
-    ENABLED: bool = os.getenv("RERANK_ENABLED", "false").lower() == "true"
+    ENABLED: bool = os.getenv("RERANK_ENABLED", "true").lower() == "true"
     MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-base")
     TOP_N: int = int(os.getenv("RERANK_TOP_N", "4"))
     BATCH_SIZE: int = int(os.getenv("RERANK_BATCH_SIZE", "16"))

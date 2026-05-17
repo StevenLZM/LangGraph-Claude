@@ -160,7 +160,7 @@ Dense Retrieval          Sparse Retrieval (BM25)
 | `SEMANTIC_WEIGHT` | `0.6` | 语义检索权重（BM25=0.4） |
 | `SIMILARITY_THRESHOLD` | `0.3` | 相似度过滤阈值 |
 | `MILVUS_URI` | `data/vectorstore/milvus.db` | Milvus Lite 本地数据文件 |
-| `RERANK_ENABLED` | `false` | 是否启用 Cross-Encoder rerank |
+| `RERANK_ENABLED` | `true` | 是否启用 Cross-Encoder rerank；Streamlit 应用默认开启，baseline 评测可显式关闭 |
 | `RERANK_MODEL` | `BAAI/bge-reranker-base` | Cross-Encoder rerank 模型 |
 | `RERANK_TOP_N` | `4` | rerank 后保留的候选数 |
 
