@@ -11,6 +11,7 @@ from langchain_core.documents import Document
 
 from config import DEEPSEEK_BASE_URL, DASHSCOPE_BASE_URL, llm_config, rag_config
 from rag.query_rewriter import rewrite_query
+from rag.reranker import rerank_documents
 from rag.retriever import get_hybrid_retriever, retrieve_with_hybrid
 from rag.vectorstore import get_vectorstore, similarity_search_with_threshold
 
@@ -169,11 +170,12 @@ def create_rag_chain():
                 ensemble_retriever=hybrid_retriever,
                 time_intent=time_intent,
             )
-        return similarity_search_with_threshold(
+        docs = similarity_search_with_threshold(
             query=q,
             k=rag_config.FINAL_TOP_K,
             vectorstore=vs,
         )
+        return rerank_documents(q, docs, top_n=rag_config.FINAL_TOP_K)
 
     # Step 3: RAG Prompt
     rag_prompt = ChatPromptTemplate.from_messages([

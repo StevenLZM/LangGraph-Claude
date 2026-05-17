@@ -20,6 +20,7 @@ from evals.ragas_adapter import (  # noqa: E402
     build_ragas_row,
     run_ragas_evaluation,
 )
+from evals.retrieval_metrics import build_retrieval_metric_fields  # noqa: E402
 
 
 RetrievalCallable = Callable[[dict[str, Any]], list[Any]]
@@ -62,10 +63,12 @@ def run_evaluation(
     generation = generation_callable or (_call_dry_run_generation if dry_run else _call_local_generation)
 
     ragas_rows: list[dict[str, Any]] = []
+    retrieval_metric_rows: list[dict[str, Any]] = []
     for case in cases:
         docs = retrieval(case)
         response = generation(case, docs)
         ragas_rows.append(build_ragas_row(case, docs, response))
+        retrieval_metric_rows.append(build_retrieval_metric_fields(case, docs))
 
     metrics = metric_names or RAGAS_METRIC_NAMES
     effective_evaluator = ragas_evaluator
@@ -76,6 +79,10 @@ def run_evaluation(
         metric_names=metrics,
         evaluator=effective_evaluator,
     )
+    results = [
+        {**result, **retrieval_metrics}
+        for result, retrieval_metrics in zip(results, retrieval_metric_rows)
+    ]
 
     results_path = run_dir / "ragas_results.jsonl"
     with results_path.open("w", encoding="utf-8") as file:
@@ -162,7 +169,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run 01_RAG RAGAS evals.")
     parser.add_argument("--dataset", default="evals/dataset.jsonl")
     parser.add_argument("--output-root", default="evals/results")
+    parser.add_argument("--run-id", default=None)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--rerank-enabled", action="store_true")
+    parser.add_argument("--rerank-disabled", action="store_true")
     parser.add_argument(
         "--metrics",
         default=None,
@@ -173,13 +183,27 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.rerank_enabled and args.rerank_disabled:
+        parser.error("--rerank-enabled and --rerank-disabled cannot be used together")
+    if args.rerank_enabled:
+        _apply_rerank_override(True)
+    elif args.rerank_disabled:
+        _apply_rerank_override(False)
+
     run_dir = run_evaluation(
         dataset_path=Path(args.dataset),
         output_root=Path(args.output_root),
+        run_id=args.run_id,
         dry_run=args.dry_run,
         metric_names=_parse_metric_names(args.metrics),
     )
     print(run_dir)
+
+
+def _apply_rerank_override(enabled: bool) -> None:
+    from config import rerank_config
+
+    rerank_config.ENABLED = enabled
 
 
 def _parse_metric_names(raw: str | None) -> list[str] | None:

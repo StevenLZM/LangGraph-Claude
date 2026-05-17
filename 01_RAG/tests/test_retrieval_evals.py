@@ -84,6 +84,22 @@ def test_ragas_result_aliases_are_normalized_to_project_metric_names():
     assert rows == [{"context_precision": 0.8, "context_recall": 0.7}]
 
 
+def test_retrieval_ir_metrics_compute_recall_mrr_and_hit_at_k():
+    from evals.retrieval_metrics import compute_retrieval_metrics
+
+    metrics = compute_retrieval_metrics(
+        expected_ids=["manual.pdf", "faq.pdf"],
+        retrieved_ids=["other.pdf", "manual.pdf", "manual.pdf", "guide.pdf"],
+        k=3,
+    )
+
+    assert metrics == {
+        "retrieval_recall_at_3": 0.5,
+        "retrieval_mrr": 0.5,
+        "retrieval_hit_at_3": 1.0,
+    }
+
+
 def test_answer_relevancy_metric_uses_single_generation_for_openai_compatible_llms(monkeypatch):
     from evals import ragas_adapter
 
@@ -161,7 +177,8 @@ def test_run_ragas_evaluation_writes_results_summary_and_report(tmp_path):
     dataset_path = tmp_path / "dataset.jsonl"
     dataset_path.write_text(
         '{"id":"case_001","category":"precise","question":"保修期多久？",'
-        '"reference":"产品保修期为 12 个月。"}\n',
+        '"reference":"产品保修期为 12 个月。",'
+        '"expected_sources":["spec.pdf","faq.pdf"]}\n',
         encoding="utf-8",
     )
 
@@ -219,21 +236,29 @@ def test_run_ragas_evaluation_writes_results_summary_and_report(tmp_path):
     result = json.loads(results_path.read_text(encoding="utf-8").splitlines()[0])
     assert result["context_precision"] == 1.0
     assert result["semantic_similarity"] == 0.92
+    assert result["retrieval_recall_at_5"] == 0.5
+    assert result["retrieval_mrr"] == 1.0
+    assert result["retrieval_hit_at_5"] == 1.0
+    assert result["retrieval_eval_target"] == "source"
 
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert summary["total"] == 1
     assert summary["metrics"]["context_precision"]["average"] == 1.0
     assert summary["metrics"]["faithfulness"]["average"] == 0.95
     assert summary["metrics"]["answer_correctness"]["average"] == 0.93
+    assert summary["retrieval_metrics"]["retrieval_recall_at_5"]["average"] == 0.5
+    assert summary["retrieval_metrics"]["retrieval_mrr"]["average"] == 1.0
+    assert summary["retrieval_metrics"]["retrieval_hit_at_5"]["average"] == 1.0
 
     report = report_path.read_text(encoding="utf-8")
-    assert "# 01_RAG RAGAS 评估报告" in report
+    assert "# 01_RAG 离线评估报告" in report
     assert "Context Precision" in report
     assert "Answer Correctness" in report
     assert "Semantic Similarity" in report
-    assert "Recall@5" not in report
-    assert "MRR" not in report
-    assert "Parent Hit" not in report
+    assert "传统 IR 检索指标" in report
+    assert "Recall@5" in report
+    assert "MRR" in report
+    assert "Hit@5" in report
     assert "关键词" not in report
 
 
@@ -300,6 +325,6 @@ def test_run_evaluation_dry_run_uses_packaged_dataset(tmp_path):
     summary = (run_dir / "summary.json").read_text(encoding="utf-8")
     report = (run_dir / "REPORT.md").read_text(encoding="utf-8")
     assert '"total":' in summary
-    assert "01_RAG RAGAS 评估报告" in report
+    assert "01_RAG 离线评估报告" in report
     assert "RAGAS 指标" in report
     assert "dry_run_fixture" in (run_dir / "ragas_results.jsonl").read_text(encoding="utf-8")

@@ -1,6 +1,6 @@
 # 🧠 智能知识库问答系统 (RAG)
 
-> **项目编号 01** | LangChain + ChromaDB + Streamlit | 混合检索 · 多轮对话 · 来源可追溯
+> **项目编号 01** | LangChain + Milvus Lite + Streamlit | 混合检索 · 多轮对话 · 来源可追溯
 
 ---
 
@@ -33,7 +33,7 @@
 │   ├── loader.py             # PDF 解析（PyMuPDF + 备用 pypdf）
 │   ├── chunker.py            # 文本分块（Recursive + 语义感知）
 │   ├── embedder.py           # Embedding 封装（OpenAI + HuggingFace 兜底）
-│   ├── vectorstore.py        # ChromaDB 管理（增删改查）
+│   ├── vectorstore.py        # Milvus Lite 管理（增删改查）
 │   ├── retriever.py          # 混合检索器（语义 + BM25 + RRF）
 │   └── chain.py              # LCEL RAG Chain（问题改写 → 检索 → 生成）
 ├── memory/
@@ -42,7 +42,7 @@
 │   └── filesystem_client.py  # MCP Filesystem Client 适配层
 ├── data/
 │   ├── documents/            # PDF 存储目录
-│   └── vectorstore/          # ChromaDB 持久化目录
+│   └── vectorstore/          # Milvus Lite 本地数据目录
 └── tests/
     └── test_rag_pipeline.py  # 完整测试套件（无 API 单元测试 + 集成测试）
 ```
@@ -54,7 +54,7 @@
 - `02_rag_chunking_v2_design.md`：parent-child chunking 设计
 - `03_rag_date_aware_retrieval_design.md`：日期感知检索设计
 - `04_rag_structured_chunking.md`：结构化切分设计
-- `05_rag_ragas_evaluation_design.md`：RAGAS-only 评估体系设计
+- `05_rag_ragas_evaluation_design.md`：RAGAS + 传统 IR 评估体系设计
 
 ---
 
@@ -159,6 +159,12 @@ Dense Retrieval          Sparse Retrieval (BM25)
 | `FINAL_TOP_K` | `4` | 最终使用的文档块数 |
 | `SEMANTIC_WEIGHT` | `0.6` | 语义检索权重（BM25=0.4） |
 | `SIMILARITY_THRESHOLD` | `0.3` | 相似度过滤阈值 |
+| `MILVUS_URI` | `data/vectorstore/milvus.db` | Milvus Lite 本地数据文件 |
+| `RERANK_ENABLED` | `false` | 是否启用 Cross-Encoder rerank |
+| `RERANK_MODEL` | `BAAI/bge-reranker-base` | Cross-Encoder rerank 模型 |
+| `RERANK_TOP_N` | `4` | rerank 后保留的候选数 |
+
+> 从旧 ChromaDB 数据切换到 Milvus Lite 后，需要重新上传或重新索引文档；项目不会自动迁移 `data/vectorstore/chroma.sqlite3`。
 
 ---
 
@@ -175,23 +181,28 @@ pytest tests/ -v -m slow
 pytest tests/ --cov=rag --cov=memory --cov=mcp --cov-report=term-missing
 ```
 
-### RAGAS 离线评估
+### 离线评估
 
 ```bash
-# 验证 RAGAS 数据格式、报告生成和 dry-run 管道，不访问向量库或 LLM
+# 验证评估数据格式、报告生成和 dry-run 管道，不访问向量库或 LLM
 python -m evals.run --dry-run
 
-# 真实评估：检索、语义和端到端质量全部交给 RAGAS 打分
+# 真实评估：RAGAS 评估生成链路，传统 IR 指标评估检索排序
 python -m evals.run
+
+# 对比 Milvus baseline 与 Cross-Encoder rerank
+python -m evals.run --rerank-disabled --run-id baseline-milvus
+python -m evals.run --rerank-enabled --run-id cross-encoder-rerank
 ```
 
-评估结果写入 `evals/results/<run_id>/`，包含 `ragas_results.jsonl`、`summary.json` 和 `REPORT.md`。当前评估体系已经放弃自定义 Recall/MRR/关键词规则分，统一使用 RAGAS 指标：
+评估结果写入 `evals/results/<run_id>/`，包含 `ragas_results.jsonl`、`summary.json` 和 `REPORT.md`。当前评估体系分两层：
 
-- 检索质量：`context_precision`、`context_recall`
+- 检索排序：`Recall@5`、`MRR`、`Hit@5`，基于 `expected_parent_ids` 或 `expected_sources` 与实际召回结果计算
+- 检索上下文质量：`context_precision`、`context_recall`
 - 语义质量：`answer_relevancy`、`semantic_similarity`
 - 端到端质量：`faithfulness`、`answer_correctness`
 
-完整设计见 `05_rag_ragas_evaluation_design.md`，教学讲解见 `LEARNING_GUIDE.md` 的“如何使用当前 RAGAS 评估体系”和“生产级 RAG 测评怎么落地”。
+完整设计见 `05_rag_ragas_evaluation_design.md`，教学讲解见 `LEARNING_GUIDE.md` 的“如何使用当前 RAGAS + IR 评估体系”和“生产级 RAG 测评怎么落地”。
 
 ---
 
@@ -202,5 +213,5 @@ python -m evals.run
 3. **相似度阈值过滤**：防止低质量检索结果污染 LLM 输入，有效降低幻觉
 4. **幂等索引**：文档重新上传时先删旧版本再插入，保证数据一致性
 5. **MCP 集成**：体现对 Claude Agent 技术栈的理解
-6. **RAGAS 离线评估体系**：用人工 reference 样本统一评价检索、语义相关性、忠实度和端到端答案正确性
+6. **离线评估体系**：用传统 IR 指标评估检索排序，用 RAGAS 评价上下文质量、语义相关性、忠实度和端到端答案正确性
 7. **测试驱动**：核心模块均有单元测试，无需 API Key 即可验证

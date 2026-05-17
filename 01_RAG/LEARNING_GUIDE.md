@@ -1211,9 +1211,13 @@ Dense/BM25 child 召回
 5. 时间意图问题
 6. 无答案拒答问题
 
-当前项目已经放弃自定义 Recall/MRR/关键词规则分，统一用 RAGAS 做离线评估。指标分三层看：
+当前项目采用 RAGAS + 传统 IR 指标做离线评估。IR 指标回答“相关结果有没有召回、排得靠不靠前”，RAGAS 回答“上下文和最终答案质量如何”。指标分四层看：
 
-- **检索质量**
+- **检索排序**
+  - `Recall@5`：Top-5 中召回了多少标注相关文档或 parent
+  - `MRR`：第一个相关结果排在多靠前
+  - `Hit@5`：Top-5 是否至少命中一个相关结果
+- **上下文质量**
   - `context_precision`：检索上下文里有多少内容真的有助于回答
   - `context_recall`：reference 里的关键信息是否被检索上下文覆盖
 - **语义质量**
@@ -1230,11 +1234,11 @@ python -m evals.run --dry-run          # 验证 RAGAS 数据格式和报告管�
 python -m evals.run                    # 真实 RAGAS 评估
 ```
 
-调参时先看 `context_precision/context_recall` 判断检索上下文，再看 `faithfulness/answer_correctness` 判断最终回答。不要再把旧的自定义 Recall、MRR、关键词覆盖率当作本项目的评估输出。
+调参时先看 `Recall@5/MRR/Hit@5` 判断召回和排序，再看 `context_precision/context_recall` 判断检索上下文，最后看 `faithfulness/answer_correctness` 判断最终回答。关键词覆盖率不再作为项目评估输出。
 
 完整设计文档见 `05_rag_ragas_evaluation_design.md`。教学时可以把 `LEARNING_GUIDE.md` 当作“怎么理解和使用”，把设计文档当作“为什么这么实现和如何维护”。
 
-### 6.7 如何使用当前 RAGAS 评估体系
+### 6.7 如何使用当前 RAGAS + IR 评估体系
 
 第一步，维护人工 reference 数据集。
 
@@ -1262,7 +1266,9 @@ python -m evals.run                    # 真实 RAGAS 评估
 | `query_type` | 更细的题型标签，用于后续分析 |
 | `question` | 用户真实问题或人工设计问题 |
 | `reference` | RAGAS 使用的标准答案或标准事实陈述，必填 |
-| `expected_sources` | 可选调试字段，用于人工排查来源，不参与自定义打分 |
+| `expected_parent_ids` | 可选检索金标，优先用于 parent 级 IR 指标 |
+| `expected_sources` | 可选检索金标，没有 parent 标注时用于文档级 IR 指标 |
+| `expected_sections` | 可选检索金标，没有 parent/source 标注时用于章节级 IR 指标 |
 
 `reference` 的质量会直接影响 RAGAS 分数。写 reference 时注意：
 
@@ -1295,6 +1301,7 @@ dry-run 不访问向量库、不调用 LLM，只验证：
 - 数据集 JSONL 能被加载
 - RAGAS 必填字段合法
 - 可以生成 RAGAS schema 的样本行
+- 可以基于 `expected_parent_ids` 或 `expected_sources` 计算 IR 指标
 - `ragas_results.jsonl`、`summary.json`、`REPORT.md` 能生成
 
 如果 dry-run 失败，先修数据集或评测脚本，不要急着调检索参数。
@@ -1313,12 +1320,16 @@ question
   → retrieve_with_hybrid()
   → create_chain_with_history()
   → build_ragas_row(user_input, retrieved_contexts, response, reference)
+  → build_retrieval_metric_fields(expected_sources, retrieved_sources)
   → ragas.evaluate()
   → REPORT.md
 ```
 
 重点看 `REPORT.md` 里的：
 
+- `Recall@5`：Top-5 是否召回足够多的标注相关文档或 parent
+- `MRR`：第一个相关结果排在多靠前
+- `Hit@5`：Top-5 是否至少命中一个标注相关结果
 - `Context Precision`：检索内容是否噪声过多
 - `Context Recall`：reference 需要的信息是否被召回
 - `Faithfulness`：回答是否被上下文支撑
@@ -1332,8 +1343,8 @@ question
 
 ```text
 evals/results/<run_id>/
-├── ragas_results.jsonl   # 每条样本的 RAGAS 输入和指标分
-├── summary.json          # RAGAS 聚合指标，适合做自动门槛
+├── ragas_results.jsonl   # 每条样本的 RAGAS 输入、IR 指标和 RAGAS 指标分
+├── summary.json          # IR 与 RAGAS 聚合指标，适合做自动门槛
 └── REPORT.md             # 人工复盘报告
 ```
 
@@ -1350,7 +1361,7 @@ evals/results/<run_id>/
 1. 全局平均分：判断总体趋势。
 2. category 分组：判断概念题、精确题、时间题、跨段落题是否有局部回退。
 3. 单样本明细：定位具体 query、retrieved sources 和 response。
-4. `ragas_results.jsonl`：查看具体 `retrieved_contexts`，确认问题在检索还是生成。
+4. `ragas_results.jsonl`：查看具体 `retrieved_sources`、`retrieved_contexts`，确认问题在检索、排序还是生成。
 
 一个常见误区是只盯 `answer_correctness`。如果 `context_recall` 已经很低，说明答案所需事实没有进入上下文，这时调 prompt 或换更强模型通常治标不治本；应该先回到 chunk、TopK、BM25、query rewrite 或日期过滤。
 
@@ -1358,6 +1369,8 @@ evals/results/<run_id>/
 
 | 现象 | 优先排查 |
 |------|----------|
+| `Recall@5` / `Hit@5` 低 | chunk 边界、BM25 召回、query rewrite、TopK、metadata filter |
+| `MRR` 低但 `Hit@5` 高 | RRF 权重、Dense/BM25 排序、rerank、时间排序 |
 | `context_recall` 低 | chunk 边界、BM25 召回、query rewrite、TopK |
 | `context_precision` 低 | 噪声文档太多、排序弱、需要 rerank 或调权重 |
 | `faithfulness` 低 | prompt 约束弱、上下文格式差、回答补充了文档外信息 |
@@ -1369,6 +1382,8 @@ evals/results/<run_id>/
 
 | 指标组合 | 解释 |
 |----------|------|
+| `Hit@5` 低，`context_recall` 低 | 检索没有命中金标来源，先修召回 |
+| `Hit@5` 高，`MRR` 低 | 金标来源被召回但排得靠后，优先修排序或 rerank |
 | `context_recall` 低，`context_precision` 高 | 找到的内容干净但不全，优先扩大召回或修 chunk |
 | `context_recall` 高，`context_precision` 低 | 相关内容被召回了，但噪声太多，优先调排序或 rerank |
 | `faithfulness` 低，`answer_correctness` 高 | 答案可能碰巧正确，但没有被上下文支撑，生产上仍有风险 |
@@ -1377,7 +1392,7 @@ evals/results/<run_id>/
 
 教学时可以这样总结：
 
-> 我把 RAG 评估统一交给 RAGAS：检索看 context precision/recall，语义看 answer relevancy/semantic similarity，端到端看 faithfulness/answer correctness。这样每次改 chunk、TopK、权重或 prompt，都能用同一套 reference 数据集做可复跑对比，而不是靠人工感觉或项目自定义规则分。
+> 我把 RAG 评估拆成两层：检索排序用 Recall@5、MRR、Hit@5 做可解释回归，生成和上下文质量用 RAGAS 看 context precision/recall、faithfulness、answer correctness 等指标。这样每次改 chunk、TopK、权重、rerank 或 prompt，都能用同一套 reference 数据集做可复跑对比，而不是靠人工感觉。
 
 ### 6.8 生产级 RAG 测评怎么落地
 
@@ -1397,9 +1412,11 @@ A/B 灰度：验证新策略在线上真实用户中的收益和成本
 完整测评通常依赖：
 
 - 人工 reference 问答集
+- 人工标注的 `expected_sources` 或 `expected_parent_ids`
 - 当前检索链路返回的 `retrieved_contexts`
 - 当前生成链路返回的 `response`
 - RAGAS 评估 LLM 和 Embedding
+- `Recall@5`、`MRR`、`Hit@5` 等 IR 指标
 - `context_precision`、`faithfulness`、`answer_correctness` 等语义指标
 
 这些都不适合放在用户请求链路里：
@@ -1424,11 +1441,11 @@ A/B 灰度：验证新策略在线上真实用户中的收益和成本
 python -m evals.run
 ```
 
-`--dry-run` 只验证评估管道，不代表真实质量分；真实发布前要跑不带 `--dry-run` 的 RAGAS 评估。
+`--dry-run` 只验证评估管道，不代表真实质量分；真实发布前要跑不带 `--dry-run` 的完整离线评估。
 
 生产中推荐的运行频率：
 
-| 时机 | 是否跑 RAGAS | 说明 |
+| 时机 | 是否跑完整评估 | 说明 |
 |------|--------------|------|
 | 每次用户请求 | 否 | 只记录 trace 和质量信号 |
 | 本地改一个参数 | 可选 | 小样本快速验证趋势 |
@@ -1525,13 +1542,18 @@ candidate 策略：新 chunk / 新 embedding / 新 rerank / 新权重
 
 > 生产级 RAG 测评是“离线评测为主，线上监控为辅”。离线金标评测决定能不能发版，线上 trace 和用户反馈决定发版后有没有出问题。完整测评不进用户请求链路，线上只记录低成本质量信号，再把真实坏 case 沉淀回离线评测集，形成持续迭代闭环。
 
-### 6.9 RAGAS 评估体系的维护边界
+### 6.9 RAGAS + IR 评估体系的维护边界
 
-当前项目的原则是：评估逻辑尽量薄，评分交给 RAGAS。
+当前项目的原则是：检索排序用少量可解释 IR 指标，生成质量交给 RAGAS。
 
-不要重新加入这些自定义评分：
+检索侧保留这些指标：
 
-- 手写 Recall/MRR/Parent Hit 总分
+- `Recall@5`
+- `MRR`
+- `Hit@5`
+
+不要重新加入这些生成侧规则分：
+
 - 答案关键词覆盖率
 - forbidden keyword 扣分
 - 自建 LLM Judge 分数
@@ -1544,9 +1566,9 @@ candidate 策略：新 chunk / 新 embedding / 新 rerank / 新权重
 - `retrieved_sections`
 - category 和 query_type
 
-原因是这些字段对人工排查很有用，但不应该重新变成另一套评分体系。否则系统会同时存在 RAGAS 分和自定义分，调参时很容易不知道该信哪个。
+原因是这些字段既能支持检索指标，也对人工排查很有用；但不要再叠加关键词覆盖率这类生成规则分，否则系统会同时存在 RAGAS 分和自定义生成分，调参时很容易不知道该信哪个。
 
-新增指标时也要遵守一个原则：优先使用 RAGAS 原生指标，只有当 RAGAS 无法表达业务约束时，才把业务规则作为报告备注或人工检查项，而不是默认总分。
+新增指标时也要遵守一个原则：检索排序指标只补充 RAGAS 无法表达的 rank 信息，生成质量优先使用 RAGAS 原生指标。业务规则更适合作为报告备注或人工检查项，而不是默认总分。
 
 ---
 
@@ -1699,9 +1721,14 @@ RAG 的解决方案：不让 LLM "凭感觉"回答，而是先从知识库里检
 
 **回答思路：**
 
-RAG 评估要同时看检索、语义和端到端答案质量。当前项目已经统一接入 RAGAS，不再使用自定义 Recall/MRR/关键词规则分。
+RAG 评估要同时看检索、语义和端到端答案质量。当前项目用传统 IR 指标评估检索排序，用 RAGAS 评估上下文质量和最终回答。
 
-**检索质量：**
+**检索排序：**
+- `Recall@5`：Top-5 中召回了多少标注相关文档或 parent
+- `MRR`：第一个相关结果排在多靠前
+- `Hit@5`：Top-5 是否至少命中一个标注相关结果
+
+**上下文质量：**
 - `context_precision`：检索出来的上下文是否都是有用信息
 - `context_recall`：reference 需要的信息是否被上下文覆盖
 
@@ -1718,8 +1745,8 @@ RAG 评估要同时看检索、语义和端到端答案质量。当前项目已�
 当前项目的 `evals/` 体系：
 
 - `evals/dataset.jsonl` 放人工 reference 样本
-- `python -m evals.run --dry-run` 验证 RAGAS 数据格式和报告管道
-- `python -m evals.run` 调用真实 RAGAS 指标，输出 `ragas_results.jsonl`、`summary.json`、`REPORT.md`
+- `python -m evals.run --dry-run` 验证数据格式、IR 指标和报告管道
+- `python -m evals.run` 调用真实检索、生成和 RAGAS 指标，输出 `ragas_results.jsonl`、`summary.json`、`REPORT.md`
 
 生产上我不会每次用户请求都跑完整评测。完整评测放在线下或发布前；线上实时记录 query、rewrite、命中文档、rank、score、引用、延迟、token 和用户反馈，用来做监控和抽样。
 
@@ -1729,14 +1756,14 @@ RAG 评估要同时看检索、语义和端到端答案质量。当前项目已�
 线上日志与用户反馈
   → 抽样人工编写 reference
   → 加入 eval_dataset
-  → RAGAS 离线回归评测
+  → IR + RAGAS 离线回归评测
   → 调参/发版
   → 线上监控和 A/B 验证
 ```
 
 面试表达可以落到一句话：
 
-> 我不会只说“答案看起来不错”，而是维护一批人工 reference 样本，用 RAGAS 统一评估 context precision/recall、answer relevancy、semantic similarity、faithfulness 和 answer correctness。生产中完整评估离线做，线上只做低成本质量监控和 trace 采集，再把真实坏 case 回流到评测集。
+> 我不会只说“答案看起来不错”，而是维护一批人工 reference 和 expected sources 样本，用 Recall@5、MRR、Hit@5 评估检索排序，用 RAGAS 评估 context precision/recall、faithfulness 和 answer correctness。生产中完整评估离线做，线上只做低成本质量监控和 trace 采集，再把真实坏 case 回流到评测集。
 
 ---
 

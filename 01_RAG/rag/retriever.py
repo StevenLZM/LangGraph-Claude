@@ -2,7 +2,7 @@
 rag/retriever.py — parent-child 混合检索器（带时间意图感知）
 
 时间感知策略（按 query_rewriter 输出的 time_intent.type 分派）：
-- year/before/after/range  → 方案A：pre-filter（语义路 ChromaDB native filter + BM25 路 post-filter wrapper）
+- year/before/after/range  → 方案A：pre-filter（语义路 Milvus expr filter + BM25 路 post-filter wrapper）
 - latest                   → 方案B：召回扩大化 + hydrate 阶段按日期二级排序
 - none                     → 原流程，零回归
 """
@@ -19,7 +19,13 @@ from langchain_core.retrievers import BaseRetriever
 
 from config import rag_config
 from rag.docstore import ParentDocStore, get_parent_docstore
-from rag.vectorstore import build_time_filter, get_vectorstore
+from rag.reranker import rerank_documents
+from rag.vectorstore import (
+    _to_milvus_filter,
+    build_time_filter,
+    get_all_child_documents,
+    get_vectorstore,
+)
 
 
 # ────────────────────────────────────────────────────────────────
@@ -154,7 +160,7 @@ def build_hybrid_retriever(
     构建 child 级混合检索器，并按 time_intent 决定 filter 策略。
 
     硬意图（year/before/after/range）：
-      - 语义路：注入 ChromaDB native filter，k *= HARD_FILTER_K_MULTIPLIER
+      - 语义路：注入 Milvus expr filter，k *= HARD_FILTER_K_MULTIPLIER
       - BM25 路：用 TimeFilteredBM25Wrapper 包装，召回扩大化后 post-filter
     软意图（latest）：
       - 不做 filter，仅 hydrate 阶段按日期排序
@@ -171,7 +177,7 @@ def build_hybrid_retriever(
     if is_hard:
         where = build_time_filter(time_intent)
         if where:
-            semantic_kwargs["filter"] = where
+            semantic_kwargs["expr"] = _to_milvus_filter(where)
             semantic_kwargs["k"] = semantic_k * rag_config.HARD_FILTER_K_MULTIPLIER
 
     semantic_retriever = vs.as_retriever(search_type="similarity", search_kwargs=semantic_kwargs)
@@ -203,14 +209,9 @@ def get_hybrid_retriever(time_intent: Optional[dict] = None):
     """获取混合检索器（需要先加载 children 到向量库）"""
     vs = get_vectorstore()
     try:
-        result = vs.get(include=["documents", "metadatas"])
-        if not result.get("documents"):
+        all_chunks = get_all_child_documents(vs)
+        if not all_chunks:
             return None
-
-        all_chunks = [
-            Document(page_content=doc, metadata=meta or {})
-            for doc, meta in zip(result["documents"], result.get("metadatas", []))
-        ]
         return build_hybrid_retriever(all_chunks, time_intent=time_intent)
     except Exception:
         return None
@@ -336,7 +337,8 @@ def retrieve_with_hybrid(
 
     top_k = top_k or rag_config.FINAL_TOP_K
     results = ensemble_retriever.invoke(query)
-    return results[:top_k]
+    reranked = rerank_documents(query, results, top_n=top_k)
+    return reranked[:top_k]
 
 
 # ────────────────────────────────────────────────────────────────

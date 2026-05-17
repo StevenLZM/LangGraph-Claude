@@ -113,6 +113,14 @@ class RAGConfig:
     BM25_FILTER_K_MULTIPLIER: int = int(os.getenv("BM25_FILTER_K_MULTIPLIER", "3"))
 
 
+class RerankConfig:
+    ENABLED: bool = os.getenv("RERANK_ENABLED", "false").lower() == "true"
+    MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-base")
+    TOP_N: int = int(os.getenv("RERANK_TOP_N", "4"))
+    BATCH_SIZE: int = int(os.getenv("RERANK_BATCH_SIZE", "16"))
+    DEVICE: str = os.getenv("RERANK_DEVICE", "")
+
+
 # ── 路径配置 ─────────────────────────────────────────────────────
 class PathConfig:
     DOCUMENTS_DIR: Path = BASE_DIR / os.getenv("DOCUMENTS_DIR", "data/documents")
@@ -126,10 +134,63 @@ class PathConfig:
         cls.DOCSTORE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ── ChromaDB 配置 ─────────────────────────────────────────────────
-class ChromaConfig:
+def _resolve_milvus_uri() -> str:
+    raw_uri = os.getenv("MILVUS_URI")
+    if not raw_uri:
+        return str(PathConfig.VECTORSTORE_DIR / "milvus.db")
+
+    if "://" in raw_uri:
+        return raw_uri
+
+    path = Path(raw_uri).expanduser()
+    if not path.is_absolute():
+        path = BASE_DIR / path
+    return str(path)
+
+
+# ── Milvus Lite 配置 ─────────────────────────────────────────────
+class MilvusConfig:
     COLLECTION_NAME: str = f"rag_knowledge_base_{RAGConfig.ACTIVE_INDEX_VERSION}_children"
-    PERSIST_DIRECTORY: str = str(PathConfig.VECTORSTORE_DIR)
+    URI: str = _resolve_milvus_uri()
+    CONSISTENCY_LEVEL: str = os.getenv("MILVUS_CONSISTENCY_LEVEL", "Strong")
+    PRIMARY_FIELD: str = os.getenv("MILVUS_PRIMARY_FIELD", "pk")
+    TEXT_FIELD: str = os.getenv("MILVUS_TEXT_FIELD", "text")
+    VECTOR_FIELD: str = os.getenv("MILVUS_VECTOR_FIELD", "vector")
+    METADATA_FIELDS: tuple[str, ...] = (
+        "doc_id",
+        "source",
+        "file_path",
+        "page",
+        "total_pages",
+        "doc_version",
+        "chunk_role",
+        "parent_id",
+        "child_id",
+        "parent_index",
+        "child_index",
+        "chunk_index",
+        "section_index",
+        "section_path",
+        "heading_level",
+        "is_atomic",
+        "token_count",
+        "page_range",
+        "page_start",
+        "page_end",
+        "upload_date",
+        "doc_date_min",
+        "doc_date_max",
+        "has_doc_date",
+    )
+    INDEX_PARAMS: dict = {
+        "metric_type": "COSINE",
+        "index_type": "FLAT",
+        "params": {},
+    }
+    SEARCH_PARAMS: dict = {
+        "metric_type": "COSINE",
+        "params": {},
+    }
 
 
 class DocStoreConfig:
@@ -139,8 +200,9 @@ class DocStoreConfig:
 # ── 统一导出 ─────────────────────────────────────────────────────
 llm_config = LLMConfig()
 rag_config = RAGConfig()
+rerank_config = RerankConfig()
 path_config = PathConfig()
-chroma_config = ChromaConfig()
+milvus_config = MilvusConfig()
 docstore_config = DocStoreConfig()
 
 # 确保目录存在

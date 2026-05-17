@@ -5,6 +5,7 @@ from rag.loader import load_pdf, load_documents_from_dir, get_doc_metadata
 from rag.chunker import ChunkingResult, chunk_documents
 from rag.docstore import ParentDocStore, get_parent_docstore
 from rag.embedder import get_embeddings
+from rag.reranker import rerank_documents
 from rag.vectorstore import (
     get_vectorstore, add_documents, delete_document,
     list_documents, get_collection_stats, similarity_search_with_threshold
@@ -21,6 +22,7 @@ __all__ = [
     "ParentDocStore",
     "get_parent_docstore",
     "get_embeddings",
+    "rerank_documents",
     "get_vectorstore",
     "add_documents",
     "delete_document",

@@ -12,6 +12,8 @@ import tempfile
 import pytest
 from pathlib import Path
 
+from langchain_core.documents import Document
+
 # 确保导入路径正确
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -208,6 +210,76 @@ class TestVectorStore:
         assert "total_chunks" in stats
         assert stats["total_chunks"] == 42
 
+    def test_get_vectorstore_initializes_milvus_with_lite_uri(self, monkeypatch):
+        """get_vectorstore 应使用 Milvus Lite URI 初始化 LangChain Milvus"""
+        import rag.vectorstore as vectorstore
+
+        captured = {}
+
+        class FakeMilvus:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr(vectorstore, "Milvus", FakeMilvus)
+        monkeypatch.setattr(vectorstore, "get_embeddings", lambda: "embeddings")
+        vectorstore._vectorstore_instance = None
+
+        vectorstore.get_vectorstore(reset=True)
+
+        assert captured["embedding_function"] == "embeddings"
+        assert captured["collection_name"] == vectorstore.milvus_config.COLLECTION_NAME
+        assert captured["connection_args"] == {"uri": vectorstore.milvus_config.URI}
+
+    def test_milvus_filter_translation_supports_date_and_and_filters(self):
+        """Chroma 形态 metadata filter 应转换为 Milvus boolean expression"""
+        from rag.vectorstore import _to_milvus_filter
+
+        assert _to_milvus_filter({"doc_id": "abc"}) == 'doc_id == "abc"'
+        assert _to_milvus_filter({"upload_date": {"$gte": 20240101, "$lte": 20241231}}) == (
+            "upload_date >= 20240101 and upload_date <= 20241231"
+        )
+        assert _to_milvus_filter({
+            "$and": [
+                {"has_doc_date": True},
+                {"doc_date_min": {"$lte": 20241231}},
+                {"doc_date_max": {"$gte": 20240101}},
+            ]
+        }) == "has_doc_date == true and doc_date_min <= 20241231 and doc_date_max >= 20240101"
+
+
+class TestRerankIntegration:
+
+    def test_retrieve_with_hybrid_reranks_before_top_k(self, monkeypatch):
+        """rerank 应在最终 top_k 截断前执行"""
+        from rag import retriever
+
+        docs = [
+            Document(page_content="low", metadata={"source": "low.pdf"}),
+            Document(page_content="best", metadata={"source": "best.pdf"}),
+        ]
+
+        class FakeRetriever:
+            time_intent = None
+
+            def invoke(self, query):
+                return docs
+
+        def fake_rerank(query, input_docs, top_n=None):
+            assert query == "query"
+            assert input_docs == docs
+            assert top_n == 1
+            return [input_docs[1], input_docs[0]]
+
+        monkeypatch.setattr(retriever, "rerank_documents", fake_rerank)
+
+        result = retriever.retrieve_with_hybrid(
+            "query",
+            top_k=1,
+            ensemble_retriever=FakeRetriever(),
+        )
+
+        assert [doc.page_content for doc in result] == ["best"]
+
 
 # ════════════════════════════════════════════════════════════════
 # 测试：会话记忆模块
@@ -338,6 +410,44 @@ class TestConfig:
         cfg.PathConfig.ensure_dirs()
         assert (tmp_path / "docs").exists()
         assert (tmp_path / "vs").exists()
+
+    def test_milvus_config_defaults_to_local_lite_file(self):
+        """Milvus 默认使用本地 Lite 文件"""
+        from config import MilvusConfig
+
+        assert MilvusConfig.COLLECTION_NAME == "rag_knowledge_base_v2_children"
+        assert MilvusConfig.URI.endswith("data/vectorstore/milvus.db")
+
+    def test_milvus_config_uses_existing_vectorstore_env_for_backwards_compat(self, monkeypatch):
+        """未设置 MILVUS_URI 时沿用 VECTORSTORE_DIR 作为 Milvus Lite 文件目录"""
+        import importlib
+        import config as cfg
+
+        monkeypatch.setenv("VECTORSTORE_DIR", "data/custom_vectors")
+        monkeypatch.delenv("MILVUS_URI", raising=False)
+        reloaded = importlib.reload(cfg)
+
+        try:
+            assert reloaded.MilvusConfig.URI.endswith("data/custom_vectors/milvus.db")
+        finally:
+            monkeypatch.delenv("VECTORSTORE_DIR", raising=False)
+            importlib.reload(cfg)
+
+    def test_milvus_config_resolves_relative_uri_against_project_dir(self, monkeypatch):
+        """相对 MILVUS_URI 应固定解析到 01_RAG 项目目录下"""
+        import importlib
+        import config as cfg
+
+        monkeypatch.setenv("MILVUS_URI", "./data/vectorstore/milvus.db")
+        reloaded = importlib.reload(cfg)
+
+        try:
+            assert reloaded.MilvusConfig.URI == str(
+                reloaded.BASE_DIR / "data/vectorstore/milvus.db"
+            )
+        finally:
+            monkeypatch.delenv("MILVUS_URI", raising=False)
+            importlib.reload(cfg)
 
 
 # ════════════════════════════════════════════════════════════════

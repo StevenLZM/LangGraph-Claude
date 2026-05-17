@@ -4,7 +4,7 @@ langchain-core
 langchain-community>=0.4.0
 langchain-openai
 langchain-anthropic
-langchain-chroma
+langchain-milvus>=0.3.3
 langchain-text-splitters
 langchain-classic
 
@@ -12,7 +12,7 @@ langchain-classic
 dashscope>=1.14.0
 
 # ── 向量数据库 ───────────────────────────────────────────────────
-chromadb
+pymilvus[milvus-lite]>=2.6.0,<3.0
 
 # ── PDF 解析 ─────────────────────────────────────────────────────
 pymupdf
@@ -35,6 +35,7 @@ pydantic
 httpx
 tenacity
 tiktoken
+sentence-transformers
 
 # ── RAG 评估（RAGAS）─────────────────────────────────────────────
 ragas

@@ -275,7 +275,7 @@ def _handle_document_upload(uploaded_files):
         progress.progress((i / total) * 0.5 + 0.3, text=f"分块 {uploaded_file.name}...")
         chunks = chunk_documents(pages)
 
-        # 4. 向量化并存入 ChromaDB
+        # 4. 向量化并存入 Milvus Lite
         progress.progress((i / total) * 0.9 + 0.1, text=f"向量化 {uploaded_file.name}...")
         doc_id = pages[0].metadata["doc_id"] if pages else uploaded_file.name
         added = add_documents(chunks, doc_id, vs)

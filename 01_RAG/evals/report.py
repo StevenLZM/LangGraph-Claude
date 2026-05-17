@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from evals.ragas_adapter import RAGAS_METRIC_NAMES
+from evals.retrieval_metrics import RETRIEVAL_METRIC_LABELS, RETRIEVAL_METRIC_NAMES
 
 
 METRIC_LABELS = {
@@ -39,10 +40,10 @@ def build_report(
         )
 
     lines = [
-        "# 01_RAG RAGAS 评估报告",
+        "# 01_RAG 离线评估报告",
         "",
         f"- 用例数：{summary['total']}",
-        "- 评估框架：RAGAS",
+        "- 评估框架：RAGAS + 传统 IR 检索指标",
         "",
         "## RAGAS 指标",
         "",
@@ -54,6 +55,14 @@ def build_report(
             f"平均 {item['average']:.3f}，有效样本 {item['count']}"
         )
 
+    lines.extend(["", "## 传统 IR 检索指标", ""])
+    for metric_name in RETRIEVAL_METRIC_NAMES:
+        item = summary["retrieval_metrics"][metric_name]
+        lines.append(
+            f"- {RETRIEVAL_METRIC_LABELS.get(metric_name, metric_name)}："
+            f"平均 {item['average']:.3f}，有效样本 {item['count']}"
+        )
+
     lines.extend(["", "## 分类指标", ""])
     for category in sorted(summary["by_category"]):
         item = summary["by_category"][category]
@@ -61,7 +70,14 @@ def build_report(
             f"{METRIC_LABELS.get(name, name)}={item['metrics'][name]['average']:.3f}"
             for name in metrics
         ]
-        lines.append(f"- {category}: cases={item['total']}, " + ", ".join(metric_parts))
+        retrieval_parts = [
+            f"{RETRIEVAL_METRIC_LABELS.get(name, name)}={item['retrieval_metrics'][name]['average']:.3f}"
+            for name in RETRIEVAL_METRIC_NAMES
+        ]
+        lines.append(
+            f"- {category}: cases={item['total']}, "
+            + ", ".join(metric_parts + retrieval_parts)
+        )
 
     lines.extend(["", "## 样本明细", ""])
     for result in results:
@@ -69,9 +85,13 @@ def build_report(
             f"{METRIC_LABELS.get(name, name)}={_fmt_metric(result.get(name))}"
             for name in metrics
         ]
+        retrieval_parts = [
+            f"{RETRIEVAL_METRIC_LABELS.get(name, name)}={_fmt_metric(result.get(name))}"
+            for name in RETRIEVAL_METRIC_NAMES
+        ]
         lines.append(
             f"- `{result.get('id', '')}` [{result.get('category', 'unknown')}] "
-            + ", ".join(metric_parts)
+            + ", ".join(metric_parts + retrieval_parts)
         )
     return "\n".join(lines) + "\n"
 
@@ -91,12 +111,20 @@ def summarize_results(
             metric_name: _metric_summary(results, metric_name)
             for metric_name in metrics
         },
+        "retrieval_metrics": {
+            metric_name: _metric_summary(results, metric_name)
+            for metric_name in RETRIEVAL_METRIC_NAMES
+        },
         "by_category": {
             category: {
                 "total": len(items),
                 "metrics": {
                     metric_name: _metric_summary(items, metric_name)
                     for metric_name in metrics
+                },
+                "retrieval_metrics": {
+                    metric_name: _metric_summary(items, metric_name)
+                    for metric_name in RETRIEVAL_METRIC_NAMES
                 },
             }
             for category, items in by_category.items()

@@ -1,7 +1,7 @@
-# 05 RAGAS 评估体系设计
+# 05 RAGAS + IR 评估体系设计
 
 > 适用范围：`01_RAG` 离线评估体系  
-> 当前状态：已放弃项目自定义 Recall/MRR/关键词规则分，统一使用 RAGAS
+> 当前状态：RAGAS 评估生成和上下文质量，传统 IR 指标评估检索排序
 
 ---
 
@@ -14,13 +14,16 @@ RAG 评估的目标不是给系统贴一个“好/坏”的标签，而是让每
 - 时间类、跨页类、表格类问题是否被平均分掩盖
 - 发布前 candidate 策略是否不低于 baseline
 
-本项目此前有自定义评估体系：检索侧算 Recall、MRR、Parent Hit，生成侧算关键词覆盖和引用规则。该方案实现简单，但有三个问题：
+本项目此前有一套混合自定义评估：检索侧算 Recall、MRR、Parent Hit，生成侧算关键词覆盖和引用规则。生成侧规则实现简单，但有三个问题：
 
 - 指标偏工程规则，难判断“表达不同但语义正确”的答案
 - 检索和生成分数口径不统一，难做端到端对比
 - 自定义规则越来越多后维护成本上升，和社区评估方法脱节
 
-因此当前版本改为 RAGAS-only：数据集只维护 `question` 和 `reference`，评估指标全部由 RAGAS 产生。
+因此当前版本保留检索侧可解释 IR 指标，同时把生成侧和上下文质量交给 RAGAS：
+
+- `Recall@5`、`MRR`、`Hit@5`：基于人工标注的 `expected_parent_ids` 或 `expected_sources`，评估检索召回与排序。
+- RAGAS：基于 `question`、`reference`、`retrieved_contexts`、`response`，评估上下文质量、忠实度和答案正确性。
 
 ---
 
@@ -31,7 +34,7 @@ evals/dataset.jsonl
   │
   │ load_dataset()
   ▼
-case: id / category / query_type / question / reference
+case: id / category / query_type / question / reference / expected_sources
   │
   ├─ dry-run
   │    ├─ _call_dry_run_retrieval()
@@ -51,6 +54,11 @@ build_ragas_row()
   ├─ retrieved_contexts
   ├─ response
   └─ reference
+  │
+  ├─ build_retrieval_metric_fields()
+  │    ├─ Recall@5
+  │    ├─ MRR
+  │    └─ Hit@5
   ▼
 ragas_results.jsonl
 summary.json
@@ -64,8 +72,9 @@ REPORT.md
 | `evals/dataset.jsonl` | 人工 reference 评测集 |
 | `evals/run.py` | 离线评估入口，串联检索、生成、RAGAS、报告 |
 | `evals/ragas_adapter.py` | RAGAS 数据转换、指标选择、真实 evaluate 调用 |
-| `evals/report.py` | 汇总 RAGAS 指标并生成 JSON/Markdown 报告 |
-| `tests/test_retrieval_evals.py` | 覆盖 RAGAS schema、dry-run、报告、旧指标移除 |
+| `evals/retrieval_metrics.py` | 计算 Recall@K、MRR、Hit@K 等传统 IR 指标 |
+| `evals/report.py` | 汇总 RAGAS 与 IR 指标并生成 JSON/Markdown 报告 |
+| `tests/test_retrieval_evals.py` | 覆盖 RAGAS schema、IR 指标、dry-run 和报告生成 |
 
 ---
 
@@ -93,7 +102,9 @@ REPORT.md
 | `question` | 是 | 用户问题或人工构造的回归问题 |
 | `reference` | 是 | RAGAS 对比用标准答案或标准事实陈述 |
 | `query_type` | 否 | 更细的题型标签，便于人工分析 |
-| `expected_sources` | 否 | 调试字段，用于人工排查来源，不参与自定义打分 |
+| `expected_parent_ids` | 否 | 检索金标，优先用于 parent 级 Recall@K / MRR / Hit@K |
+| `expected_sources` | 否 | 文档级检索金标，没有 parent 标注时用于 IR 指标 |
+| `expected_sections` | 否 | 章节级检索金标，没有 parent/source 标注时用于 IR 指标 |
 
 `reference` 的写法要遵守三个原则：
 
@@ -136,7 +147,7 @@ REPORT.md
 - `retrieved_parent_ids`
 - `retrieved_sections`
 
-这些字段不会送入 RAGAS 指标计算，但会写入 `ragas_results.jsonl`，用于人工复盘。
+这些字段不会送入 RAGAS 指标计算，但会写入 `ragas_results.jsonl`，用于 IR 指标计算和人工复盘。
 
 ---
 
@@ -146,8 +157,11 @@ REPORT.md
 
 | 层级 | 指标 | 作用 |
 |------|------|------|
-| 检索质量 | `context_precision` | 检索上下文中有多少内容对回答有用 |
-| 检索质量 | `context_recall` | reference 中的事实是否被上下文覆盖 |
+| 检索排序 | `Recall@5` | Top-5 中召回了多少标注相关文档或 parent |
+| 检索排序 | `MRR` | 第一个相关结果排在多靠前 |
+| 检索排序 | `Hit@5` | Top-5 是否至少命中一个相关结果 |
+| 上下文质量 | `context_precision` | 检索上下文中有多少内容对回答有用 |
+| 上下文质量 | `context_recall` | reference 中的事实是否被上下文覆盖 |
 | 语义质量 | `answer_relevancy` | 回答是否贴合用户问题 |
 | 语义质量 | `semantic_similarity` | 回答与 reference 的语义接近程度 |
 | 端到端质量 | `faithfulness` | 回答是否能被检索上下文支撑 |
@@ -155,10 +169,10 @@ REPORT.md
 
 读数时不要只看平均分。推荐顺序：
 
-1. 先看 `context_recall`：如果需要的信息没召回，生成层很难补救。
-2. 再看 `context_precision`：如果召回噪声太多，LLM 容易答散或引用错。
-3. 再看 `faithfulness`：判断回答是否基于上下文，而不是模型补充。
-4. 最后看 `answer_correctness`：判断端到端答案是否真正正确。
+1. 先看 `Recall@5` 和 `Hit@5`：如果标注来源没进入 Top-5，生成层很难补救。
+2. 再看 `MRR`：如果相关结果排得太靠后，需要优化排序、权重或 rerank。
+3. 再看 `context_precision/context_recall`：判断送入 LLM 的上下文是否干净且完整。
+4. 最后看 `faithfulness/answer_correctness`：判断端到端答案是否忠实且正确。
 
 ---
 
@@ -175,6 +189,7 @@ python -m evals.run --dry-run
 - 验证 JSONL 是否能加载
 - 验证 `reference` 等必填字段
 - 验证 RAGAS schema 转换
+- 验证传统 IR 指标计算和报告聚合
 - 验证 `ragas_results.jsonl`、`summary.json`、`REPORT.md` 能生成
 
 dry-run 不访问向量库、不调用 LLM、不代表真实质量分。报告中的分数来自固定 fixture，只用于检查管道。
@@ -219,7 +234,7 @@ evals/results/<run_id>/
 
 | 文件 | 用途 |
 |------|------|
-| `ragas_results.jsonl` | 每条样本的输入、检索上下文来源和 RAGAS 指标 |
+| `ragas_results.jsonl` | 每条样本的输入、检索上下文来源、IR 指标和 RAGAS 指标 |
 | `summary.json` | 聚合指标，可用于 CI 门槛或脚本对比 |
 | `REPORT.md` | 面向人工复盘的 Markdown 报告 |
 
@@ -231,11 +246,19 @@ evals/results/<run_id>/
   "metrics": {
     "context_precision": {"average": 0.82, "count": 5}
   },
+  "retrieval_metrics": {
+    "retrieval_recall_at_5": {"average": 0.80, "count": 5},
+    "retrieval_mrr": {"average": 0.73, "count": 5},
+    "retrieval_hit_at_5": {"average": 1.00, "count": 5}
+  },
   "by_category": {
     "time": {
       "total": 1,
       "metrics": {
         "answer_correctness": {"average": 0.76, "count": 1}
+      },
+      "retrieval_metrics": {
+        "retrieval_recall_at_5": {"average": 1.00, "count": 1}
       }
     }
   }
@@ -269,6 +292,8 @@ evals/results/<run_id>/
 
 | 现象 | 优先排查 |
 |------|----------|
+| `Recall@5` / `Hit@5` 低 | chunk 边界、TopK、BM25 召回、query rewrite、metadata filter |
+| `MRR` 低但 `Hit@5` 高 | 排序、RRF 权重、Cross-Encoder rerank、时间排序 |
 | `context_recall` 低 | chunk 边界、BM25 召回、TopK、query rewrite |
 | `context_precision` 低 | 噪声文档、排序、rerank、Dense/BM25 权重 |
 | `faithfulness` 低 | Prompt 约束、上下文格式、回答中混入模型常识 |
@@ -318,9 +343,9 @@ evals/results/<run_id>/
 - `tests/test_retrieval_evals.py` 覆盖：
   - dataset 必填字段
   - RAGAS row 构造
+  - Recall@K、MRR、Hit@K 指标计算
   - RAGAS 输出列名归一化
   - dry-run 报告生成
-  - 旧自定义指标不再出现在报告中
+  - RAGAS 与传统 IR 指标同时出现在报告中
 - 文档中不再要求使用 `--with-generation`、`--with-judge`
-- 文档中不再把自定义 Recall/MRR/关键词规则分作为当前项目评估输出
-
+- 文档中不再把关键词规则分作为当前项目评估输出
