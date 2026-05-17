@@ -163,14 +163,35 @@ def main() -> None:
     parser.add_argument("--dataset", default="evals/dataset.jsonl")
     parser.add_argument("--output-root", default="evals/results")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--metrics",
+        default=None,
+        help=(
+            "Comma-separated RAGAS metrics to run. "
+            f"Available: {', '.join(RAGAS_METRIC_NAMES)}"
+        ),
+    )
     args = parser.parse_args()
 
     run_dir = run_evaluation(
         dataset_path=Path(args.dataset),
         output_root=Path(args.output_root),
         dry_run=args.dry_run,
+        metric_names=_parse_metric_names(args.metrics),
     )
     print(run_dir)
+
+
+def _parse_metric_names(raw: str | None) -> list[str] | None:
+    if raw is None:
+        return None
+    metric_names = [item.strip() for item in raw.split(",") if item.strip()]
+    if not metric_names:
+        raise ValueError("--metrics must include at least one metric name")
+    unknown = [name for name in metric_names if name not in RAGAS_METRIC_NAMES]
+    if unknown:
+        raise ValueError(f"unknown RAGAS metric names: {unknown}")
+    return metric_names
 
 
 if __name__ == "__main__":

@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Iterable, Protocol
 
 from langchain_core.documents import Document
+
+from config import llm_config
+
+
+LangchainLLMWrapper: Any = None
+_get_llm: Callable[[str | None], Any] | None = None
 
 
 RAGAS_METRIC_NAMES = [
@@ -87,6 +94,7 @@ def _run_real_ragas(
         metrics=_load_ragas_metrics(metric_names),
         llm=_build_ragas_llm(),
         embeddings=_build_ragas_embeddings(),
+        run_config=_build_ragas_run_config(),
     )
     score_rows = _score_rows_to_dicts(result)
 
@@ -97,6 +105,14 @@ def _run_real_ragas(
 
 
 def _load_ragas_metrics(metric_names: list[str]) -> list[Any]:
+    metric_factories = _import_ragas_metric_factories()
+    unknown = [name for name in metric_names if name not in metric_factories]
+    if unknown:
+        raise ValueError(f"unknown RAGAS metric names: {unknown}")
+    return [_configure_metric(name, metric_factories[name]()) for name in metric_names]
+
+
+def _import_ragas_metric_factories() -> dict[str, Callable[[], Any]]:
     try:
         from ragas.metrics.collections import (
             AnswerCorrectness,
@@ -132,15 +148,12 @@ def _load_ragas_metrics(metric_names: list[str]) -> list[Any]:
                 "answer_correctness": answer_correctness,
                 "answer_relevancy": answer_relevancy,
             }
-            missing = [name for name in metric_names if name not in legacy_metrics]
-            if missing:
-                raise ImportError(
-                    "当前 RAGAS 版本缺少以下指标类，请升级 ragas："
-                    + ", ".join(missing)
-                )
-            return [legacy_metrics[name] for name in metric_names]
+            return {
+                name: lambda metric=metric: metric
+                for name, metric in legacy_metrics.items()
+            }
 
-    metric_factories: dict[str, Callable[[], Any]] = {
+    return {
         "context_precision": LLMContextPrecisionWithReference,
         "context_recall": LLMContextRecall,
         "faithfulness": Faithfulness,
@@ -148,21 +161,50 @@ def _load_ragas_metrics(metric_names: list[str]) -> list[Any]:
         "answer_relevancy": ResponseRelevancy,
         "semantic_similarity": SemanticSimilarity,
     }
-    unknown = [name for name in metric_names if name not in metric_factories]
-    if unknown:
-        raise ValueError(f"unknown RAGAS metric names: {unknown}")
-    return [metric_factories[name]() for name in metric_names]
+
+
+def _configure_metric(name: str, metric: Any) -> Any:
+    if name == "answer_relevancy" and hasattr(metric, "strictness"):
+        metric.strictness = 1
+    return metric
+
+
+def _build_ragas_run_config() -> Any:
+    try:
+        from ragas.run_config import RunConfig
+    except ImportError:
+        return None
+    return RunConfig(
+        timeout=int(os.getenv("RAGAS_TIMEOUT_SECONDS", "300")),
+        max_workers=int(os.getenv("RAGAS_MAX_WORKERS", "1")),
+    )
 
 
 def _build_ragas_llm() -> Any:
+    wrapper = _get_langchain_llm_wrapper()
+    model_name = os.getenv("RAGAS_LLM_MODEL") or llm_config.REWRITE_MODEL
+    return wrapper(_get_project_llm(model_name))
+
+
+def _get_langchain_llm_wrapper() -> Any:
+    global LangchainLLMWrapper
+    if LangchainLLMWrapper is not None:
+        return LangchainLLMWrapper
     try:
-        from ragas.llms import LangchainLLMWrapper
+        from ragas.llms import LangchainLLMWrapper as ImportedWrapper
     except ImportError as exc:
         raise ImportError("当前 RAGAS 版本缺少 LangchainLLMWrapper，请升级 ragas。") from exc
+    LangchainLLMWrapper = ImportedWrapper
+    return LangchainLLMWrapper
 
-    from rag.chain import _get_llm
 
-    return LangchainLLMWrapper(_get_llm())
+def _get_project_llm(model_name: str | None = None) -> Any:
+    global _get_llm
+    if _get_llm is None:
+        from rag.chain import _get_llm as imported_get_llm
+
+        _get_llm = imported_get_llm
+    return _get_llm(model_name)
 
 
 def _build_ragas_embeddings() -> Any:

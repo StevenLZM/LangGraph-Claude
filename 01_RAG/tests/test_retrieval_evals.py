@@ -84,6 +84,77 @@ def test_ragas_result_aliases_are_normalized_to_project_metric_names():
     assert rows == [{"context_precision": 0.8, "context_recall": 0.7}]
 
 
+def test_answer_relevancy_metric_uses_single_generation_for_openai_compatible_llms(monkeypatch):
+    from evals import ragas_adapter
+
+    class FakeMetric:
+        def __init__(self):
+            self.strictness = 3
+
+    def fake_import_metrics():
+        return {
+            "context_precision": FakeMetric,
+            "context_recall": FakeMetric,
+            "faithfulness": FakeMetric,
+            "answer_correctness": FakeMetric,
+            "answer_relevancy": FakeMetric,
+            "semantic_similarity": FakeMetric,
+        }
+
+    monkeypatch.setattr(ragas_adapter, "_import_ragas_metric_factories", fake_import_metrics)
+
+    metric = ragas_adapter._load_ragas_metrics(["answer_relevancy"])[0]
+
+    assert metric.strictness == 1
+
+
+def test_ragas_llm_uses_rewrite_model_by_default(monkeypatch):
+    from evals import ragas_adapter
+
+    captured = {}
+
+    class FakeWrapper:
+        def __init__(self, llm):
+            self.llm = llm
+
+    def fake_get_llm(model_name=None):
+        captured["model_name"] = model_name
+        return {"model_name": model_name}
+
+    monkeypatch.setattr(ragas_adapter, "LangchainLLMWrapper", FakeWrapper)
+    monkeypatch.setattr(ragas_adapter, "_get_llm", fake_get_llm)
+    monkeypatch.delenv("RAGAS_LLM_MODEL", raising=False)
+
+    ragas_adapter._build_ragas_llm()
+
+    assert captured["model_name"] == ragas_adapter.llm_config.REWRITE_MODEL
+
+
+def test_ragas_run_config_defaults_to_single_worker(monkeypatch):
+    from evals.ragas_adapter import _build_ragas_run_config
+
+    monkeypatch.delenv("RAGAS_MAX_WORKERS", raising=False)
+
+    run_config = _build_ragas_run_config()
+
+    assert run_config.max_workers == 1
+
+
+def test_report_summary_ignores_nan_and_infinite_metric_values():
+    from evals.report import summarize_results
+
+    summary = summarize_results(
+        [
+            {"category": "precise", "context_precision": 1.0},
+            {"category": "precise", "context_precision": float("nan")},
+            {"category": "precise", "context_precision": float("inf")},
+        ],
+        ["context_precision"],
+    )
+
+    assert summary["metrics"]["context_precision"] == {"average": 1.0, "count": 1}
+
+
 def test_run_ragas_evaluation_writes_results_summary_and_report(tmp_path):
     from evals.run import run_evaluation
 
@@ -164,6 +235,42 @@ def test_run_ragas_evaluation_writes_results_summary_and_report(tmp_path):
     assert "MRR" not in report
     assert "Parent Hit" not in report
     assert "关键词" not in report
+
+
+def test_run_evaluation_respects_custom_metric_names(tmp_path):
+    from evals.run import run_evaluation
+
+    dataset_path = tmp_path / "dataset.jsonl"
+    dataset_path.write_text(
+        '{"id":"case_001","category":"precise","question":"保修期多久？",'
+        '"reference":"产品保修期为 12 个月。"}\n',
+        encoding="utf-8",
+    )
+
+    def fake_retriever(case):
+        return [Document(page_content="产品保修期为 12 个月。", metadata={})]
+
+    def fake_generator(case, docs):
+        return {"answer": "产品保修期为 12 个月。", "sources": docs}
+
+    def fake_ragas_evaluator(rows, metric_names):
+        assert metric_names == ["context_precision", "context_recall"]
+        return [{**rows[0], "context_precision": 1.0, "context_recall": 1.0}]
+
+    run_dir = run_evaluation(
+        dataset_path=dataset_path,
+        output_root=tmp_path / "results",
+        retrieval_callable=fake_retriever,
+        generation_callable=fake_generator,
+        ragas_evaluator=fake_ragas_evaluator,
+        run_id="custom-metrics",
+        metric_names=["context_precision", "context_recall"],
+    )
+
+    report = (run_dir / "REPORT.md").read_text(encoding="utf-8")
+    assert "Context Precision" in report
+    assert "Context Recall" in report
+    assert "Answer Relevancy" not in report
 
 
 def test_packaged_eval_dataset_is_valid():

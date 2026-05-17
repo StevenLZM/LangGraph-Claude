@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -107,7 +108,7 @@ def _metric_summary(items: list[dict[str, Any]], key: str) -> dict[str, Any]:
     values = [
         float(item[key])
         for item in items
-        if item.get(key) is not None and _is_number(item[key])
+        if item.get(key) is not None and _is_finite_number(item[key])
     ]
     if not values:
         return {"average": 0.0, "count": 0}
@@ -125,7 +126,13 @@ def _is_number(value: Any) -> bool:
     return True
 
 
+def _is_finite_number(value: Any) -> bool:
+    if not _is_number(value):
+        return False
+    return math.isfinite(float(value))
+
+
 def _fmt_metric(value: Any) -> str:
-    if value is None or not _is_number(value):
+    if value is None or not _is_finite_number(value):
         return "n/a"
     return f"{float(value):.3f}"
