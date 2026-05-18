@@ -47,6 +47,8 @@ Executor = Callable[[PlanStep, str, list[StepResult]], StepResult]
 def default_planner(user_input: str) -> Plan:
     llm = get_llm("max", temperature=0.1)
     tool_list = get_tools()
+    # planner用with_structured_output因为输出只是文本
+    # react的node用toolcall因为输出要调用函数
     structured = llm.with_structured_output(Plan, method="json_mode")
     result = structured.invoke(
         [

@@ -36,6 +36,7 @@ def build_app():
 
     app = Server("react-agent-weather")
 
+    # 1、告诉Client这个Server提供哪些工具及其参数格式
     @app.list_tools()
     async def _list_tools() -> list[Tool]:  # type: ignore[valid-type]
         return [
@@ -45,7 +46,7 @@ def build_app():
                 inputSchema=WEATHER_QUERY_SCHEMA,
             )
         ]
-
+    # 2、实现每个工具的真实执行逻辑
     @app.call_tool()
     async def _call_tool(name: str, arguments: dict) -> list[TextContent]:  # type: ignore[valid-type]
         if name != "weather_query":
@@ -62,6 +63,7 @@ def build_app():
 
 async def main() -> None:
     app = build_app()
+    # 3、用stdio方试运行，让Client能通过管道和Server通信
     async with stdio_server() as (read, write):  # type: ignore[misc]
         await app.run(read, write, app.create_initialization_options())
 

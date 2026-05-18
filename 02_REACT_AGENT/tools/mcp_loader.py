@@ -170,6 +170,7 @@ def load_mcp_tools(
     used_names = set(existing_names or set())
     for config in load_mcp_server_configs(config_path):
         try:
+            # _run_async在同步上下文中执行异步协程
             server_tools = _run_async(_list_tools(config))
         except Exception as exc:
             if raise_on_error:
