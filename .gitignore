@@ -19,5 +19,12 @@ venv/
 # Streamlit
 .streamlit/secrets.toml
 
+# 01_RAG 评估报告和中间文档
+01_RAG/evals/results/
+
+# 01_RAG 运行时数据（缓存、向量库等）
+01_RAG/data/date_cache.sqlite
+01_RAG/data/vectorstore/milvus.db/
+
 # 注意：本项目为私有项目，.env、向量库、SQLite 数据都随仓库提交，
 # 保证在另一台机器克隆后可直接运行。
