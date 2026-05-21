@@ -159,12 +159,13 @@ Dense Retrieval          Sparse Retrieval (BM25)
 | `FINAL_TOP_K` | `4` | 最终使用的文档块数 |
 | `SEMANTIC_WEIGHT` | `0.6` | 语义检索权重（BM25=0.4） |
 | `SIMILARITY_THRESHOLD` | `0.3` | 相似度过滤阈值 |
-| `MILVUS_URI` | `data/vectorstore/milvus.db` | Milvus Lite 本地数据文件 |
+| `RAG_MILVUS_URI` | `data/vectorstore/milvus.db` | Milvus Lite 本地数据文件；旧 `MILVUS_URI` 仍兼容但不推荐 |
 | `RERANK_ENABLED` | `true` | 是否启用 Cross-Encoder rerank；Streamlit 应用默认开启，baseline 评测可显式关闭 |
 | `RERANK_MODEL` | `BAAI/bge-reranker-base` | Cross-Encoder rerank 模型 |
 | `RERANK_TOP_N` | `4` | rerank 后保留的候选数 |
 
 > 从旧 ChromaDB 数据切换到 Milvus Lite 后，需要重新上传或重新索引文档；项目不会自动迁移 `data/vectorstore/chroma.sqlite3`。
+> Milvus Lite 本地文件同一时间只能由一个进程持锁；如提示向量库暂不可用，请关闭其他 `streamlit run app.py` 实例后重试。
 
 ---
 

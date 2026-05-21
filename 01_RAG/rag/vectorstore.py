@@ -9,15 +9,15 @@ from typing import Any, List, Optional
 
 from langchain_core.documents import Document
 
-try:
-    from langchain_milvus import Milvus
-except ImportError:
-    Milvus = None  # type: ignore[assignment]
-
 from config import milvus_config, rag_config
 from rag.chunker import ChunkingResult
 from rag.docstore import ParentDocStore, get_parent_docstore
 from rag.embedder import get_embeddings
+
+try:
+    from langchain_milvus import Milvus
+except ImportError:
+    Milvus = None  # type: ignore[assignment]
 
 
 _vectorstore_instance: Optional[Any] = None
@@ -274,8 +274,26 @@ def get_collection_stats(
     parent_docstore: Optional[ParentDocStore] = None,
 ) -> dict:
     """返回 child collection 与 parent docstore 统计信息。"""
-    vs = vectorstore or get_vectorstore()
-    docstore = parent_docstore or get_parent_docstore()
+    try:
+        vs = vectorstore or get_vectorstore()
+    except Exception as exc:
+        return {
+            "total_chunks": 0,
+            "total_children": 0,
+            "total_parents": 0,
+            "collection_name": milvus_config.COLLECTION_NAME,
+            "persist_dir": milvus_config.URI,
+            "backend": "milvus-lite",
+            "error": str(exc),
+        }
+
+    try:
+        docstore = parent_docstore or get_parent_docstore()
+    except Exception as exc:
+        docstore = None
+        docstore_error = str(exc)
+    else:
+        docstore_error = ""
 
     try:
         if hasattr(vs, "_collection"):
@@ -291,11 +309,12 @@ def get_collection_stats(
         child_count = 0
 
     try:
-        parent_count = docstore.count()
-    except Exception:
+        parent_count = docstore.count() if docstore is not None else 0
+    except Exception as exc:
         parent_count = 0
+        docstore_error = str(exc)
 
-    return {
+    stats = {
         "total_chunks": child_count,
         "total_children": child_count,
         "total_parents": parent_count,
@@ -303,6 +322,9 @@ def get_collection_stats(
         "persist_dir": milvus_config.URI,
         "backend": "milvus-lite",
     }
+    if docstore_error:
+        stats["error"] = docstore_error
+    return stats
 
 
 _MILVUS_OPERATORS = {

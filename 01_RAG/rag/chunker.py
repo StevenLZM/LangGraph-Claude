@@ -442,26 +442,39 @@ def _build_splitter(
     chunk_size: int,
     chunk_overlap: int,
 ) -> RecursiveCharacterTextSplitter:
-    return RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-        encoding_name=tokenizer_name,
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=[
-            "\n\n",
-            "\n",
-            "。", "！", "？",
-            ".", "!", "?",
-            "；", ";",
-            "，", ",",
-            " ",
-            "",
-        ],
-        keep_separator=True,
-    )
+    separators = [
+        "\n\n",
+        "\n",
+        "。", "！", "？",
+        ".", "!", "?",
+        "；", ";",
+        "，", ",",
+        " ",
+        "",
+    ]
+    try:
+        return RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+            encoding_name=tokenizer_name,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=separators,
+            keep_separator=True,
+        )
+    except Exception:
+        return RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            length_function=_approx_token_length,
+            separators=separators,
+            keep_separator=True,
+        )
 
 
 def _build_token_length(tokenizer_name: str):
-    encoder = tiktoken.get_encoding(tokenizer_name)
+    try:
+        encoder = tiktoken.get_encoding(tokenizer_name)
+    except Exception:
+        return _approx_token_length
 
     def _token_length(text: str) -> int:
         if not text:
@@ -469,6 +482,12 @@ def _build_token_length(tokenizer_name: str):
         return len(encoder.encode(text))
 
     return _token_length
+
+
+def _approx_token_length(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, len(text))
 
 
 def _stable_hash(text: str, length: int = 12) -> str:

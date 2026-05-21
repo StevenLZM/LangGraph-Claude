@@ -210,6 +210,22 @@ class TestVectorStore:
         assert "total_chunks" in stats
         assert stats["total_chunks"] == 42
 
+    def test_get_collection_stats_handles_vectorstore_startup_failure(self, monkeypatch):
+        """向量库启动失败时统计信息不应让 Streamlit 页面崩溃"""
+        import rag.vectorstore as vectorstore
+
+        def fail_get_vectorstore():
+            raise RuntimeError("Open local milvus failed")
+
+        monkeypatch.setattr(vectorstore, "get_vectorstore", fail_get_vectorstore)
+
+        stats = vectorstore.get_collection_stats()
+
+        assert stats["total_children"] == 0
+        assert stats["total_parents"] == 0
+        assert stats["backend"] == "milvus-lite"
+        assert "Open local milvus failed" in stats["error"]
+
     def test_get_vectorstore_initializes_milvus_with_lite_uri(self, monkeypatch):
         """get_vectorstore 应使用 Milvus Lite URI 初始化 LangChain Milvus"""
         import rag.vectorstore as vectorstore
@@ -423,6 +439,7 @@ class TestConfig:
         import importlib
         import config as cfg
 
+        monkeypatch.delenv("RAG_MILVUS_URI", raising=False)
         monkeypatch.setenv("VECTORSTORE_DIR", "data/custom_vectors")
         monkeypatch.delenv("MILVUS_URI", raising=False)
         reloaded = importlib.reload(cfg)
@@ -434,10 +451,28 @@ class TestConfig:
             importlib.reload(cfg)
 
     def test_milvus_config_resolves_relative_uri_against_project_dir(self, monkeypatch):
-        """相对 MILVUS_URI 应固定解析到 01_RAG 项目目录下"""
+        """相对 RAG_MILVUS_URI 应固定解析到 01_RAG 项目目录下"""
         import importlib
         import config as cfg
 
+        monkeypatch.setenv("RAG_MILVUS_URI", "./data/custom_milvus.db")
+        monkeypatch.delenv("MILVUS_URI", raising=False)
+        reloaded = importlib.reload(cfg)
+
+        try:
+            assert reloaded.MilvusConfig.URI == str(
+                reloaded.BASE_DIR / "data/custom_milvus.db"
+            )
+        finally:
+            monkeypatch.delenv("RAG_MILVUS_URI", raising=False)
+            importlib.reload(cfg)
+
+    def test_legacy_milvus_uri_is_consumed_and_removed_from_environment(self, monkeypatch):
+        """旧 MILVUS_URI 可兼容读取，但不能继续暴露给 pymilvus 自动解析。"""
+        import importlib
+        import config as cfg
+
+        monkeypatch.delenv("RAG_MILVUS_URI", raising=False)
         monkeypatch.setenv("MILVUS_URI", "./data/vectorstore/milvus.db")
         reloaded = importlib.reload(cfg)
 
@@ -445,6 +480,7 @@ class TestConfig:
             assert reloaded.MilvusConfig.URI == str(
                 reloaded.BASE_DIR / "data/vectorstore/milvus.db"
             )
+            assert "MILVUS_URI" not in os.environ
         finally:
             monkeypatch.delenv("MILVUS_URI", raising=False)
             importlib.reload(cfg)

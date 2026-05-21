@@ -9,6 +9,11 @@ import sys
 import os
 from pathlib import Path
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
+
 # 确保项目根目录在 sys.path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -23,10 +28,11 @@ st.set_page_config(
 )
 
 # ── 延迟导入（避免启动时崩溃） ───────────────────────────────────
-from config import llm_config, rag_config, path_config
+from config import llm_config, rag_config, path_config, milvus_config
 from mcp_local.filesystem_client import get_filesystem_client
 from rag.loader import load_pdf, get_doc_metadata
 from rag.chunker import chunk_documents
+from rag.docstore import get_parent_docstore
 from rag.vectorstore import (
     get_vectorstore, add_documents, delete_document,
     list_documents, get_collection_stats
@@ -144,16 +150,99 @@ def get_or_build_chain():
         except EnvironmentError as e:
             st.error(f"❌ {e}")
             return None, None
+        except Exception as e:
+            st.error(
+                "❌ RAG Chain 初始化失败。请确认没有其他 01_RAG 进程占用 "
+                f"Milvus Lite，并检查向量库配置。详情：{e}"
+            )
+            return None, None
     return st.session_state.chain, st.session_state.chain_get_history
 
 
 def refresh_indexed_docs():
     """刷新已索引文档列表"""
+    vs = st.session_state.get("vectorstore")
     try:
-        vs = get_vectorstore()
-        st.session_state.indexed_docs = list_documents(vs)
+        if vs is not None:
+            st.session_state.indexed_docs = list_documents(vs)
+        else:
+            st.session_state.indexed_docs = _list_documents_from_docstore()
     except Exception:
         st.session_state.indexed_docs = []
+
+
+def _safe_collection_stats() -> dict:
+    """Return vectorstore stats without letting startup errors crash the UI."""
+    vs = st.session_state.get("vectorstore")
+    lock_error = _detect_milvus_lock() if vs is None else ""
+    try:
+        if vs is not None:
+            return get_collection_stats(vs)
+
+        docstore = get_parent_docstore()
+        parent_count = docstore.count()
+        stats = {
+            "total_children": 0,
+            "total_parents": parent_count,
+            "total_chunks": 0,
+            "backend": "milvus-lite",
+        }
+        if lock_error:
+            stats["error"] = lock_error
+        return stats
+    except Exception as exc:
+        return {
+            "total_children": 0,
+            "total_parents": 0,
+            "total_chunks": 0,
+            "backend": "milvus-lite",
+            "error": str(exc),
+        }
+
+
+def _detect_milvus_lock() -> str:
+    """Detect a held Milvus Lite lock without starting the Milvus server."""
+    if fcntl is None:
+        return ""
+
+    uri = getattr(milvus_config, "URI", "")
+    if not uri or "://" in uri:
+        return ""
+
+    lock_path = Path(uri) / "LOCK"
+    if not lock_path.exists():
+        return ""
+
+    try:
+        with lock_path.open("r") as lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return f"Milvus Lite 数据库被其他进程占用：{uri}"
+            finally:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+    except OSError:
+        return ""
+    return ""
+
+
+def _list_documents_from_docstore() -> list[dict]:
+    """List indexed documents without opening Milvus during initial UI render."""
+    docstore = get_parent_docstore()
+    docs = []
+    for doc in docstore.list_documents():
+        parent_count = doc.get("parent_count", 0)
+        docs.append({
+            **doc,
+            "total_pages": doc.get("total_pages", 0),
+            "total_chunks": parent_count,
+            "child_count": doc.get("child_count", 0),
+            "parent_count": parent_count,
+        })
+    return docs
 
 
 # ════════════════════════════════════════════════════════════════
@@ -240,11 +329,17 @@ def render_sidebar():
         # ── 统计信息 ──────────────────────────────────────────────
         st.divider()
         st.caption("📊 系统状态")
-        stats = get_collection_stats()
+        stats = _safe_collection_stats()
         st.caption(
             f"索引: {stats.get('total_children', 0)} 个子块 / "
             f"{stats.get('total_parents', 0)} 个父块"
         )
+        if stats.get("error"):
+            st.warning(
+                "向量库暂不可用。请关闭其他 01_RAG Streamlit 实例后重试；"
+                f"详情：{stats['error']}",
+                icon="⚠️",
+            )
         st.caption(f"对话轮次: {len(st.session_state.chat_history)}")
         st.caption(f"会话 ID: {st.session_state.session_id}")
 
@@ -253,6 +348,7 @@ def _handle_document_upload(uploaded_files):
     """处理文档上传与索引"""
     fs_client = get_filesystem_client(str(path_config.DOCUMENTS_DIR))
     vs = get_vectorstore()
+    st.session_state.vectorstore = vs
 
     progress = st.sidebar.progress(0, text="初始化中...")
     total = len(uploaded_files)
@@ -298,6 +394,7 @@ def _handle_document_upload(uploaded_files):
 def _handle_document_delete(doc_id: str, source: str):
     """处理文档删除"""
     vs = get_vectorstore()
+    st.session_state.vectorstore = vs
     deleted = delete_document(doc_id, vs)
     if deleted > 0:
         # 同时删除原始文件

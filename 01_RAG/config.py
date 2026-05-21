@@ -15,6 +15,22 @@ from dotenv import load_dotenv
 # 加载 .env 文件（优先级低于系统环境变量）
 load_dotenv()
 
+
+def _consume_legacy_milvus_uri() -> str:
+    """
+    Backwards-compatible read for the old MILVUS_URI setting.
+
+    pymilvus also reads MILVUS_URI during import and expects a remote HTTP(S)
+    address there. This project uses local Milvus Lite file paths, so remove the
+    legacy variable after reading it and keep the project-specific value in
+    config only.
+    """
+    legacy_uri = os.environ.pop("MILVUS_URI", "")
+    return os.getenv("RAG_MILVUS_URI", legacy_uri)
+
+
+_RAW_MILVUS_URI = _consume_legacy_milvus_uri()
+
 # ── 项目根目录 ────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
 
@@ -135,7 +151,7 @@ class PathConfig:
 
 
 def _resolve_milvus_uri() -> str:
-    raw_uri = os.getenv("MILVUS_URI")
+    raw_uri = _RAW_MILVUS_URI
     if not raw_uri:
         return str(PathConfig.VECTORSTORE_DIR / "milvus.db")
 
