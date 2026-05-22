@@ -92,6 +92,35 @@ async def _list_tools(config: MCPServerConfig) -> list[Tool]:
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.list_tools()
+            """
+            e.g. result 
+            meta=None 
+            nextCursor=None 
+            tools=[
+                Tool(
+                    name='weather_query', 
+                    title=None, 
+                    description='查询内部天气 MCP 数据，适合回答城市天气和户外活动建议。', 
+                    inputSchema={
+                        'type': 'object', 
+                        'properties': {
+                            'city': {
+                                'type': 'string', 
+                                'description': '城市名称，支持中文，如北京、上海'
+                            }, 
+                            'units': {
+                                'type': 'string', 
+                                'enum': ['metric', 'imperial'], 
+                                'default': 'metric', 
+                                'description': '温度单位，metric=摄氏度，imperial=华氏度'
+                            }
+                        }, 
+                        'required': ['city']
+                    }, 
+                    outputSchema=None, icons=None, annotations=None, meta=None, execution=None
+                )
+            ]
+            """
             return list(result.tools)
 
 
@@ -168,6 +197,15 @@ def load_mcp_tools(
 ) -> list[StructuredTool]:
     tools: list[StructuredTool] = []
     used_names = set(existing_names or set())
+    """ config例子
+        MCPServerConfig(
+            name="weather",
+            command="python",
+            args=["-m", "mcp_servers.weather_server"],
+            cwd=Path("/project/02_REACT_AGENT"),  # 从 .mcp.json 所在目录推断
+            description="内部天气 MCP Server，使用本地模拟天气数据",
+        )
+    """
     for config in load_mcp_server_configs(config_path):
         try:
             # _run_async在同步上下文中执行异步协程

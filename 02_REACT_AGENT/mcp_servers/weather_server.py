@@ -39,6 +39,7 @@ def build_app():
     # 1、告诉Client这个Server提供哪些工具及其参数格式
     @app.list_tools()
     async def _list_tools() -> list[Tool]:  # type: ignore[valid-type]
+        print("weather server call list_tool")
         return [
             Tool(
                 name="weather_query",

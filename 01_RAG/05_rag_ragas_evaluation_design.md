@@ -4,6 +4,36 @@
 > 当前状态：RAGAS 评估生成和上下文质量，传统 IR 指标评估检索排序
 
 ---
+# 传统IR
+## Recall@K
+定义： Top-K 中命中了多少个相关文档 / 总共有多少个相关文档
+
+与"相关文档总数"做对比，关注覆盖度
+例：金标有 2 个文档（manual.pdf, faq.pdf），Top-5 命中 1 个 → Recall@5 = 1/2 = 0.5
+诊断作用： 如果这个值低，说明 chunk 分割、检索策略或 query rewrite 有问题，生成层很难补救
+## MRR (Mean Reciprocal Rank)
+定义： 第一个相关文档在排序中位置倒数
+
+只关注第一个命中结果排在第几位
+公式：MRR = 1 / rank_of_first_hit（有命中）或 0（无命中）
+例：检索返回 [other.pdf, manual.pdf, ...]，第一个相关文档 manual.pdf 排在第 2 位 → MRR = 1/2 = 0.5
+诊断作用： 如果 MRR 低但 Hit@K 高，说明召回没问题但"排序"出问题了，需要检查 RRF 权重、Cross-Encoder rerank、时间排序
+## Hit@K
+定义： Top-K 中是否至少命中一个相关文档
+
+是一个布尔指标（0 或 1），仅关心"有没有"，不关心排第几
+例：Top-5 至少命中 1 个 → Hit@5 = 1.0
+诊断作用： 最简单的"死线"检查。如果 Hit@K 都低，说明召回链路出了大问题
+
+# RAGAS
+| 指标 | 评估维度 | 输入依赖 | 含义 | 
+|------|------|------|------|
+| context_precision	| 上下文质量	| question, retrieved_contexts, reference	| 检索到的上下文中，有多少内容是对回答有用的（去噪） |
+| context_recall	| 上下文质量	| question, retrieved_contexts, reference	| reference 中的事实，被检索上下文覆盖了多少 |
+| faithfulness	| 端到端	| question, retrieved_contexts, response	| 回答中的每个陈述，是否都能从检索上下文中找到支持 |
+| answer_correctness	| 端到端	| question, response, reference	| 最终答案相对 reference 的正确程度 |
+| answer_relevancy	| 语义	| question, response	| 回答是否贴合用户问题 |
+| semantic_similarity | 语义 |	response, reference	| 回答与 reference 的语义接近程度（Embedding 余弦）
 
 ## 1. 设计目标
 

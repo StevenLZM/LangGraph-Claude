@@ -35,6 +35,47 @@ def build_react_graph(llm: Any | None = None, tools: list[Any] | None = None, ma
         if not messages or not isinstance(messages[0], SystemMessage):
             messages = [SystemMessage(content=system_prompt), *messages]
         response = bound_llm.invoke(messages)
+        print(f"agentnode llm 输出:{response}")
+        """
+        content='' 
+        additional_kwargs={'refusal': None} 
+        response_metadata={
+            'token_usage': {
+                'completion_tokens': 94, 
+                'prompt_tokens': 989, 
+                'total_tokens': 1083, 
+                'completion_tokens_details': None, 
+                'prompt_tokens_details': {
+                    'audio_tokens': None, 'cached_tokens': 896
+                }, 
+                'prompt_cache_hit_tokens': 896, 
+                'prompt_cache_miss_tokens': 93
+            }, 
+            'model_provider': 'openai', 
+            'model_name': 'deepseek-v4-pro', 
+            'system_fingerprint': 'fp_9954b31ca7_prod0820_fp8_kvcache_20260402', 
+            'id': '275d230e-5331-4c3c-b05e-6f9088475ed5', 
+            'finish_reason': 'tool_calls', 
+            'logprobs': None
+        } 
+        id='lc_run--019e484d-2b20-7160-b262-72f5b6cf02df-0' 
+        tool_calls=[
+            {
+                'name': 'get_datetime', 
+                'args': {'timezone': 'Asia/Shanghai'}, 
+                'id': 'call_00_eZFLxC7wIcH5E9kqwQuU7123', 
+                'type': 'tool_call'
+            }, 
+            {
+                'name': 'weather_query', 
+                'args': {'city': '广州', 'units': 'metric'}, 
+                'id': 'call_01_qMQHEhvrJol8wfbYI16e2281', 
+                'type': 'tool_call'
+            }
+        ] 
+        invalid_tool_calls=[] 
+        usage_metadata={'input_tokens': 989, 'output_tokens': 94, 'total_tokens': 1083, 'input_token_details': {'cache_read': 896}, 'output_token_details': {}}
+        """
         return {
             "messages": [response],
             "iteration_count": int(state.get("iteration_count", 0)) + 1,
