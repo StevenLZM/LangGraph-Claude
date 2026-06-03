@@ -21,6 +21,8 @@ def context_loader_node(state: CustomerServiceState) -> dict:
         "user_profile": state.get("user_profile", {}),
         "user_memories": state.get("user_memories", []),
         "order_context": state.get("order_context"),
+        "choices": state.get("choices"),
+        "pending_choice": state.get("pending_choice"),
         "needs_human_transfer": state.get("needs_human_transfer", False),
         "transfer_reason": state.get("transfer_reason", ""),
         "token_used": state.get("token_used", 0),
@@ -40,6 +42,7 @@ def agent_node(state: CustomerServiceState) -> dict:
         decision = handle_customer_message(
             str(latest_human.content),
             user_memories=list(state.get("user_memories") or []),
+            pending_choice=state.get("pending_choice"),
         )
         return {
             "messages": [
@@ -49,6 +52,8 @@ def agent_node(state: CustomerServiceState) -> dict:
                 )
             ],
             "order_context": decision.order_context,
+            "choices": decision.choices,
+            "pending_choice": decision.pending_choice,
             "needs_human_transfer": decision.needs_human_transfer,
             "transfer_reason": decision.transfer_reason,
             "quality_score": decision.quality_score,

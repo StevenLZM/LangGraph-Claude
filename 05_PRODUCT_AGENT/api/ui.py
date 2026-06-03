@@ -77,6 +77,8 @@ CUSTOMER_SERVICE_UI = """<!doctype html>
     .message { max-width: 78%; padding: 11px 12px; border-radius: 8px; line-height: 1.5; white-space: pre-wrap; }
     .user { justify-self: end; background: var(--accent-2); color: #fff; }
     .assistant { justify-self: start; background: var(--soft); color: var(--text); }
+    .choices { justify-self: start; display: flex; flex-wrap: wrap; gap: 8px; max-width: 78%; }
+    .choice-button { border-color: var(--accent); color: var(--accent); background: #f8fffc; }
     .composer { display: grid; grid-template-columns: 1fr 96px; gap: 10px; padding: 14px; border-top: 1px solid var(--line); }
     .side-title { margin: 0 0 12px; font-size: 14px; font-weight: 700; }
     .kv { display: grid; gap: 9px; font-size: 13px; }
@@ -98,6 +100,7 @@ CUSTOMER_SERVICE_UI = """<!doctype html>
       main { grid-template-columns: 1fr; }
       aside { min-height: auto; }
       .message { max-width: 92%; }
+      .choices { max-width: 92%; }
     }
   </style>
 </head>
@@ -170,6 +173,23 @@ CUSTOMER_SERVICE_UI = """<!doctype html>
       messages.scrollTop = messages.scrollHeight;
     }
 
+    function addChoices(choices) {
+      if (!choices || !Array.isArray(choices.options) || choices.options.length === 0) return;
+      const group = document.createElement("div");
+      group.className = "choices";
+      choices.options.forEach((option) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "choice-button";
+        button.textContent = option.label || option.value || option.id;
+        button.title = option.description || "";
+        button.addEventListener("click", () => sendMessage(option.label || option.value || option.id));
+        group.appendChild(button);
+      });
+      messages.appendChild(group);
+      messages.scrollTop = messages.scrollHeight;
+    }
+
     function newRequestId() {
       if (window.crypto && typeof window.crypto.randomUUID === "function") {
         return window.crypto.randomUUID();
@@ -199,6 +219,7 @@ CUSTOMER_SERVICE_UI = """<!doctype html>
         return;
       }
       addMessage(payload.answer || "请求失败", "assistant");
+      addChoices(payload.choices);
       document.querySelector("#quality").textContent = payload.quality_score ?? "-";
       document.querySelector("#tokens").textContent = payload.token_used ?? "-";
       document.querySelector("#degraded").textContent = payload.degraded ? "是" : "否";

@@ -18,6 +18,8 @@ class CustomerServiceState(TypedDict, total=False):
     user_memories: list[str]
     memory_summary: str
     order_context: dict[str, Any] | None
+    choices: dict[str, Any] | None
+    pending_choice: dict[str, Any] | None
 
     needs_human_transfer: bool
     transfer_reason: str
