@@ -1,4 +1,0 @@
-interface:
-  display_name: "Calculator"
-  short_description: "Run exact safe arithmetic checks"
-  default_prompt: "Use $calculator to evaluate this arithmetic expression precisely."

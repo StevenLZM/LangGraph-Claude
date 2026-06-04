@@ -95,16 +95,28 @@ def get_tools():
     return [*builtin_tools, *load_mcp_tools(existing_names=builtin_names)]
 ```
 
-内置工具用 LangChain 的 `@tool` 包装，并用 Pydantic schema 定义参数。精确数学计算原本是运行时 `calculator` tool，现在已经迁移为项目级 Codex Skill：
+内置工具用 LangChain 的 `@tool` 包装，并用 Pydantic schema 定义参数。例如计算器：
 
-```bash
-python .codex/skills/calculator/scripts/calculate.py "1234 * 5678"
+```python
+class CalcInput(BaseModel):
+    expression: str = Field(description="数学表达式，如 1234 * 5678 或 sqrt(144)")
+
+
+@tool("calculator", args_schema=CalcInput)
+def calculator(expression: str) -> str:
+    """执行精确数学计算。数学问题必须优先使用此工具。"""
+    try:
+        parsed = ast.parse(expression, mode="eval")
+        result = _safe_eval(parsed)
+    except Exception as exc:
+        return f"计算错误: {exc}"
+    return f"计算结果: {expression} = {result}"
 ```
 
 为什么不用 `eval`：
 
 - `eval("__import__('os').system('rm -rf /')")` 这类表达式有安全风险。
-- calculator skill 用 `ast.parse` 解析语法树，再只允许数字、四则运算、幂、取模和少量数学函数。
+- 当前实现用 `ast.parse` 解析语法树，再只允许数字、四则运算、幂、取模和少量数学函数。
 - 面试中可以强调：工具执行必须有输入约束和安全边界，不能直接信任 LLM 生成内容。
 
 搜索工具的降级设计：
@@ -555,7 +567,7 @@ assert state["iteration_count"] == 2
 
 结合本项目：
 
-> 运行时工具依赖 schema 告诉模型如何生成 tool call；`weather_query` 的 `city` 参数来自 MCP server 返回的 `inputSchema`。精确数学计算改由项目级 calculator skill 在 Codex 工作流中执行。
+> 运行时工具依赖 schema 告诉模型如何生成 tool call；`calculator` 的 `CalcInput` 告诉模型 `expression` 应该是数学表达式；`weather_query` 的 `city` 参数来自 MCP server 返回的 `inputSchema`。
 
 ### Q4：MCP 在项目中解决什么问题？
 
@@ -593,7 +605,7 @@ assert state["iteration_count"] == 2
 本项目已有措施：
 
 - `python_executor` 禁止导入、文件、网络和动态执行。
-- 项目级 `calculator` skill 使用 AST 白名单。
+- `calculator` 使用 AST 白名单。
 - 工具缺配置时降级，不崩溃。
 
 生产改造：
@@ -631,7 +643,7 @@ assert state["iteration_count"] == 2
 
 ## 13. 30 秒项目陈述
 
-> 我做了一个基于 LangGraph 的工具调用 Agent 项目，支持 ReAct 和 Plan-and-Execute 两种模式。LLM 使用 DeepSeek 的 OpenAI-compatible API，工具层用 LangChain `@tool` 和 Pydantic schema 封装，包括搜索、代码执行、天气、日期和 Wikipedia。精确数学计算迁移为项目级 Codex Skill，天气工具通过内部 MCP server 暴露，方便演示标准化工具协议。ReAct 部分是 `agent -> tools -> agent` 循环，Plan-and-Execute 部分先生成结构化计划，再逐步执行，每一步复用 ReAct。UI 用 Streamlit 展示工具调用和推理链，测试使用 fake LLM 离线验证图编排，避免依赖真实模型的不稳定输出。
+> 我做了一个基于 LangGraph 的工具调用 Agent 项目，支持 ReAct 和 Plan-and-Execute 两种模式。LLM 使用 DeepSeek 的 OpenAI-compatible API，工具层用 LangChain `@tool` 和 Pydantic schema 封装，包括搜索、计算器、代码执行、天气、日期和 Wikipedia。天气工具通过内部 MCP server 暴露，方便演示标准化工具协议。ReAct 部分是 `agent -> tools -> agent` 循环，Plan-and-Execute 部分先生成结构化计划，再逐步执行，每一步复用 ReAct。UI 用 Streamlit 展示工具调用和推理链，测试使用 fake LLM 离线验证图编排，避免依赖真实模型的不稳定输出。
 
 ---
 

@@ -4,7 +4,19 @@ import sys
 import types
 
 from config.settings import settings
-from tools.builtin import get_builtin_tools, get_datetime, python_executor, web_search, wikipedia_search
+from tools.builtin import calculator, get_builtin_tools, get_datetime, python_executor, web_search, wikipedia_search
+
+
+def test_calculator_evaluates_numeric_expression():
+    result = calculator.invoke({"expression": "1234 * 5678"})
+
+    assert "7006652" in result
+
+
+def test_calculator_rejects_non_numeric_expression():
+    result = calculator.invoke({"expression": "__import__('os').system('ls')"})
+
+    assert "计算错误" in result
 
 
 def test_python_executor_runs_simple_code():
@@ -21,10 +33,10 @@ def test_python_executor_blocks_file_access():
     assert "open(" in result
 
 
-def test_builtin_tools_do_not_include_project_calculator_skill():
+def test_builtin_tools_include_calculator():
     names = {tool.name for tool in get_builtin_tools()}
 
-    assert "calculator" not in names
+    assert "calculator" in names
 
 
 def test_builtin_tools_do_not_hardcode_mcp_weather_tool():

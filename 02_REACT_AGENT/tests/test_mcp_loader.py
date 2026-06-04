@@ -37,7 +37,7 @@ def test_default_registry_combines_builtin_and_dynamic_mcp_tools():
     tools = get_tools()
 
     names = _tool_names(tools)
-    assert "calculator" not in names
+    assert "calculator" in names
     assert "weather_query" in names
 
 
@@ -47,7 +47,7 @@ def test_agent_prompts_render_current_tool_registry():
     react_prompt = build_react_system_prompt(tools)
     plan_prompt = build_plan_system_prompt(tools)
 
-    assert "- calculator:" not in react_prompt
+    assert "- calculator:" in react_prompt
     assert "- weather_query:" in react_prompt
     assert "当前可用工具名：" in plan_prompt
     assert "weather_query" in plan_prompt
