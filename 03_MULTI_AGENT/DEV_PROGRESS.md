@@ -34,7 +34,7 @@ PYTHONPATH=. python -m scripts.run_local "研究问题"
 - 建立全目录结构（app/graph/agents/tools/prompts/config/tests 等 ~40 文件）
 - State / SubQuestion / Evidence / ResearchPlan / ReflectionResult / Citation 契约
 - safe_node 装饰器、ToolRegistry、SearchTool Protocol、merge_evidence reducer
-- 7 个 agent 节点空桩 + 主图装配（planner → supervisor → fan-out → 4 researcher → reflector → writer）
+- 7 个 agent 节点空桩 + 主图装配（planner → supervisor → fan-out → 4 researcher → reflector → writer）；后续已将 4 researcher 封装进 `research_subgraph`
 - 空 FastAPI + `pytest` 通过
 
 ### M2 HITL + 真实 LLM（已完成）
@@ -186,7 +186,8 @@ PYTHONPATH=. python -m scripts.run_local "研究问题"
 │   ├── state.py                     # ResearchState + merge_evidence reducer
 │   ├── workflow.py                  # build_graph（纯 async）
 │   ├── router.py                    # supervisor_route + reflector_route
-│   └── nodes_parallel.py            # fanout 导出（实际逻辑在 router.supervisor_route 里返 list[Send]）
+│   ├── research_subgraph.py         # Researcher 子图；内部 dispatcher 返回 list[Send]
+│   └── nodes_parallel.py            # fanout 旧导出名兼容层
 │
 ├── agents/
 │   ├── schemas.py                   # Pydantic 契约
@@ -257,7 +258,7 @@ PYTHONPATH=. pytest tests/ -v     # 14 passed
 ```bash
 PYTHONPATH=. python -m scripts.run_local "对比 LangGraph 与 AutoGen 的核心抽象差异"
 ```
-行为：Planner LLM 拆 5 个子问题 → 自动接受 → 并行 4 researchers → Reflector → Writer 3000+ 字 Markdown → 落盘 `data/reports/`
+行为：Planner LLM 拆 5 个子问题 → 自动接受 → `research_subgraph` 内部并行 4 researchers → Reflector → Writer 3000+ 字 Markdown → 落盘 `data/reports/`
 
 ### FastAPI
 ```bash

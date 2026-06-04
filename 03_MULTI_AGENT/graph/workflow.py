@@ -11,12 +11,9 @@ from langgraph.graph import END, START, StateGraph
 
 from agents.planner import planner_node
 from agents.reflector import reflector_node
-from agents.researcher_academic import academic_researcher_node
-from agents.researcher_code import code_researcher_node
-from agents.researcher_kb import kb_researcher_node
-from agents.researcher_web import web_researcher_node
 from agents.supervisor import supervisor_node
 from agents.writer import writer_node
+from graph.research_subgraph import build_research_subgraph
 from config.tracing import tagged_node
 from graph.router import reflector_route, supervisor_route
 from graph.state import ResearchState
@@ -28,10 +25,7 @@ def build_graph(checkpointer: Optional[object] = None):
 
     wf.add_node("planner", tagged_node("planner", planner_node)) # 任务拆解
     wf.add_node("supervisor", tagged_node("supervisor", supervisor_node)) # 决策下一步
-    wf.add_node("web_researcher", tagged_node("web_researcher", web_researcher_node))
-    wf.add_node("academic_researcher", tagged_node("academic_researcher", academic_researcher_node))
-    wf.add_node("code_researcher", tagged_node("code_researcher", code_researcher_node))
-    wf.add_node("kb_researcher", tagged_node("kb_researcher", kb_researcher_node))
+    wf.add_node("research_subgraph", build_research_subgraph())
     wf.add_node("reflector", tagged_node("reflector", reflector_node)) # 质量评估
     wf.add_node("writer", tagged_node("writer", writer_node)) # 输出结果
 
@@ -46,15 +40,11 @@ def build_graph(checkpointer: Optional[object] = None):
         {
             "planner": "planner",
             "writer": "writer",
-            "web_researcher": "web_researcher",
-            "academic_researcher": "academic_researcher",
-            "code_researcher": "code_researcher",
-            "kb_researcher": "kb_researcher",
+            "research_subgraph": "research_subgraph",
         },
     )
 
-    for r in ("web_researcher", "academic_researcher", "code_researcher", "kb_researcher"):
-        wf.add_edge(r, "reflector")
+    wf.add_edge("research_subgraph", "reflector")
 
     wf.add_conditional_edges(
         "reflector",

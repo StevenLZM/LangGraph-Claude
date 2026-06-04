@@ -2,7 +2,7 @@
 
 > 配套 PRD：[`PROJECT_SCENARIO.md`](./PROJECT_SCENARIO.md)
 > 文档定位：架构级设计 — 流程图 + 接口契约 + 关键签名，不堆砌完整实现代码
-> 版本：v1.0 · 2026-04-18
+> 版本：v1.1 · 2026-06-04
 
 ---
 
@@ -34,7 +34,6 @@ flowchart TB
     subgraph GRAPH["编排层 (LangGraph)"]
         SUP[Supervisor 路由]
         PLAN[Planner + interrupt]
-        FANOUT[Send fan-out]
         SUB[Researcher 子图<br/>web / academic / code / kb]
         REF[Reflector 反思循环]
         WR[Writer]
@@ -87,15 +86,17 @@ stateDiagram-v2
     [*] --> Planner
     Planner --> InterruptPoint: interrupt({"plan": ...})
     InterruptPoint --> Supervisor: Command(resume={"plan": modified})
-    Supervisor --> FanOut: 计划已确认
-    FanOut --> WebRsr
-    FanOut --> AcademicRsr
-    FanOut --> CodeRsr
-    FanOut --> KBRsr
-    WebRsr --> Reflector
-    AcademicRsr --> Reflector
-    CodeRsr --> Reflector
-    KBRsr --> Reflector
+    Supervisor --> ResearchSubgraph: 计划已确认 / need_more_research
+    ResearchSubgraph --> ResearchDispatcher
+    ResearchDispatcher --> WebRsr: Send
+    ResearchDispatcher --> AcademicRsr: Send
+    ResearchDispatcher --> CodeRsr: Send
+    ResearchDispatcher --> KBRsr: Send
+    WebRsr --> ResearchSubgraph
+    AcademicRsr --> ResearchSubgraph
+    CodeRsr --> ResearchSubgraph
+    KBRsr --> ResearchSubgraph
+    ResearchSubgraph --> Reflector
     Reflector --> Supervisor: need_more_research
     Reflector --> Writer: sufficient | force_complete
     Writer --> [*]
@@ -106,15 +107,17 @@ stateDiagram-v2
 | 节点 | 读取 | 写入 | 副作用 |
 |---|---|---|---|
 | `planner` | `research_query`, `audience` | `plan`, `messages` | 触发 `interrupt` |
-| `supervisor` | `plan_confirmed`, `evidence`, `revision_count` | `next_node`, `iteration` | — |
-| `web_researcher` | `plan` (本路 SubQuestion) | `evidence` (reducer add) | Tavily/Brave HTTP |
+| `supervisor` | `plan_confirmed`, `evidence`, `revision_count` | `current_node`, `iteration` | — |
+| `research_subgraph` | `plan`, `research_query` | `evidence`, `messages` | 子图内部 Send fan-out / fan-in |
+| `research_dispatcher` | `plan`, `research_query` | — | 生成 `list[Send]` |
+| `web_researcher` | `sub_question` payload | `evidence` (merge_evidence reducer) | Tavily/Brave HTTP |
 | `academic_researcher` | 同上 | `evidence` | ArXiv HTTP |
 | `code_researcher` | 同上 | `evidence` | GitHub HTTP |
 | `kb_researcher` | 同上 | `evidence` | Chroma + BM25 检索 |
 | `reflector` | `evidence`, `plan` | `coverage_by_subq`, `missing_aspects`, `revision_count` | — |
 | `writer` | `evidence`, `plan`, `research_query` | `final_report`, `citations`, `messages` | 写文件 `data/reports/` |
 
-> 字段并发安全：4 个 Researcher 并行时只写 `evidence`（reducer = `operator.add`），不会冲突。
+> 字段并发安全：4 个 Researcher 并行时只写 `evidence` 和 `messages`。`evidence` 由 `merge_evidence` 按 URL 去重并按相关度排序，避免子图回写父图时重复累计。
 
 ### 3.3 路由表
 
@@ -122,9 +125,10 @@ stateDiagram-v2
 # graph/router.py
 def supervisor_route(state: ResearchState) -> str:
     if not state.get("plan_confirmed"): return "planner"
-    if state["iteration"] == 0:        return "fanout_researchers"
     if state.get("revision_count", 0) >= 3: return "writer"  # 兜底
-    if state.get("next_node") == "reflector": return "reflector"
+    plan = state.get("plan") or []
+    if (plan and not state.get("evidence")) or state.get("next_action") == "need_more_research":
+        return "research_subgraph" if build_research_sends(state) else "writer"
     return "writer"
 
 def reflector_route(state: ResearchState) -> str:
@@ -152,7 +156,7 @@ sequenceDiagram
     UI->>API: POST /research/{tid}/resume {plan_modified}
     API->>G: ainvoke(Command(resume={"plan": modified}), config={tid})
     G->>CKPT: 加载 checkpoint
-    G->>G: supervisor → fanout → ...
+    G->>G: supervisor → research_subgraph → Send fan-out → ...
     G-->>API: SSE 流式事件
 ```
 
@@ -163,29 +167,37 @@ sequenceDiagram
 ### 4.1 Send API 派发
 
 ```python
-# graph/nodes_parallel.py
-from langgraph.constants import Send
+# graph/research_subgraph.py
+from langgraph.types import Send
 
-def fanout_researchers(state: ResearchState) -> list[Send]:
+def build_research_sends(state: ResearchState) -> list[Send]:
     """每个 SubQuestion × 每个 recommended_source = 一个并行任务"""
     sends = []
     router = {"web": "web_researcher", "academic": "academic_researcher",
               "code": "code_researcher", "kb": "kb_researcher"}
-    for sq in state["plan"]:
+    for sq in state.get("plan") or []:
         if sq.status == "done": continue
-        for src in sq.recommended_sources:
-            sends.append(Send(router[src], {"sub_question": sq, **shared_ctx(state)}))
+        for src in sq.recommended_sources or ["web"]:
+            node = router.get(src)
+            if node:
+                sends.append(Send(node, {
+                    "sub_question": sq,
+                    "research_query": state.get("research_query", ""),
+                }))
     return sends
 ```
+
+`supervisor_route()` 只返回 `"research_subgraph"`；真正返回 `list[Send]` 的位置在子图的 `research_dispatch_route()`。这样主图保持 5 层 agent 流程，调研阶段的并行细节被封装在子图内。
 
 ### 4.2 Evidence 聚合契约
 
 ```python
 # state.py
-evidence: Annotated[list[Evidence], operator.add]   # reducer: 列表拼接
+evidence: Annotated[list[Evidence], merge_evidence]
 ```
 
-- 并行节点各自 `return {"evidence": [...]}`，LangGraph 自动调用 `add` 合并
+- 并行节点各自 `return {"evidence": [...]}`，LangGraph 自动调用 `merge_evidence` 合并
+- `merge_evidence` 按 `source_url` 去重，同 URL 保留 `relevance_score` 最高的一条，再按分数倒序
 - 不允许任何节点用"覆写"方式写 `evidence`，否则会丢失并行结果
 
 ### 4.3 失败容错
@@ -247,7 +259,8 @@ NodeFn = Callable[[ResearchState], Awaitable[dict[str, Any]]]
 | Agent | 输入字段 | 输出字段 | 工具 | 模型档位 |
 |---|---|---|---|---|
 | `planner_node` | `research_query`, `audience` | `plan`, `messages` | — | qwen-max |
-| `supervisor_node` | `plan_confirmed`, `evidence`, `revision_count` | `next_node`, `iteration` | — | qwen-turbo |
+| `supervisor_node` | `plan_confirmed`, `evidence`, `revision_count` | `current_node`, `iteration` | — | — |
+| `research_dispatcher_node` | `plan`, `research_query` | — | — | — |
 | `web_researcher_node` | `sub_question` | `evidence` | Tavily / Brave | qwen-turbo |
 | `academic_researcher_node` | `sub_question` | `evidence` | ArXiv | qwen-turbo |
 | `code_researcher_node` | `sub_question` | `evidence` | GitHub | qwen-turbo |
@@ -305,7 +318,7 @@ async def planner_node(state):
 - `next_action == "sufficient"` → writer
 - `next_action == "force_complete"` → writer
 - `revision_count >= 3` → writer（硬兜底，优先级最高）
-- 否则 → supervisor 触发新一轮 fanout
+- 否则 → supervisor 触发新一轮 `research_subgraph` fan-out
 
 ---
 
@@ -552,7 +565,7 @@ data: {"node":"...","message":"..."}
 ### 8.4 astream_events → SSE 转换契约
 
 ```python
-async for ev in graph.astream_events(input, config, version="v2"):
+async for ev in graph.astream_events(input, config, version="v2", subgraphs=True):
     match ev["event"]:
         case "on_chain_start":   yield sse("node_enter", {"node": ev["name"]})
         case "on_chain_end":     yield sse("node_exit",  {"node": ev["name"]})
@@ -561,6 +574,8 @@ async for ev in graph.astream_events(input, config, version="v2"):
 ```
 
 GraphInterrupt 由外层 try/except 捕获后单独发 `event: interrupt`。
+
+`subgraphs=True` 是当前实现的关键点：主图只暴露 `research_subgraph`，但 SSE/UI 仍需要看到子图内部 `web_researcher` / `academic_researcher` / `code_researcher` / `kb_researcher` 的进度事件。`app/sse.py` 会过滤 `research_subgraph` 这个结构外壳，只把业务 agent 节点映射给前端。
 
 ---
 
@@ -593,7 +608,7 @@ flowchart LR
     B --> C[reset_per_turn 清易变字段]
     C --> D[supervisor 决定: 仅深挖 or 触发补查]
     D -->|有覆盖| E[Writer 直接基于历史 evidence 输出]
-    D -->|缺证据| F[fanout 仅对缺失子问题]
+    D -->|缺证据| F[research_subgraph fanout]
     F --> Reflector --> Writer
 ```
 
@@ -708,7 +723,7 @@ M6 Compose 仅打包 `03_MULTI_AGENT` 的 API + UI。`01_RAG` 不挂入容器；
 |---|---|---|
 | **M1 骨架** | State + 主图空节点 + SqliteSaver | `pytest tests/test_graph_skeleton.py` 通过；图能从 entry 跑到 END |
 | **M2 HITL** | Planner + interrupt + 单 web_researcher + 串行 writer | CLI 跑通"提问→暂停→resume→出报告"完整链路 |
-| **M3 并行** | fanout + 4 个 Researcher + Reflector + 循环兜底 | `evidence` 来自 ≥ 2 源；`revision_count` 上限生效 |
+| **M3 并行** | `research_subgraph` + 4 个 Researcher + Reflector + 循环兜底 | `evidence` 来自 ≥ 2 源；`revision_count` 上限生效 |
 | **M4 报告** | Writer 引用脚注 + 文件归档 | 报告 Markdown ≥ 1500 字、≥ 5 条引用 |
 | **M5 接入** | FastAPI + SSE + Streamlit + 多轮追问 + 外部 MCP 接入 | 浏览器能完成 turn1→turn2 全流程；Brave MCP 兜底生效 |
 | **M5.5 内部 MCP** | `tools/internal_mcp/server.py` 暴露 `kb_search` / `list_reports` / `read_report` / `list_evidence` / `trigger_research` | Claude Desktop 配置后可直接调用本项目 KB 与历史报告；`USE_INTERNAL_MCP_FOR_KB` 切换走通 |

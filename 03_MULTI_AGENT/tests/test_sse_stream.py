@@ -22,6 +22,8 @@ def test_map_event_node_start_filters_internal_runs():
     }
     # 非业务节点（langgraph 内部 run）应忽略
     assert sse.map_event({"event": "on_chain_start", "name": "ChannelWrite", "data": {}}) is None
+    # research_subgraph 是结构边界，不作为前端进度条里的业务 agent 展示
+    assert sse.map_event({"event": "on_chain_start", "name": "research_subgraph", "data": {}}) is None
 
 
 def test_map_event_node_end_summary():
@@ -153,8 +155,9 @@ async def test_research_stream_endpoint_smoke(monkeypatch):
     from app import api, bootstrap
 
     class _FakeGraph:
-        def astream_events(self, payload, config, version):
+        def astream_events(self, payload, config, version, subgraphs=False):
             assert version == "v2"
+            assert subgraphs is True
 
             async def gen():
                 yield {"event": "on_chain_start", "name": "planner", "data": {}}

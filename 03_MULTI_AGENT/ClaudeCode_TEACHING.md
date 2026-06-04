@@ -8,10 +8,10 @@
 
 **定位**：生产级 AI 行业深度研究多 Agent 系统，面试作品集。
 
-**一句话介绍**：用户输入研究问题 → Planner LLM 拆解为 5 个子问题 → 人工确认计划（HITL）→ 4 个 Researcher 并行检索（web/academic/code/kb）→ Reflector 评估证据覆盖度决定是否补查 → Writer 输出带引用的 Markdown 报告。
+**一句话介绍**：用户输入研究问题 → Planner LLM 拆解为 5 个子问题 → 人工确认计划（HITL）→ Supervisor 进入 `research_subgraph` → 子图内部 4 个 Researcher 并行检索（web/academic/code/kb）→ Reflector 评估证据覆盖度决定是否补查 → Writer 输出带引用的 Markdown 报告。
 
 **三大亮点**（面试可讲）：
-1. **Supervisor 中心调度**的 7-Agent 架构（LangGraph StateGraph + Send API fan-out）
+1. **Supervisor + Research Subgraph** 的分层调度架构（LangGraph StateGraph + 子图内 Send API fan-out）
 2. **Human-in-the-Loop**：`interrupt()` + `Command(resume=...)` 支持用户编辑研究计划
 3. **MCP 双向集成**：作为 client 调外部 Brave Search，作为 server 暴露 5 个工具给 Claude Desktop
 
@@ -85,23 +85,29 @@ async def resume_research(thread_id, req):
 ```
 *关键点*：`Command(resume=...)` 会变成 `interrupt()` 的返回值；checkpointer 按 `thread_id` 自动加载暂停态。
 
-**Step 5 — Supervisor fan-out 派发 4 路 researcher**
+**Step 5 — Supervisor 进入 research_subgraph，子图 fan-out 派发 4 路 researcher**
 ```python
 # graph/router.py
 def supervisor_route(state):
     if not state.get("plan_confirmed"):  return "planner"
     if state.get("revision_count", 0) >= 3:  return "writer"    # 硬兜底
     if plan and not state.get("evidence") or state.get("next_action") == "need_more_research":
-        sends = []
-        for sq in state["plan"]:
-            if sq.status == "done": continue                     # 已答过的 sub-q 跳过
-            for src in sq.recommended_sources or ["web"]:
-                node = _SOURCE_TO_NODE[src]                      # web→web_researcher 等
-                sends.append(Send(node, {"sub_question": sq,
-                                          "research_query": state["research_query"]}))
-        return sends or "writer"
+        return "research_subgraph" if build_research_sends(state) else "writer"
 ```
-*关键点*：返回 `list[Send]` = 并行调度；payload 只喂给被派发的子节点，不污染主 state。
+```python
+# graph/research_subgraph.py
+def build_research_sends(state):
+    sends = []
+    for sq in state.get("plan") or []:
+        if sq.status == "done": continue
+        for src in sq.recommended_sources or ["web"]:
+            sends.append(Send(_SOURCE_TO_NODE[src], {
+                "sub_question": sq,
+                "research_query": state.get("research_query", ""),
+            }))
+    return sends
+```
+*关键点*：主图只路由到 `research_subgraph`；返回 `list[Send]` 的位置在子图 dispatcher。payload 只喂给被派发的子节点，不污染主 state。
 
 **Step 6 — 4 个 Researcher 并行取证 + merge_evidence 聚合**
 ```python
@@ -262,10 +268,7 @@ def merge_evidence(old, new) -> list[Evidence]:
 wf = StateGraph(ResearchState)
 wf.add_node("planner", planner_node)
 wf.add_node("supervisor", supervisor_node)
-wf.add_node("web_researcher", web_researcher_node)
-wf.add_node("academic_researcher", academic_researcher_node)
-wf.add_node("code_researcher", code_researcher_node)
-wf.add_node("kb_researcher", kb_researcher_node)
+wf.add_node("research_subgraph", build_research_subgraph())
 wf.add_node("reflector", reflector_node)
 wf.add_node("writer", writer_node)
 
@@ -274,12 +277,9 @@ wf.add_edge("planner", "supervisor")
 
 wf.add_conditional_edges("supervisor", supervisor_route,
     {"planner":"planner", "writer":"writer",
-     "web_researcher":"web_researcher", "academic_researcher":"academic_researcher",
-     "code_researcher":"code_researcher", "kb_researcher":"kb_researcher"})
+     "research_subgraph":"research_subgraph"})
 
-# 4→1 fan-in：所有 researcher 都收敛到 reflector
-for r in ("web_researcher", "academic_researcher", "code_researcher", "kb_researcher"):
-    wf.add_edge(r, "reflector")
+wf.add_edge("research_subgraph", "reflector")
 
 wf.add_conditional_edges("reflector", reflector_route,
     {"supervisor":"supervisor", "writer":"writer"})
@@ -289,15 +289,13 @@ return wf.compile(checkpointer=checkpointer)
 
 **关键点**：
 - `add_conditional_edges` 的第 3 个参数是 **target 白名单 dict** —— 必须显式列出 router 可能返回的所有名字，否则 LangGraph 不放行。
-- `supervisor → researchers` 的"显式列出 4 个 target"是为了让 Send 派发能命中；fan-in 端用静态 `add_edge` 即可，无需 router。
+- 主图只显式列出 `research_subgraph`；4 个 researcher target 在子图自己的 `add_conditional_edges` 里列出。
+- fan-in 端由子图回写共享 `ResearchState`，再静态连到 `reflector`。
 - `reflector` 虽然只有两个出口，也必须用 `add_conditional_edges`（不是 `add_edge`），否则无法根据 state 动态选。
 
-### 3. 路由 —— `graph/router.py`（真实三分支）
+### 3. 路由 —— `graph/router.py` + `graph/research_subgraph.py`
 
 ```python
-_SOURCE_TO_NODE = {"web":"web_researcher", "academic":"academic_researcher",
-                   "code":"code_researcher", "kb":"kb_researcher"}
-
 def supervisor_route(state):
     # 分支 1：计划未确认 → 回 planner（HITL 恢复后重入）
     if not state.get("plan_confirmed"):
@@ -308,15 +306,7 @@ def supervisor_route(state):
     # 分支 3：首轮 or Reflector 要求补查 → fan-out
     plan = state.get("plan") or []
     if plan and not state.get("evidence") or state.get("next_action") == "need_more_research":
-        sends = []
-        for sq in plan:
-            if getattr(sq, "status", "pending") == "done":  continue
-            for src in (sq.recommended_sources or ["web"]):
-                node = _SOURCE_TO_NODE.get(src)
-                if not node:  continue
-                sends.append(Send(node, {"sub_question": sq,
-                                          "research_query": state["research_query"]}))
-        return sends or "writer"
+        return "research_subgraph" if build_research_sends(state) else "writer"
     return "writer"
 
 def reflector_route(state):
@@ -325,8 +315,24 @@ def reflector_route(state):
     return "supervisor" if action == "need_more_research" else "writer"
 ```
 
+```python
+# graph/research_subgraph.py
+def build_research_sends(state):
+    sends = []
+    for sq in state.get("plan") or []:
+        if getattr(sq, "status", "pending") == "done":
+            continue
+        for src in getattr(sq, "recommended_sources", []) or ["web"]:
+            node = _SOURCE_TO_NODE.get(src)
+            if node:
+                sends.append(Send(node, {"sub_question": sq,
+                                          "research_query": state.get("research_query", "")}))
+    return sends
+```
+
 **关键点**：
-- `Send(target, payload)` 是 LangGraph 的 fan-out 原语；**payload 只喂被派发的子节点**，不污染主 state。
+- `Send(target, payload)` 是 LangGraph 的 fan-out 原语；当前它在 `research_subgraph` 内部返回。
+- **payload 只喂被派发的子节点**，不污染主 state。
 - `sq.recommended_sources` 是 Planner 在拆子问题时就决定的（如 `["web","academic"]`），路由按此派发到对应 researcher；一个 sub-q 可以同时派给多个 source。
 - **双重兜底**：`supervisor_route` 和 `reflector_route` 都检查 `rc>=3`，任何一端触发都会收敛到 writer。
 
@@ -581,7 +587,7 @@ class SearchTool(Protocol):
 
 ### Q1：介绍一下这个项目
 
-"InsightLoop 是一个生产级多 Agent 研究系统，基于 LangGraph 构建。用户输入一个研究问题，系统通过 7 个 Agent 协作 —— Planner 拆解、Supervisor 调度、4 个并行 Researcher 从 web/学术/代码/知识库四路检索、Reflector 评估证据覆盖度决定是否补查、Writer 输出带引用的 Markdown 报告。亮点有三：一是 Supervisor 中心调度架构，用 LangGraph 的 Send API 实现 fan-out/fan-in 并行；二是支持 HITL，用户可以编辑 Planner 生成的研究计划；三是 MCP 双向集成 —— 既作为 client 调外部 Brave Search，也作为 server 把 5 个研究工具暴露给 Claude Desktop。"
+"InsightLoop 是一个生产级多 Agent 研究系统，基于 LangGraph 构建。用户输入一个研究问题，系统通过 Planner、Supervisor、Research Subgraph、Reflector、Writer 协作 —— Planner 拆解，Supervisor 进入调研子图，子图内部 4 个并行 Researcher 从 web/学术/代码/知识库四路检索，Reflector 评估证据覆盖度决定是否补查，Writer 输出带引用的 Markdown 报告。亮点有三：一是主图 + 子图的分层调度架构，用 LangGraph 的 Send API 实现 fan-out/fan-in 并行；二是支持 HITL，用户可以编辑 Planner 生成的研究计划；三是 MCP 双向集成 —— 既作为 client 调外部 Brave Search，也作为 server 把 5 个研究工具暴露给 Claude Desktop。"
 
 ### Q2：interrupt/resume 机制怎么实现的？
 
@@ -589,7 +595,7 @@ class SearchTool(Protocol):
 
 ### Q3：怎么实现并行 Researcher？
 
-"在 supervisor 的 conditional_edge 里返回 `list[Send]`：每个 Send 带 target node name 和局部 payload。LangGraph 检测到 list[Send] 会并行调度所有 target 节点。fan-in 时通过 State 字段上的 reducer 合并 —— evidence 字段用 `Annotated[list, merge_evidence]`，reducer 按 URL 去重 + score 倒序。"
+"Supervisor 的 conditional edge 只返回 `research_subgraph`。进入子图后，`research_dispatch_route()` 返回 `list[Send]`：每个 Send 带 target node name 和局部 payload。LangGraph 检测到 list[Send] 会并行调度所有 target 节点。fan-in 时通过 State 字段上的 reducer 合并 —— evidence 字段用 `Annotated[list, merge_evidence]`，reducer 按 URL 去重 + score 倒序。"
 
 ### Q4：工具降级链怎么设计的？
 
@@ -621,7 +627,7 @@ class SearchTool(Protocol):
 
 ### Q11：同源 URL 在多个 researcher 里命中怎么办？
 
-"`merge_evidence` reducer 处理。fan-in 时 LangGraph 把 4 路 researcher 返回的 evidence 列表合并，reducer 按 `source_url` 分组，同 URL 多次命中**保留 `relevance_score` 最高**的一条，最终按 score 倒序输出。这是 `Annotated[list[Evidence], merge_evidence]` 的 reducer 契约。用 `operator.add` 也能合并，但会保留重复 —— Writer 就会看到同篇博文两次引用，引用编号会重复。所以必须自定义。"
+"`merge_evidence` reducer 处理。fan-in 时 LangGraph 把 `research_subgraph` 内部 4 路 researcher 返回的 evidence 列表合并；子图回写父图时也会再次经过同一个 reducer。reducer 按 `source_url` 分组，同 URL 多次命中**保留 `relevance_score` 最高**的一条，最终按 score 倒序输出。这是 `Annotated[list[Evidence], merge_evidence]` 的 reducer 契约。用 `operator.add` 也能合并，但会保留重复 —— Writer 就会看到同篇博文两次引用，引用编号会重复。所以必须自定义。"
 
 ---
 
@@ -731,11 +737,16 @@ def tagged_node(name: str, fn: Callable[..., Any], **metadata: Any):
 ```python
 # graph/workflow.py
 wf.add_node("planner", tagged_node("planner", planner_node))
-wf.add_node("web_researcher", tagged_node("web_researcher", web_researcher_node))
+wf.add_node("research_subgraph", build_research_subgraph())
 wf.add_node("writer", tagged_node("writer", writer_node))
 ```
 
-这样 LangSmith 上可以同时按 `metadata.thread_id` 找某次会话、按 `tags contains agent:writer` 找 writer 节点、按 `tags contains eval` 区分评测流量。
+```python
+# graph/research_subgraph.py
+wf.add_node("web_researcher", tagged_node("web_researcher", web_researcher_node))
+```
+
+这样 LangSmith 上可以同时按 `metadata.thread_id` 找某次会话、按 `tags contains agent:writer` 找 writer 节点、按 `tags contains agent:web_researcher` 找子图内部 researcher、按 `tags contains eval` 区分评测流量。
 
 ### 9.2 LLM-as-judge：三维度结构化打分
 
@@ -1015,8 +1026,9 @@ PYTHONPATH=. python -m scripts.run_local "研究问题"
 
 **关键文件导航**：
 - State 契约 / reducer：`graph/state.py` `merge_evidence` L32-49
-- 图装配 / fan-in：`graph/workflow.py` `build_graph`
-- 三分支路由：`graph/router.py` `supervisor_route` L22-54
+- 图装配 / 子图接入：`graph/workflow.py` `build_graph`
+- 三分支路由：`graph/router.py` `supervisor_route`
+- Research fan-out：`graph/research_subgraph.py` `build_research_sends`
 - HITL + resume 兼容：`agents/planner.py` `_coerce_plan` L44-58
 - 安全装饰器：`agents/_safe.py` `safe_node`（默认返回空 evidence）
 - 降级链：`agents/_researcher_base.py` `run_research_chain` L19-52
@@ -1033,6 +1045,6 @@ PYTHONPATH=. python -m scripts.run_local "研究问题"
 - **评测看板**：`app/evals_ui.py`
 
 **记住三个数字**：
-- **7** 个 Agent（Planner/Supervisor/4 Researchers/Reflector/Writer）
+- **5** 层主流程（Planner/Supervisor/Research Subgraph/Reflector/Writer），其中 Research Subgraph 内含 4 个 Researcher
 - **3** 轮 Reflexion 硬上限（supervisor_route + reflector_route 双重卡点）
 - **5** 个 Internal MCP 工具对外暴露（kb_search / list_reports / read_report / list_evidence / trigger_research）

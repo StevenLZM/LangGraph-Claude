@@ -182,9 +182,9 @@
 | 技术点 | 在本项目中的体现 |
 |---|---|
 | **StateGraph + 嵌套子图** | 主图 = Supervisor 调度；4 个 Researcher 打包成可并行 sub-graph |
-| **条件路由** | Supervisor 输出 `next_node` 决定走向；Reflector 输出 `next_action` 决定补查/结束 |
+| **条件路由** | `supervisor_route` 决定回 planner、进入 `research_subgraph` 或直接 writer；Reflector 输出 `next_action` 决定补查/结束 |
 | **循环控制** | Researcher → Reflector → Supervisor 形成补查循环，max_iterations 兜底防止死循环 |
-| **并行 fan-out / fan-in** | 用 `Send` API 把多个子问题并行派发给不同 Researcher，结果用 reducer 聚合 |
+| **并行 fan-out / fan-in** | `research_subgraph` 内部用 `Send` API 把多个子问题并行派发给不同 Researcher，结果用 reducer 聚合 |
 | **interrupt + Command(resume)** | 计划阶段触发 `interrupt({"plan": ...})`，前端展示后用 `Command(resume={"plan": modified})` 恢复 |
 | **checkpointer** | `SqliteSaver` 持久化对话 state；同 thread_id 跨 turn 恢复历史 |
 | **Streaming** | `astream_events` 监听 node 进入/退出/工具调用，转 SSE 推前端 |
@@ -281,7 +281,8 @@ class ResearchState(TypedDict):
 │   ├── state.py                # ResearchState
 │   ├── workflow.py             # 主图构建
 │   ├── router.py               # Supervisor 路由
-│   └── nodes_parallel.py       # Send fan-out/in 逻辑
+│   ├── research_subgraph.py    # Researcher 子图 + Send fan-out/in
+│   └── nodes_parallel.py       # 旧 fanout 导出兼容层
 ├── agents/
 │   ├── supervisor.py
 │   ├── planner.py

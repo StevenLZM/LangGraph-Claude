@@ -88,7 +88,7 @@ async def test_tagged_node_adds_agent_tag_and_metadata():
 
 
 def test_workflow_wraps_all_business_nodes_with_langsmith_tags(monkeypatch):
-    from graph import workflow
+    from graph import research_subgraph, workflow
 
     seen: list[str] = []
 
@@ -97,6 +97,7 @@ def test_workflow_wraps_all_business_nodes_with_langsmith_tags(monkeypatch):
         return fn
 
     monkeypatch.setattr(workflow, "tagged_node", fake_tagged_node, raising=False)
+    monkeypatch.setattr(research_subgraph, "tagged_node", fake_tagged_node, raising=False)
 
     workflow.build_graph()
 

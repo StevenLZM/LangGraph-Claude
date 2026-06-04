@@ -9,8 +9,8 @@ AI 行业深度研究多 Agent 系统。设计文档：
 **M6 生产化收尾完成**：
 
 - ✅ Planner: DeepSeek max tier 拆解子问题 + `interrupt()` HITL
-- ✅ Supervisor: 条件路由 + Send fan-out
-- ✅ 4×Researcher 并行: Tavily / ArXiv / GitHub / KB（复用 01_RAG 混合检索）
+- ✅ Supervisor: 条件路由到 `research_subgraph`
+- ✅ Research Subgraph: 内部 Send fan-out 并行调用 4×Researcher（Tavily / ArXiv / GitHub / KB，复用 01_RAG 混合检索）
 - ✅ Reflector: LLM 覆盖度评分 + 补查/收敛 + 3 轮硬兜底
 - ✅ Writer: DeepSeek max tier Markdown 报告 + [^N] 引用脚注 + 落盘归档
 - ✅ Evidence reducer: URL 去重 + relevance_score 排序
@@ -135,7 +135,7 @@ make eval        # 20 题完整评测
 
 ## 架构亮点
 
-1. **Supervisor + Send fan-out**：1 次决策派发 N 个并行 Researcher（4 源 × M 子问题）；`merge_evidence` reducer 自动 URL 去重 + relevance 排序
+1. **Supervisor + Research Subgraph + Send fan-out**：主图把调研阶段封装为 `research_subgraph`；子图内部 1 次 dispatcher 派发 N 个并行 Researcher（4 源 × M 子问题）；`merge_evidence` reducer 自动 URL 去重 + relevance 排序
 2. **`interrupt()` + `Command(resume=...)` HITL**：Planner 暂停等用户编辑计划；同 thread_id 跨 turn 状态恢复
 3. **Reflector 反思循环**：LLM 评分 evidence 覆盖度 → 决定补查/收敛；`max_iterations=3` 硬兜底
 4. **统一 SearchTool 协议 + ToolRegistry 降级链**：HTTP 工具、官方 MCP 工具、LLM 内置搜索**同一协议**，Researcher 无 if/else
@@ -155,6 +155,11 @@ make eval        # 20 题完整评测
                              │
                   ┌──────────▼──────────┐
                   │   Supervisor        │
+                  │ route research stage│
+                  └──────────┬──────────┘
+                             │
+                  ┌──────────▼──────────┐
+                  │ research_subgraph   │
                   │  (Send fan-out)     │
                   └──────────┬──────────┘
              ┌───────────────┼───────────────┬─────────────┐

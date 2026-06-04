@@ -65,8 +65,8 @@
 
 - `planner` 结构化拆计划
 - `interrupt()` + `Command(resume=...)` 做 HITL 计划确认
-- `supervisor_route()` 返回 `list[Send]` 做并行 fan-out
-- 4 个 `researcher` 节点并行取证
+- `supervisor_route()` 路由到 `research_subgraph`
+- `research_subgraph` 内部返回 `list[Send]`，并行调度 4 个 `researcher` 节点取证
 - `merge_evidence()` 统一 fan-in 聚合
 - `reflector` 做覆盖度判断和补查控制
 - `writer` 生成报告并落盘
@@ -89,9 +89,9 @@
 ### 3.3 你必须知道的“文档和实现差异”
 
 - SSE 真实端点是 `GET /research/stream`、`GET /research/{tid}/resume_stream`、`GET /research/{tid}/turn_stream`
-- 调度真正发生在 `graph/router.py::supervisor_route()`，`agents/supervisor.py` 本身很薄
+- 是否进入调研阶段由 `graph/router.py::supervisor_route()` 决定；真正的 Send fan-out 在 `graph/research_subgraph.py`
 - `agents/writer.py` 顶部注释还写着旧说明，但真实实现已经是 `await llm.ainvoke(...)`
-- 当前离线测试基线是 58 个测试
+- 当前离线测试基线是 59 个测试
 - `ENGINEERING.md` 有些示例还保留了更早期的 reducer 说明，但真实实现已经升级为 `merge_evidence()`
 
 这类差异不是坏事，反而说明这是个还在演进的项目，不是静态样板。
@@ -136,8 +136,8 @@ HTTP 请求
   -> app/api.py 接收 research_query
   -> graph/workflow.py 进入主图
   -> planner 生成计划并 interrupt
-  -> resume 后 supervisor_route 扇出 Send
-  -> researchers 并行取证
+  -> resume 后 supervisor_route 进入 research_subgraph
+  -> research_subgraph 内部 Send fan-out，researchers 并行取证
   -> merge_evidence fan-in 聚合
   -> reflector 判断是否补查
   -> writer 写报告并落盘
@@ -156,7 +156,7 @@ HTTP 请求
 |---|---|---|---|
 | 图能否搭起来 | `graph/workflow.py` | `tests/test_graph_skeleton.py` | 先确认主图节点齐全、编译正常 |
 | Planner 中断恢复 | `agents/planner.py` | `tests/tutorial/test_05_interrupt_resume.py` | 理解 `interrupt()` / `Command(resume=...)` |
-| Supervisor 并行扇出 | `graph/router.py` | `tests/tutorial/test_03_supervisor_send_fanout.py` | 理解 `Send` 如何把计划拆成并行 researcher 任务 |
+| Research Subgraph 并行扇出 | `graph/router.py` + `graph/research_subgraph.py` | `tests/tutorial/test_03_supervisor_send_fanout.py` | 理解主图路由到子图、子图内部用 `Send` 拆并行 researcher 任务 |
 | Researcher 工具降级 | `agents/_researcher_base.py` + `tools/registry.py` | `tests/tutorial/test_02_registry_degradation.py` | 理解主工具失败时如何 fallback |
 | 节点级容错 | `agents/_safe.py` | `tests/tutorial/test_04_safe_node_decorator.py` | 理解为什么单个节点失败不能拖垮整张图 |
 | 并行结果聚合 | `graph/state.py` | `tests/tutorial/test_01_state_reducer.py` | 理解 reducer 为什么要去重和排序 |
@@ -457,6 +457,7 @@ confirmed = _coerce_plan(decision, fallback=plan)
 
 - `agents/supervisor.py`
 - `graph/router.py`
+- `graph/research_subgraph.py`
 
 ### 11.2 最容易误解的点
 
@@ -471,27 +472,44 @@ confirmed = _coerce_plan(decision, fallback=plan)
 
 - `graph/router.py::supervisor_route()`
 
+真正把计划拆成并行 researcher 任务的，是：
+
+- `graph/research_subgraph.py::build_research_sends()`
+- `graph/research_subgraph.py::research_dispatch_route()`
+
 ### 11.3 这个 route 函数有三种出口
 
 1. 返回 `"planner"`
 2. 返回 `"writer"`
-3. 返回 `list[Send]`
+3. 返回 `"research_subgraph"`
 
 分别对应：
 
 - 计划未确认，回到 planner
 - 已达最大 revision，直接收敛
-- 计划已确认，需要并行调研
+- 计划已确认，需要进入调研子图
 
-### 11.4 为什么 `list[Send]` 是关键
+### 11.4 为什么 `research_subgraph` 是关键
 
-这说明 Supervisor 不是“自己跑完所有 researcher”，而是把任务描述拆成多个并行子任务交给 LangGraph。
+这说明 Supervisor 不是“自己跑完所有 researcher”，也不再直接暴露所有 researcher 节点。它只把控制权交给一个调研阶段子图：
+
+```text
+supervisor -> research_subgraph -> research_dispatcher -> list[Send] -> researchers -> END
+```
+
+这样主图只关心阶段流转：
+
+```text
+planner -> supervisor -> research_subgraph -> reflector -> writer
+```
+
+而并行细节留在子图内部。
+
+### 11.5 `Send` 的并行粒度是什么
 
 每个 `Send` 本质上是在说：
 
 > 把某个子问题，以某种 source_type 的 researcher 节点去执行。
-
-### 11.5 `Send` 的并行粒度是什么
 
 不是“按 agent 粗粒度并行”，而是：
 
@@ -519,7 +537,8 @@ confirmed = _coerce_plan(decision, fallback=plan)
 
 - `plan_confirmed=False` 必须回 planner
 - `revision_count >= 3` 必须直接 writer
-- 首轮无 evidence 时必须 fan-out
+- 首轮无 evidence 时必须进入 `research_subgraph`
+- `build_research_sends()` 必须生成正确的 `Send` 列表
 - `Send.node` 映射必须正确
 - `Send.arg` 里必须包含 `sub_question` 和 `research_query`
 - `status="done"` 的子问题应该被跳过
@@ -557,13 +576,13 @@ if not state.get("plan_confirmed"):
 if state.get("revision_count", 0) >= 3:
     return "writer"
 if plan and not state.get("evidence") or state.get("next_action") == "need_more_research":
-    return sends
+    return "research_subgraph" if build_research_sends(state) else "writer"
 return "writer"
 ```
 
 - 第一个 `if` 是 HITL 恢复闸门，没确认计划就不允许进入 researcher
 - 第二个 `if` 是成本闸门，超过轮数直接收敛
-- 第三个 `if` 才是业务调度闸门，决定是否 fan-out
+- 第三个 `if` 才是业务调度闸门，决定是否进入 research 子图
 
 这里最容易看错的是这个条件：
 
@@ -579,7 +598,7 @@ if (plan and not state.get("evidence")) or state.get("next_action") == "need_mor
 
 也就是说，只要 Reflector 给了 `need_more_research`，即使当前已经有 evidence，也会重新 fan-out。
 
-再看 `Send(...)` 的 arg：
+再看 `graph/research_subgraph.py::build_research_sends()` 里的 `Send(...)` arg：
 
 ```python
 {
@@ -591,7 +610,7 @@ if (plan and not state.get("evidence")) or state.get("next_action") == "need_mor
 - `sub_question` 给 researcher 做本地任务输入
 - `research_query` 作为兜底上下文，避免 payload 不完整时完全丢失查询语义
 
-`tests/tutorial/test_03_supervisor_send_fanout.py` 实际保护的就是这几个分支顺序和 payload 契约。
+`tests/tutorial/test_03_supervisor_send_fanout.py` 实际保护的是主图路由分支顺序、子图 fan-out 粒度和 payload 契约。
 
 ---
 
@@ -1279,14 +1298,15 @@ patch["missing_aspects"] = []
 3. 主图进入 `planner`
 4. `planner` 生成结构化 `ResearchPlan`，然后 `interrupt()` 等待人工确认
 5. 前端把 plan 给用户编辑，后端用 `Command(resume={"plan": ...})` 恢复
-6. `supervisor_route()` 根据已确认计划生成 `list[Send]`
-7. 多个 `researcher` 节点并行从 web / academic / code / kb 取证
-8. 并行结果通过 `merge_evidence()` 自动 fan-in 聚合
-9. `reflector` 判断证据是否充分，不够就补查，最多 3 轮
-10. `writer` 基于 evidence 生成 Markdown 报告，并保存到本地
-11. 后续追问通过 `/research/{thread_id}/turn` 复用历史 evidence 再进入下一轮
+6. `supervisor_route()` 根据已确认计划进入 `research_subgraph`
+7. `research_subgraph` 内部 dispatcher 生成 `list[Send]`
+8. 多个 `researcher` 节点并行从 web / academic / code / kb 取证
+9. 并行结果通过 `merge_evidence()` 自动 fan-in 聚合
+10. `reflector` 判断证据是否充分，不够就补查，最多 3 轮
+11. `writer` 基于 evidence 生成 Markdown 报告，并保存到本地
+12. 后续追问通过 `/research/{thread_id}/turn` 复用历史 evidence 再进入下一轮
 
-如果你能把上面这 11 步按顺序讲清楚，这个项目你就已经不是“看懂”，而是“能讲懂”了。
+如果你能把上面这 12 步按顺序讲清楚，这个项目你就已经不是“看懂”，而是“能讲懂”了。
 
 ---
 
@@ -1693,7 +1713,7 @@ A：M6 后我会优先补三件事：selective re-fanout、工具层限速/重�
 | thread_id 如何贯穿整条图 | `app/api.py` | `tests/test_end_to_end_offline.py` | `_config()` 产出的 `configurable.thread_id` 形状 |
 | interrupt/resume 的真实语义 | `agents/planner.py` | `tests/tutorial/test_05_interrupt_resume.py` | `interrupt(...)` 的返回值如何变成 `_coerce_plan()` 的输入 |
 | 为什么 Supervisor 本身很薄 | `agents/supervisor.py` + `graph/router.py` | `tests/tutorial/test_03_supervisor_send_fanout.py` | 路由逻辑不在节点里，而在 `supervisor_route()` |
-| fan-out 的真实粒度 | `graph/router.py` | `tests/tutorial/test_03_supervisor_send_fanout.py` | `sub_question × recommended_sources -> list[Send]` |
+| fan-out 的真实粒度 | `graph/research_subgraph.py` | `tests/tutorial/test_03_supervisor_send_fanout.py` | `sub_question × recommended_sources -> list[Send]` |
 | fallback chain 如何短路 | `agents/_researcher_base.py` | `tests/tutorial/test_02_registry_degradation.py` | `if results: return _to_evidence(...)` |
 | 节点异常为什么不该中断主图 | `agents/_safe.py` | `tests/tutorial/test_04_safe_node_decorator.py` | 异常后返回最小合法状态而不是 `None` |
 | reducer 为什么不能只拼接 list | `graph/state.py` | `tests/tutorial/test_01_state_reducer.py` | URL 去重、高分覆盖、倒序排序 |
@@ -1724,18 +1744,19 @@ A：M6 后我会优先补三件事：selective re-fanout、工具层限速/重�
 4. `agents/planner.py`
 5. `tests/tutorial/test_03_supervisor_send_fanout.py`
 6. `graph/router.py`
-7. `tests/tutorial/test_02_registry_degradation.py`
-8. `agents/_researcher_base.py`
-9. `tests/tutorial/test_04_safe_node_decorator.py`
-10. `agents/_safe.py`
-11. `tests/tutorial/test_06_reflector_hard_fallback.py`
-12. `agents/reflector.py`
-13. `tests/test_end_to_end_offline.py`
-14. `agents/writer.py`
-15. `app/api.py`
-16. `app/bootstrap.py`
-17. `tests/test_m6_production.py`
-18. `Dockerfile` / `docker-compose.yml` / `Makefile`
+7. `graph/research_subgraph.py`
+8. `tests/tutorial/test_02_registry_degradation.py`
+9. `agents/_researcher_base.py`
+10. `tests/tutorial/test_04_safe_node_decorator.py`
+11. `agents/_safe.py`
+12. `tests/tutorial/test_06_reflector_hard_fallback.py`
+13. `agents/reflector.py`
+14. `tests/test_end_to_end_offline.py`
+15. `agents/writer.py`
+16. `app/api.py`
+17. `app/bootstrap.py`
+18. `tests/test_m6_production.py`
+19. `Dockerfile` / `docker-compose.yml` / `Makefile`
 
 这样读的好处是：
 
@@ -1750,7 +1771,7 @@ A：M6 后我会优先补三件事：selective re-fanout、工具层限速/重�
 
 ## 25. 你可以直接照着说的一段项目总结
 
-> 我做了一个基于 LangGraph 的多 Agent 深度研究系统，主流程是 Planner 先把研究问题拆成结构化 plan，并通过 interrupt 进入人工确认；用户确认后，Supervisor 基于 plan 通过 Send 把子问题按 source_type 并行派发给多个 Researcher；Researcher 通过 ToolRegistry 统一接不同 provider，并走 fallback chain 收集证据；并行 evidence 通过 reducer 做去重和排序；Reflector 评估证据覆盖度并控制补查轮数；Writer 最后基于 evidence 生成带引用的 Markdown 报告并落盘。系统还提供 SSE + Streamlit UI、SQLite checkpoint 多轮恢复、LangSmith 节点级 trace、20 题 LLM-as-judge 评测和 Docker Compose 一键部署。
+> 我做了一个基于 LangGraph 的多 Agent 深度研究系统，主流程是 Planner 先把研究问题拆成结构化 plan，并通过 interrupt 进入人工确认；用户确认后，Supervisor 把调研阶段路由到 research_subgraph，子图内部再通过 Send 把子问题按 source_type 并行派发给多个 Researcher；Researcher 通过 ToolRegistry 统一接不同 provider，并走 fallback chain 收集证据；并行 evidence 通过 reducer 做去重和排序；Reflector 评估证据覆盖度并控制补查轮数；Writer 最后基于 evidence 生成带引用的 Markdown 报告并落盘。系统还提供 SSE + Streamlit UI、SQLite checkpoint 多轮恢复、LangSmith 节点级 trace、20 题 LLM-as-judge 评测和 Docker Compose 一键部署。
 
 这段话的重点是：
 
@@ -1769,13 +1790,13 @@ A：M6 后我会优先补三件事：selective re-fanout、工具层限速/重�
 - `PROJECT_SCENARIO.md` 是真实 PRD 文件名
 - 主图节点齐全，可成功编译
 - interrupt/resume 机制有 tutorial test 保护
-- `Send` fan-out 路由有 tutorial test 保护
+- `research_subgraph` 内部 `Send` fan-out 有 tutorial test 保护
 - reducer 去重逻辑有 tutorial test 保护
 - fallback chain 有 tutorial test 保护
 - reflector 强制收敛有 tutorial test 保护
 - 端到端离线闭环测试可以跑通到 writer
 - M6 production test 覆盖 20 题数据集、Docker 入口、Streamlit API env fallback、LangSmith agent tag
-- 当前离线测试基线是 58 passed
+- 当前离线测试基线是 59 passed
 
 因此你在学习和面试里，应该优先讲：
 
