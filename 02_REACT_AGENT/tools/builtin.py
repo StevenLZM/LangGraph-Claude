@@ -1,8 +1,6 @@
 """LangChain tool definitions for the ReAct demo."""
 from __future__ import annotations
 
-import ast
-import math
 import os
 import re
 import unicodedata
@@ -79,59 +77,6 @@ def web_search(query: str, max_results: int = 3) -> str:
     return "\n\n---\n\n".join(results) if results else "未搜索到相关结果。"
 
 
-class CalcInput(BaseModel):
-    expression: str = Field(description="数学表达式，如 1234 * 5678 或 sqrt(144)")
-
-
-_BIN_OPS: dict[type[ast.operator], Any] = {
-    ast.Add: lambda a, b: a + b,
-    ast.Sub: lambda a, b: a - b,
-    ast.Mult: lambda a, b: a * b,
-    ast.Div: lambda a, b: a / b,
-    ast.FloorDiv: lambda a, b: a // b,
-    ast.Mod: lambda a, b: a % b,
-    ast.Pow: lambda a, b: a**b,
-}
-_UNARY_OPS: dict[type[ast.unaryop], Any] = {
-    ast.UAdd: lambda a: a,
-    ast.USub: lambda a: -a,
-}
-_FUNCS: dict[str, Any] = {
-    "abs": abs,
-    "ceil": math.ceil,
-    "floor": math.floor,
-    "log": math.log,
-    "round": round,
-    "sqrt": math.sqrt,
-}
-
-
-def _safe_eval(node: ast.AST) -> int | float:
-    if isinstance(node, ast.Expression):
-        return _safe_eval(node.body)
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-        return node.value
-    if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
-        return _BIN_OPS[type(node.op)](_safe_eval(node.left), _safe_eval(node.right))
-    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
-        return _UNARY_OPS[type(node.op)](_safe_eval(node.operand))
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _FUNCS:
-        args = [_safe_eval(arg) for arg in node.args]
-        return _FUNCS[node.func.id](*args)
-    raise ValueError("仅支持数字、四则运算、幂、取模和少量数学函数")
-
-
-@tool("calculator", args_schema=CalcInput)
-def calculator(expression: str) -> str:
-    """执行精确数学计算。数学问题必须优先使用此工具。"""
-    try:
-        parsed = ast.parse(expression, mode="eval")
-        result = _safe_eval(parsed)
-    except Exception as exc:
-        return f"计算错误: {exc}"
-    return f"计算结果: {expression} = {result}"
-
-
 class CodeInput(BaseModel):
     code: str = Field(description="要执行的 Python 代码，必须是完整代码片段")
 
@@ -183,7 +128,7 @@ def wikipedia_search(query: str) -> str:
 
 
 def get_builtin_tools():
-    return [web_search, calculator, python_executor, get_datetime, wikipedia_search]
+    return [web_search, python_executor, get_datetime, wikipedia_search]
 
 
 def get_tools():

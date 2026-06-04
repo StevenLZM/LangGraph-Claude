@@ -23,10 +23,10 @@
 ┌───────────────────────────▼─────────────────────────────────────┐
 │                       工具执行层                                 │
 │                                                                 │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────────┐   │
-│  │ 网络搜索  │ │  计算器  │ │ 代码执行  │ │  MCP Tool Server │   │
-│  │ (Tavily) │ │ (sympy)  │ │(sandbox) │ │ (天气/Wiki/日期) │   │
-│  └──────────┘ └──────────┘ └──────────┘ └──────────────────┘   │
+│  ┌──────────┐ ┌──────────┐ ┌──────────────────────────────┐   │
+│  │ 网络搜索  │ │ 代码执行  │ │ MCP Tool Server / 本地工具    │   │
+│  │ (Tavily) │ │(sandbox) │ │ 天气 / Wiki / 日期            │   │
+│  └──────────┘ └──────────┘ └──────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -80,8 +80,7 @@
       ├─ Thought 2 → Action: web_search("苹果公司最新市值 2026")
       │              Observation: "约3.3万亿美元"
       │
-      ├─ Thought 3 → Action: calculator("8000 / 33000 * 100")
-      │              Observation: "24.24"
+      ├─ Thought 3 → Observation: Codex 项目级 calculator skill 验证 "8000 / 33000 * 100 = 24.24"
       │
       └─ Thought 4 → Final Answer: "特斯拉市值约8000亿美元，
                      苹果约3.3万亿美元，特斯拉约为苹果的24.2%"
@@ -229,20 +228,9 @@ def web_search(query: str, max_results: int = 3) -> str:
         results.append(f"标题: {r['title']}\n内容: {r['content'][:300]}\n来源: {r['url']}")
     return "\n\n---\n\n".join(results)
 
-# ── Tool 2: 数学计算器 ────────────────────────────────────
-class CalcInput(BaseModel):
-    expression: str = Field(description="数学表达式，如: 1234 * 5678 或 sqrt(144)")
-
-@tool("calculator", args_schema=CalcInput)
-def calculator(expression: str) -> str:
-    """执行精确的数学计算。适用于：四则运算、百分比、开方、
-    对数等。注意：不能处理变量，只能是纯数字表达式。"""
-    import sympy
-    try:
-        result = sympy.sympify(expression)
-        return f"计算结果: {expression} = {result}"
-    except Exception as e:
-        return f"计算错误: {str(e)}"
+# 数学计算器已迁移为项目级 Codex Skill：
+# .codex/skills/calculator/scripts/calculate.py
+# 它使用 AST 白名单执行精确计算，不再作为运行时 LangChain tool 注册。
 
 # ── Tool 3: Python 代码执行 ────────────────────────────────
 class CodeInput(BaseModel):
@@ -347,8 +335,8 @@ class AgentState(TypedDict):
     iteration_count: int     # 防死循环计数
     tool_calls_log: list     # 工具调用记录
 
-# 定义所有工具
-all_tools = [web_search, calculator, python_executor, wikipedia_search, get_datetime]
+# 定义运行时工具；精确数学计算已迁移为项目级 Codex Skill
+all_tools = [web_search, python_executor, wikipedia_search, get_datetime]
 
 # LLM 绑定工具
 llm_with_tools = llm.bind_tools(all_tools)
@@ -401,14 +389,13 @@ REACT_SYSTEM_PROMPT = """你是一个强大的 AI 助手，可以使用多种工
 
 【可用工具说明】
 - web_search: 搜索实时信息（新闻、价格、当前事件）
-- calculator: 精确数学计算（避免 LLM 直接计算的误差）
 - python_executor: 执行 Python 代码验证算法
 - wikipedia_search: 查询知识概念和背景信息
 - get_datetime: 获取当前日期时间
 
 【行为准则】
 1. 优先思考是否需要工具，不要为了用工具而用工具
-2. 对于数学计算，必须使用 calculator 而非直接计算
+2. 对于数学计算，运行时不要伪装精确计算；需要精算时由项目级 calculator skill 在 Codex 工作流中验证
 3. 对于实时信息，必须使用 web_search
 4. 每次工具调用后，认真分析结果再决定下一步
 5. 工具失败时，尝试换种方式或告知用户
@@ -504,7 +491,7 @@ def display_agent_stream(user_input: str):
 
 | 测试场景 | 期望工具 | 期望行为 |
 |----------|----------|----------|
-| "1234 * 5678" | calculator | 不用 LLM 直接算，调用计算器 |
+| "1234 * 5678" | calculator skill | 不用 LLM 直接算，由项目级 skill 验证 |
 | "今天北京天气" | weather MCP | 调用天气工具，非搜索 |
 | "特斯拉股价" | web_search | 明确是实时数据，调用搜索 |
 | "写个快排并运行" | python_executor | 生成代码并在沙箱运行 |

@@ -6,7 +6,15 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
 from agent.react import build_react_graph, run_react
-from tools.builtin import calculator, get_datetime
+from tools.builtin import get_datetime
+
+
+@tool("calculator")
+def fake_calculator(expression: str) -> str:
+    """Fake calculator tool used to exercise generic ReAct tool calls."""
+    if expression == "1234 * 5678":
+        return "计算结果: 1234 * 5678 = 7006652"
+    return f"计算错误: unsupported expression {expression}"
 
 
 class _ToolCallingLLM:
@@ -87,7 +95,7 @@ class _RecencyAwareLLM:
 
 
 def test_react_graph_calls_tool_then_returns_final_answer():
-    graph = build_react_graph(llm=_ToolCallingLLM(), tools=[calculator], max_iterations=5)
+    graph = build_react_graph(llm=_ToolCallingLLM(), tools=[fake_calculator], max_iterations=5)
 
     state = graph.invoke({"messages": [HumanMessage(content="1234 * 5678 等于多少？")], "iteration_count": 0})
 
@@ -97,7 +105,7 @@ def test_react_graph_calls_tool_then_returns_final_answer():
 
 
 def test_run_react_returns_events_for_tool_call_and_final_answer():
-    result = run_react("1234 * 5678 等于多少？", llm=_ToolCallingLLM(), tools=[calculator])
+    result = run_react("1234 * 5678 等于多少？", llm=_ToolCallingLLM(), tools=[fake_calculator])
 
     event_types = [event.type for event in result.events]
     assert "tool_call" in event_types
@@ -112,7 +120,7 @@ def test_run_react_streams_events_through_callback_in_execution_order():
     result = run_react(
         "1234 * 5678 等于多少？",
         llm=_ToolCallingLLM(),
-        tools=[calculator],
+        tools=[fake_calculator],
         event_callback=streamed_events.append,
     )
 

@@ -58,8 +58,10 @@ def test_project_files_document_deepseek_and_internal_weather_mcp():
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     mcp_config = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
+    project_root = ROOT.parent
 
     assert "langchain-openai" in requirements
     assert "mcp" in requirements
     assert "DEEPSEEK_API_KEY" in env_example
     assert mcp_config["mcpServers"]["weather"]["args"] == ["-m", "mcp_servers.weather_server"]
+    assert (project_root / ".codex" / "skills" / "calculator" / "SKILL.md").is_file()

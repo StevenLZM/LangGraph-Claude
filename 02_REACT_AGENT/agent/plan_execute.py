@@ -131,7 +131,7 @@ def _react_round_for_event(event: AgentEvent, current_round: int) -> tuple[int, 
 def _react_trace_event(step_id: int, objective: str, event: AgentEvent, react_round: int) -> AgentEvent:
     return AgentEvent(
         type=event.type,
-        title=f"plan-execute步骤 {step_id} / ReAct 第 {react_round} 轮 / {event.title}",
+        title=f"步骤 {step_id} / ReAct 第 {react_round} 轮 / {event.title}",
         content=event.content,
         tool=event.tool,
         tool_input=event.tool_input,
