@@ -5,6 +5,7 @@ import time
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from agent.prompts import OFFLINE_M0_REPLY
+from agent.retrieval import rule_based_retrieval_decision
 from agent.service import handle_customer_message
 from agent.state import CustomerServiceState
 
@@ -20,6 +21,8 @@ def context_loader_node(state: CustomerServiceState) -> dict:
         "user_id": state.get("user_id", ""),
         "user_profile": state.get("user_profile", {}),
         "user_memories": state.get("user_memories", []),
+        "memory_summary": state.get("memory_summary", ""),
+        "retrieval_decision": state.get("retrieval_decision", {}),
         "order_context": state.get("order_context"),
         "choices": state.get("choices"),
         "pending_choice": state.get("pending_choice"),
@@ -33,6 +36,16 @@ def context_loader_node(state: CustomerServiceState) -> dict:
         "total_turns": state.get("total_turns", _count_human_turns(messages)),
         "_started_at": time.perf_counter(),
     }
+
+
+def retrieval_decision_node(state: CustomerServiceState) -> dict:
+    if state.get("retrieval_decision"):
+        return {"retrieval_decision": state.get("retrieval_decision", {})}
+    messages = list(state.get("messages") or [])
+    latest_human = next((message for message in reversed(messages) if isinstance(message, HumanMessage)), None)
+    if latest_human is None:
+        return {"retrieval_decision": rule_based_retrieval_decision("").to_dict()}
+    return {"retrieval_decision": rule_based_retrieval_decision(str(latest_human.content)).to_dict()}
 
 
 def agent_node(state: CustomerServiceState) -> dict:

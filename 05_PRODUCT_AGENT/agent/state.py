@@ -17,6 +17,7 @@ class CustomerServiceState(TypedDict, total=False):
     user_profile: dict[str, Any]
     user_memories: list[str]
     memory_summary: str
+    retrieval_decision: dict[str, Any]
     order_context: dict[str, Any] | None
     choices: dict[str, Any] | None
     pending_choice: dict[str, Any] | None

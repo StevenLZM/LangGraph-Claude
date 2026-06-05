@@ -161,7 +161,32 @@ docker compose down -v
 - `CHECKPOINTER_URL`：可覆盖 checkpoint 连接串；为空时 Postgres checkpoint 复用 `DATABASE_URL`，Redis checkpoint 复用 `REDIS_URL`。
 - `CHECKPOINTER_SETUP=false`：适合生产环境已由迁移任务预建表/索引时关闭自动 `setup()`。
 
-本地 SQLite 模式适合 pytest 和离线演示；Compose Postgres 模式更接近多实例部署。当前长期记忆仍是关键词召回，不是 pgvector 语义检索；后续如接 Mem0/pgvector，应复用现有 `UserMemoryManager` 接口，避免改动 `/chat` 和管理接口契约。
+本地 SQLite 模式适合 pytest 和离线演示；Compose Postgres 模式更接近多实例部署。
+
+## 三层记忆与检索决策
+
+当前记忆架构分为三层：
+
+- 会话上下文：`SessionStore` 保存当前 `session_id` 的最近消息、pending choice 和质量 metadata。
+- 摘要记忆：`SummaryMemoryStore` 按 `session_id` 保存滚动摘要，postprocess worker 可异步更新，下一轮 `/chat` 会注入摘要上下文。
+- 长期记忆：`UserMemoryManager` 保留关键词/结构化业务记忆，`SemanticMemoryStore` 提供语义长期记忆接口，默认 SQLite fallback，可配置 Milvus Lite。
+
+`/chat` 主链路会先执行检索决策，决定是否读取长期记忆、FAQ/RAG 或业务工具上下文。默认 `RETRIEVAL_DECISION_MODE=rules`，可切到 `llm` 使用真实 LLM 输出结构化检索决策；LLM 决策失败时会自动退回规则决策，避免阻塞客服回复。
+
+语义记忆配置：
+
+```bash
+SEMANTIC_MEMORY_BACKEND=sqlite
+SEMANTIC_MEMORY_DB=./data/semantic_memory.db
+
+# 可选：启用 Milvus Lite 长期语义记忆
+SEMANTIC_MEMORY_BACKEND=milvus
+MILVUS_MEMORY_URI=./data/memory_milvus.db
+MILVUS_MEMORY_COLLECTION=customer_long_term_memories
+MEMORY_EMBEDDING_DIMENSION=64
+```
+
+Milvus backend 通过 `pymilvus[milvus-lite]` 延迟加载；未启用时不会影响本地 pytest。后续如接真实 embedding 服务，可以替换 `SemanticMemoryStore` 内的 embedding 策略而不改变 `/chat` 契约。
 
 ## RocketMQ 业务消息
 

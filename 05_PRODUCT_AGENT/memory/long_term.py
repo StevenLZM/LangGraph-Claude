@@ -8,6 +8,24 @@ from typing import Any, Callable
 DELIVERY_KEYWORDS = ("配送", "物流", "快递", "发货", "送货", "承运", "shipping", "delivery", "courier")
 
 
+def extract_memory_candidates(user_message: str, assistant_answer: str) -> list[tuple[str, str]]:
+    del assistant_answer
+    text = " ".join(user_message.split())
+    normalized = text.casefold()
+    memories: list[tuple[str, str]] = []
+    if UserMemoryManager._is_recall_query(normalized) or "?" in text or "？" in text:
+        return memories
+    if any(keyword in normalized for keyword in ("喜欢", "偏好", "优先", "prefer", "preference")):
+        category = "delivery_preference" if UserMemoryManager._is_delivery_related(normalized) else "preference"
+        memories.append((category, f"用户偏好：{text}"))
+    if any(keyword in normalized for keyword in ("投诉", "不满", "差评", "complaint")):
+        memories.append(("complaint", f"用户投诉记录：{text}"))
+    name_match = re.search(r"我叫([\w\u4e00-\u9fff]{2,12})", text)
+    if name_match:
+        memories.append(("profile", f"用户姓名：{name_match.group(1)}"))
+    return memories
+
+
 class UserMemoryManager:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
@@ -80,21 +98,7 @@ class UserMemoryManager:
         return self.delete_memories(user_id)
 
     def _extract_memories(self, user_message: str, assistant_answer: str) -> list[tuple[str, str]]:
-        del assistant_answer
-        text = " ".join(user_message.split())
-        normalized = text.casefold()
-        memories: list[tuple[str, str]] = []
-        if self._is_recall_query(normalized) or "?" in text or "？" in text:
-            return memories
-        if any(keyword in normalized for keyword in ("喜欢", "偏好", "优先", "prefer", "preference")):
-            category = "delivery_preference" if self._is_delivery_related(normalized) else "preference"
-            memories.append((category, f"用户偏好：{text}"))
-        if any(keyword in normalized for keyword in ("投诉", "不满", "差评", "complaint")):
-            memories.append(("complaint", f"用户投诉记录：{text}"))
-        name_match = re.search(r"我叫([\w\u4e00-\u9fff]{2,12})", text)
-        if name_match:
-            memories.append(("profile", f"用户姓名：{name_match.group(1)}"))
-        return memories
+        return extract_memory_candidates(user_message, assistant_answer)
 
     def _load_rows(self, user_id: str) -> list[sqlite3.Row]:
         with self._connect() as conn:
