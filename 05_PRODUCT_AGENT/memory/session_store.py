@@ -160,6 +160,7 @@ class SessionStore:
             "quality_score": metadata.get("quality_score"),
             "quality_evaluation": metadata.get("quality_evaluation"),
             "quality_alert": metadata.get("quality_alert", False),
+            "pending_choice": metadata.get("pending_choice"),
             "updated_at": loaded["updated_at"],
         }
 
@@ -191,6 +192,7 @@ class SessionStore:
                     "quality_score": metadata.get("quality_score"),
                     "token_used": metadata.get("token_used", 0),
                     "quality_alert": metadata.get("quality_alert", False),
+                    "pending_choice": metadata.get("pending_choice"),
                 }
             )
         return sessions
@@ -380,6 +382,7 @@ class PostgresSessionStore:
             "quality_score": metadata.get("quality_score"),
             "quality_evaluation": metadata.get("quality_evaluation"),
             "quality_alert": metadata.get("quality_alert", False),
+            "pending_choice": metadata.get("pending_choice"),
             "updated_at": loaded["updated_at"],
         }
 
@@ -412,6 +415,7 @@ class PostgresSessionStore:
                     "quality_score": metadata.get("quality_score"),
                     "token_used": metadata.get("token_used", 0),
                     "quality_alert": metadata.get("quality_alert", False),
+                    "pending_choice": metadata.get("pending_choice"),
                 }
             )
         return sessions

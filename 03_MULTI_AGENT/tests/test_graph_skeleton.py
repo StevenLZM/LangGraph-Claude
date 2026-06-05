@@ -12,14 +12,29 @@ def test_graph_compiles_and_has_all_nodes():
     expected = {
         "planner",
         "supervisor",
-        "web_researcher",
-        "academic_researcher",
-        "code_researcher",
-        "kb_researcher",
+        "research_subgraph",
         "reflector",
         "writer",
     }
     assert expected.issubset(nodes), f"缺少节点: {expected - nodes}"
+    assert {
+        "web_researcher",
+        "academic_researcher",
+        "code_researcher",
+        "kb_researcher",
+    }.isdisjoint(nodes)
+
+    subgraphs = dict(graph.get_subgraphs())
+    assert "research_subgraph" in subgraphs
+    research_nodes = set(subgraphs["research_subgraph"].get_graph().nodes.keys())
+    expected_research_nodes = {
+        "research_dispatcher",
+        "web_researcher",
+        "academic_researcher",
+        "code_researcher",
+        "kb_researcher",
+    }
+    assert expected_research_nodes.issubset(research_nodes)
 
 
 def test_state_typed_dict_imports():

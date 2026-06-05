@@ -1,25 +1,15 @@
 """路由函数 —— ENGINEERING.md §3.3 真实实现。
 
-supervisor_route: Supervisor 出口条件路由 —— 返回 list[Send] 做 fan-out，或 str 指向单节点。
+supervisor_route: Supervisor 出口条件路由 —— 返回 str 指向下一阶段。
 reflector_route:  Reflector 出口条件路由 —— "supervisor" 触发补查，"writer" 收敛。
 """
 from __future__ import annotations
 
-from typing import Any
-
-from langgraph.types import Send
-
+from graph.research_subgraph import build_research_sends
 from graph.state import ResearchState
 
-_SOURCE_TO_NODE = {
-    "web": "web_researcher",
-    "academic": "academic_researcher",
-    "code": "code_researcher",
-    "kb": "kb_researcher",
-}
 
-
-def supervisor_route(state: ResearchState) -> Any:
+def supervisor_route(state: ResearchState) -> str:
     # 计划未确认 → 回到 planner（HITL 恢复后再跑）
     if not state.get("plan_confirmed"):
         return "planner"
@@ -34,27 +24,7 @@ def supervisor_route(state: ResearchState) -> Any:
     # → fan-out 派发
     plan = state.get("plan") or []
     if (plan and not state.get("evidence")) or (state.get("next_action") == "need_more_research"):
-        sends: list[Send] = []
-        for sq in plan:
-            print(f"子问题：{sq}")
-            # 取 sq.status 如果没有 status 属性，默认 "pending"
-            if getattr(sq, "status", "pending") == "done":
-                continue
-            sources = getattr(sq, "recommended_sources", []) or ["web"]
-            for src in sources:
-                node = _SOURCE_TO_NODE.get(src)
-                if not node:
-                    continue
-                sends.append(
-                    Send(
-                        node,
-                        {
-                            "sub_question": sq,
-                            "research_query": state.get("research_query", ""),
-                        },
-                    )
-                )
-        return sends or "writer"
+        return "research_subgraph" if build_research_sends(state) else "writer"
 
     return "writer"
 

@@ -236,6 +236,8 @@ async def _process_chat(req: ChatRequest) -> ChatResponse:
     # 2. 加载历史会话（按 session_id 隔离）
     loaded_session = session_store.load_session(req.session_id)
     prior_messages = loaded_session["messages"] if loaded_session else []
+    session_metadata = loaded_session["metadata"] if loaded_session else {}
+    pending_choice = session_metadata.get("pending_choice")
     expected_session_version = loaded_session["version"] if loaded_session else 0
     # 3. 加载长期记忆（按 user_id 跨会话共享）
     user_memories = user_memory_manager.load_memories(req.user_id, req.message)
@@ -272,6 +274,7 @@ async def _process_chat(req: ChatRequest) -> ChatResponse:
             "user_id": req.user_id,
             "messages": messages,
             "user_memories": user_memories,
+            "pending_choice": pending_choice,
         },
         config={
             "configurable": {"thread_id": req.session_id},
@@ -317,6 +320,7 @@ async def _process_chat(req: ChatRequest) -> ChatResponse:
         answer=answer,
         context={
             "order_context": result.get("order_context"),
+            "choices": result.get("choices"),
             "needs_human_transfer": result.get("needs_human_transfer", False),
             "transfer_reason": result.get("transfer_reason", ""),
             "user_memories": user_memories,
@@ -342,6 +346,7 @@ async def _process_chat(req: ChatRequest) -> ChatResponse:
             "quality_alert": not evaluation.passed,
             "trace_metadata": trace_config["metadata"],
             "llm_trace": llm_trace,
+            "pending_choice": result.get("pending_choice"),
         },
         expected_version=expected_session_version,
     )
@@ -371,6 +376,7 @@ async def _process_chat(req: ChatRequest) -> ChatResponse:
         needs_human_transfer=result.get("needs_human_transfer", False),
         transfer_reason=result.get("transfer_reason", ""),
         order_context=result.get("order_context"),
+        choices=result.get("choices"),
         token_used=token_used,
         response_time_ms=response_time_ms,
         quality_score=quality_score,
@@ -492,6 +498,7 @@ def _build_degraded_chat_response(
             "degraded": True,
             "degrade_reason": reason,
             "llm_trace": _offline_llm_trace(settings.llm_mode, "degraded", user_memories),
+            "pending_choice": None,
         },
         expected_version=expected_session_version,
     )
@@ -511,6 +518,7 @@ def _build_degraded_chat_response(
         needs_human_transfer=False,
         transfer_reason="",
         order_context=None,
+        choices=None,
         token_used=token_used,
         response_time_ms=response_time_ms,
         quality_score=evaluation.score,
@@ -631,6 +639,7 @@ def _build_llm_messages(
     context = {
         "tool_name": result.get("tool_name", ""),
         "order_context": result.get("order_context"),
+        "choices": result.get("choices"),
         "needs_human_transfer": result.get("needs_human_transfer", False),
         "transfer_reason": result.get("transfer_reason", ""),
         "user_memories": user_memories,
@@ -641,6 +650,7 @@ def _build_llm_messages(
             content=(
                 "你是电商智能客服。请基于后端工具结果回答用户，不要编造订单、物流或退款信息。"
                 "如果没有订单号，只能说明会参考用户偏好，并提示提供订单号查询实际承运商。"
+                "如果后端上下文包含 choices，必须保留这些选项含义，不要新增后端未提供的选项。"
                 "回答要简洁、礼貌、中文。"
             )
         ),

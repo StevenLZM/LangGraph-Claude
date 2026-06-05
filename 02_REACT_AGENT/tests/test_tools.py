@@ -33,6 +33,12 @@ def test_python_executor_blocks_file_access():
     assert "open(" in result
 
 
+def test_builtin_tools_include_calculator():
+    names = {tool.name for tool in get_builtin_tools()}
+
+    assert "calculator" in names
+
+
 def test_builtin_tools_do_not_hardcode_mcp_weather_tool():
     names = {tool.name for tool in get_builtin_tools()}
 

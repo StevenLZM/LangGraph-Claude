@@ -76,6 +76,7 @@ def test_chat_answers_product_question():
     assert "AirBuds Pro 2" in payload["answer"]
     assert "有货" in payload["answer"]
     assert payload["needs_human_transfer"] is False
+    assert payload["choices"]["scenario"] == "product"
 
 
 def test_refund_requires_explicit_confirmation_before_submit():
@@ -83,10 +84,17 @@ def test_refund_requires_explicit_confirmation_before_submit():
     assert "确认" in first["answer"]
     assert "已提交" not in first["answer"]
     assert first["order_context"]["refund_status"] == "confirmation_required"
+    assert first["choices"]["scenario"] == "refund"
+    assert [option["id"] for option in first["choices"]["options"]] == [
+        "confirm_refund",
+        "cancel_refund",
+        "human_transfer",
+    ]
 
-    confirmed = _chat("我确认退款 ORD123456", session_id="refund_session")
+    confirmed = _chat("确认退款", session_id="refund_session")
     assert "退款申请已提交" in confirmed["answer"]
     assert confirmed["order_context"]["refund_status"] == "submitted"
+    assert confirmed["choices"] is None
 
 
 def test_chat_marks_human_transfer_for_complaint_and_legal_issue():
@@ -173,6 +181,11 @@ def test_chat_uses_latest_delivery_preference_when_carrier_query_has_no_order_id
     assert payload["llm_trace"]["model_used"] == "test-real-llm"
     assert payload["llm_trace"]["tool_name"] == "delivery_preference"
     assert "已读取配送偏好" in payload["llm_trace"]["reasoning_summary"]
+    assert payload["choices"]["scenario"] == "logistics"
+
+    follow_up = _chat_for_user(user_id, "delivery_preference_query", "ORD123456")
+    assert follow_up["order_context"]["tracking_no"] == "SF100200300CN"
+    assert follow_up["choices"] is None
 
 
 def test_replacing_delivery_preference_refreshes_response_memories():

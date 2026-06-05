@@ -199,7 +199,7 @@ def _sse_response(thread_id: str, payload, cfg) -> EventSourceResponse:
     g = _graph()
 
     async def gen():
-        events = g.astream_events(payload, config=cfg, version="v2")
+        events = g.astream_events(payload, config=cfg, version="v2", subgraphs=True)
         async for item in sse.stream_events(events, thread_id=thread_id, graph=g, cfg=cfg):
             yield {"event": item["event"], "data": json.dumps(item["data"], ensure_ascii=False)}
 

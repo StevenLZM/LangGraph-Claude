@@ -12,6 +12,7 @@ psycopg[binary,pool]
 langgraph-checkpoint-postgres
 langgraph-checkpoint-redis
 rocketmq-python-client
+mcp
 
 # Settings
 pydantic>=2

@@ -491,7 +491,7 @@ class _ToolCallingLLM:
             content="",
             tool_calls=[
                 {
-                    "name": "calculator",
+                    "name": "fake_calculator",
                     "args": {"expression": "1234 * 5678"},
                     "id": "calc-1",
                 }
@@ -567,7 +567,7 @@ assert state["iteration_count"] == 2
 
 结合本项目：
 
-> `calculator` 的 `CalcInput` 告诉模型 `expression` 应该是数学表达式；`weather_query` 的 `city` 参数来自 MCP server 返回的 `inputSchema`。
+> 运行时工具依赖 schema 告诉模型如何生成 tool call；`calculator` 的 `CalcInput` 告诉模型 `expression` 应该是数学表达式；`weather_query` 的 `city` 参数来自 MCP server 返回的 `inputSchema`。
 
 ### Q4：MCP 在项目中解决什么问题？
 
@@ -626,7 +626,7 @@ assert state["iteration_count"] == 2
 
 结合本项目：
 
-> `tests/test_react_graph.py` 用 `_ToolCallingLLM` 模拟模型第一次调用 calculator，第二次返回最终答案。
+> `tests/test_react_graph.py` 用 `_ToolCallingLLM` 和测试内 fake tool 模拟通用工具调用，第二次返回最终答案。
 
 ### Q8：这个项目还能如何升级？
 

@@ -57,6 +57,24 @@ def test_chat_request_status_endpoint_returns_stored_response():
     assert payload["response"]["request_status"] == "processed"
 
 
+def test_same_request_id_replays_choice_payload():
+    client = TestClient(app)
+    request = {
+        "user_id": "choice_replay_user_001",
+        "session_id": "choice_replay_session_001",
+        "request_id": "choice_replay_req_001",
+        "message": "我要给订单 ORD123456 退款",
+    }
+
+    first = client.post("/chat", json=request)
+    second = client.post("/chat", json=request)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["choices"]["choice_set_id"] == second.json()["choices"]["choice_set_id"]
+    assert second.json()["request_status"] == "replayed"
+
+
 def test_reusing_request_id_for_different_message_is_rejected():
     client = TestClient(app)
     request_id = "req_conflict_001"

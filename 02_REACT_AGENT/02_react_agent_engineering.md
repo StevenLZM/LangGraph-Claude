@@ -23,10 +23,10 @@
 ┌───────────────────────────▼─────────────────────────────────────┐
 │                       工具执行层                                 │
 │                                                                 │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────────┐   │
-│  │ 网络搜索  │ │  计算器  │ │ 代码执行  │ │  MCP Tool Server │   │
-│  │ (Tavily) │ │ (sympy)  │ │(sandbox) │ │ (天气/Wiki/日期) │   │
-│  └──────────┘ └──────────┘ └──────────┘ └──────────────────┘   │
+│  ┌──────────┐ ┌──────────┐ ┌──────────────────────────────┐   │
+│  │ 网络搜索  │ │ 代码执行  │ │ MCP Tool Server / 本地工具    │   │
+│  │ (Tavily) │ │(sandbox) │ │ 天气 / Wiki / 日期            │   │
+│  └──────────┘ └──────────┘ └──────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -235,14 +235,13 @@ class CalcInput(BaseModel):
 
 @tool("calculator", args_schema=CalcInput)
 def calculator(expression: str) -> str:
-    """执行精确的数学计算。适用于：四则运算、百分比、开方、
-    对数等。注意：不能处理变量，只能是纯数字表达式。"""
-    import sympy
+    """执行精确的数学计算。适用于：四则运算、百分比、开方、对数等。"""
     try:
-        result = sympy.sympify(expression)
-        return f"计算结果: {expression} = {result}"
+        parsed = ast.parse(expression, mode="eval")
+        result = _safe_eval(parsed)
     except Exception as e:
         return f"计算错误: {str(e)}"
+    return f"计算结果: {expression} = {result}"
 
 # ── Tool 3: Python 代码执行 ────────────────────────────────
 class CodeInput(BaseModel):
@@ -347,7 +346,7 @@ class AgentState(TypedDict):
     iteration_count: int     # 防死循环计数
     tool_calls_log: list     # 工具调用记录
 
-# 定义所有工具
+# 定义运行时工具
 all_tools = [web_search, calculator, python_executor, wikipedia_search, get_datetime]
 
 # LLM 绑定工具
@@ -401,7 +400,6 @@ REACT_SYSTEM_PROMPT = """你是一个强大的 AI 助手，可以使用多种工
 
 【可用工具说明】
 - web_search: 搜索实时信息（新闻、价格、当前事件）
-- calculator: 精确数学计算（避免 LLM 直接计算的误差）
 - python_executor: 执行 Python 代码验证算法
 - wikipedia_search: 查询知识概念和背景信息
 - get_datetime: 获取当前日期时间
