@@ -40,6 +40,10 @@ def test_compose_defines_m5_runtime_stack():
     assert "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}" in compose
     assert "LLM_MODE=offline_stub" not in compose
     assert "REDIS_URL=redis://redis:6379/0" in compose
+    assert "SUMMARY_MEMORY_DB=/app/data/summary_memory.db" in compose
+    assert "SEMANTIC_MEMORY_DB=/app/data/semantic_memory.db" in compose
+    assert "SEMANTIC_MEMORY_BACKEND=${SEMANTIC_MEMORY_BACKEND:-sqlite}" in compose
+    assert "RETRIEVAL_DECISION_MODE=${RETRIEVAL_DECISION_MODE:-rules}" in compose
     assert "CHAT_REQUEST_DB=/app/data/chat_requests.db" in compose
     assert "ROCKETMQ_ENABLED=${ROCKETMQ_ENABLED:-true}" in compose
     assert "ROCKETMQ_ENDPOINT=rocketmq-namesrv:9876" in compose
@@ -100,6 +104,11 @@ def test_env_example_does_not_contain_real_secrets():
     assert "LLM_MODE=deepseek" in env_example
     assert "GRAFANA_ADMIN_PASSWORD=admin" in env_example
     assert "REDIS_URL=" in env_example
+    assert "SUMMARY_MEMORY_DB=./data/summary_memory.db" in env_example
+    assert "SEMANTIC_MEMORY_DB=./data/semantic_memory.db" in env_example
+    assert "SEMANTIC_MEMORY_BACKEND=sqlite" in env_example
+    assert "MILVUS_MEMORY_URI=./data/memory_milvus.db" in env_example
+    assert "RETRIEVAL_DECISION_MODE=rules" in env_example
     assert "CHAT_REQUEST_DB=./data/chat_requests.db" in env_example
     assert "ROCKETMQ_ENABLED=false" in env_example
     assert "ROCKETMQ_ENDPOINT=localhost:9876" in env_example

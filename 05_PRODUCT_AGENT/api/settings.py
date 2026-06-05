@@ -35,12 +35,19 @@ class Settings(BaseSettings):
     database_url: str = ""
     checkpointer_db: str = str(ROOT / "data" / "sessions.db")
     memory_db: str = str(ROOT / "data" / "memory.db")
+    summary_memory_db: str = str(ROOT / "data" / "summary_memory.db")
+    semantic_memory_db: str = str(ROOT / "data" / "semantic_memory.db")
     chat_request_db: str = str(ROOT / "data" / "chat_requests.db")
     message_outbox_db: str = str(ROOT / "data" / "message_outbox.db")
     storage_backend: str = "sqlite"
     checkpointer_backend: str = "none"
     checkpointer_url: str = ""
     checkpointer_setup: bool = True
+    semantic_memory_backend: str = "sqlite"
+    milvus_memory_uri: str = str(ROOT / "data" / "memory_milvus.db")
+    milvus_memory_collection: str = "customer_long_term_memories"
+    memory_embedding_dimension: int = 64
+    retrieval_decision_mode: str = "rules"
 
     rocketmq_enabled: bool = False
     rocketmq_endpoint: str = "localhost:9876"

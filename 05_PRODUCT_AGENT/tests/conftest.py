@@ -19,6 +19,16 @@ TEST_CHAT_REQUEST_DB = Path("/private/tmp/05_product_agent_pytest_chat_requests.
 if TEST_CHAT_REQUEST_DB.exists():
     TEST_CHAT_REQUEST_DB.unlink()
 os.environ.setdefault("CHAT_REQUEST_DB", str(TEST_CHAT_REQUEST_DB))
+TEST_SUMMARY_MEMORY_DB = Path("/private/tmp/05_product_agent_pytest_summary_memory.db")
+if TEST_SUMMARY_MEMORY_DB.exists():
+    TEST_SUMMARY_MEMORY_DB.unlink()
+os.environ.setdefault("SUMMARY_MEMORY_DB", str(TEST_SUMMARY_MEMORY_DB))
+TEST_SEMANTIC_MEMORY_DB = Path("/private/tmp/05_product_agent_pytest_semantic_memory.db")
+if TEST_SEMANTIC_MEMORY_DB.exists():
+    TEST_SEMANTIC_MEMORY_DB.unlink()
+os.environ.setdefault("SEMANTIC_MEMORY_DB", str(TEST_SEMANTIC_MEMORY_DB))
+os.environ.setdefault("SEMANTIC_MEMORY_BACKEND", "sqlite")
+os.environ.setdefault("RETRIEVAL_DECISION_MODE", "rules")
 os.environ["LLM_MODE"] = "deepseek"
 os.environ.setdefault("DEEPSEEK_API_KEY", "sk-test")
 os.environ["REDIS_URL"] = ""

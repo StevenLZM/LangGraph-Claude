@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 import api.main as main
 from memory.long_term import UserMemoryManager
 from memory.session_store import SessionStore
+from memory.semantic import SQLiteSemanticMemoryStore
+from memory.summary import SummaryMemoryStore
 from messaging.events import (
     build_chat_completed_event,
     build_human_transfer_reminder_event,
@@ -160,9 +162,13 @@ def test_chat_publishes_chat_completed_and_postprocess_events(monkeypatch):
 def test_postprocess_handler_updates_session_metadata_and_is_idempotent(tmp_path: Path):
     session_store = SessionStore(str(tmp_path / "sessions.db"))
     memory_manager = UserMemoryManager(str(tmp_path / "memory.db"))
+    summary_store = SummaryMemoryStore(str(tmp_path / "summary.db"))
+    semantic_store = SQLiteSemanticMemoryStore(str(tmp_path / "semantic.db"))
     handler = PostprocessEventHandler(
         session_store=session_store,
         user_memory_manager=memory_manager,
+        summary_memory_store=summary_store,
+        semantic_memory_store=semantic_store,
     )
     event = build_postprocess_requested_event(
         session_id="session_001",
@@ -177,9 +183,15 @@ def test_postprocess_handler_updates_session_metadata_and_is_idempotent(tmp_path
 
     session = session_store.get_public_session("session_001")
     memories = memory_manager.list_memories("user_001")
+    summary = summary_store.load_summary("session_001")
+    semantic_memories = semantic_store.search(user_id="user_001", query="顺丰配送")
     assert first["status"] == "processed"
     assert second["status"] == "already_processed"
     assert session is not None
     assert session["quality_score"] is not None
+    assert summary is not None
+    assert "顺丰配送" in summary.summary
     assert len(memories) == 1
     assert memories[0]["category"] == "delivery_preference"
+    assert len(semantic_memories) == 1
+    assert semantic_memories[0].memory.category == "delivery_preference"

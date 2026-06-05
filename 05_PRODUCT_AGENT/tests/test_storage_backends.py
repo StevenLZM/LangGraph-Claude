@@ -5,9 +5,16 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from api.settings import Settings
 from api.idempotency import ChatRequestStore, PostgresChatRequestStore, build_chat_request_store
-from memory.factory import build_session_store, build_user_memory_manager
+from memory.factory import (
+    build_semantic_memory_store,
+    build_session_store,
+    build_summary_memory_store,
+    build_user_memory_manager,
+)
 from memory.long_term import PostgresUserMemoryManager, UserMemoryManager
+from memory.semantic import SQLiteSemanticMemoryStore
 from memory.session_store import PostgresSessionStore, SessionStore
+from memory.summary import PostgresSummaryMemoryStore, SummaryMemoryStore
 from messaging.outbox import MessageOutboxStore, PostgresMessageOutboxStore, build_message_outbox_store
 
 
@@ -88,10 +95,17 @@ class FakePostgresConnection:
 
 
 def test_storage_factory_uses_sqlite_by_default(tmp_path):
-    settings = Settings(_env_file=None, memory_db=str(tmp_path / "memory.db"))
+    settings = Settings(
+        _env_file=None,
+        memory_db=str(tmp_path / "memory.db"),
+        summary_memory_db=str(tmp_path / "summary.db"),
+        semantic_memory_db=str(tmp_path / "semantic.db"),
+    )
 
     assert isinstance(build_session_store(settings), SessionStore)
     assert isinstance(build_user_memory_manager(settings), UserMemoryManager)
+    assert isinstance(build_summary_memory_store(settings), SummaryMemoryStore)
+    assert isinstance(build_semantic_memory_store(settings), SQLiteSemanticMemoryStore)
     assert isinstance(build_chat_request_store(settings), ChatRequestStore)
     assert isinstance(build_message_outbox_store(settings), MessageOutboxStore)
 
@@ -105,6 +119,7 @@ def test_storage_factory_uses_postgres_when_configured():
 
     assert isinstance(build_session_store(settings), PostgresSessionStore)
     assert isinstance(build_user_memory_manager(settings), PostgresUserMemoryManager)
+    assert isinstance(build_summary_memory_store(settings), PostgresSummaryMemoryStore)
     assert isinstance(build_chat_request_store(settings), PostgresChatRequestStore)
     assert isinstance(build_message_outbox_store(settings), PostgresMessageOutboxStore)
 

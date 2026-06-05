@@ -13,6 +13,7 @@ langgraph-checkpoint-postgres
 langgraph-checkpoint-redis
 rocketmq-python-client
 mcp
+pymilvus[milvus-lite]
 
 # Settings
 pydantic>=2

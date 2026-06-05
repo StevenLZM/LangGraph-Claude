@@ -13,6 +13,7 @@ from langchain_core.messages import SystemMessage
 
 from agent.checkpointing import build_checkpointer, close_checkpointer_resources
 from agent.graph import build_customer_service_graph
+from agent.retrieval import RetrievalDecision, decide_retrieval
 from api.idempotency import IdempotencyConflict, build_chat_request_store, chat_message_hash
 from api.middleware.rate_limiter import RateLimiter, TokenBudgetExceeded
 from api.routers.admin import create_admin_router
@@ -20,7 +21,12 @@ from api.schemas import ChatRequest, ChatResponse, DeleteMemoriesResponse
 from api.session_lock import SessionLockManager
 from api.settings import settings
 from api.ui import CUSTOMER_SERVICE_UI
-from memory.factory import build_session_store, build_user_memory_manager
+from memory.factory import (
+    build_semantic_memory_store,
+    build_session_store,
+    build_summary_memory_store,
+    build_user_memory_manager,
+)
 from memory.session_store import SessionVersionConflict
 from memory.short_term import ContextWindowManager
 from llm.factory import build_customer_service_llm
@@ -42,6 +48,8 @@ session_store = build_session_store(settings)
 chat_request_store = build_chat_request_store(settings)
 session_lock_manager = SessionLockManager(redis_url=settings.redis_url)
 user_memory_manager = build_user_memory_manager(settings)
+summary_memory_store = build_summary_memory_store(settings)
+semantic_memory_store = build_semantic_memory_store(settings)
 quality_evaluator = AutoQualityEvaluator(alert_threshold=settings.quality_alert_threshold)
 customer_service_llm_setup = build_customer_service_llm(settings)
 customer_service_llm = customer_service_llm_setup.llm
@@ -70,6 +78,8 @@ app.include_router(
     create_admin_router(
         session_store=session_store,
         user_memory_manager=user_memory_manager,
+        summary_memory_store=summary_memory_store,
+        semantic_memory_store=semantic_memory_store,
         message_outbox_store=message_outbox_store,
     )
 )
@@ -98,6 +108,9 @@ async def health() -> dict:
             "redis": "configured" if settings.redis_url else "not_configured",
             "database": "configured" if settings.database_url else "not_configured",
             "memory": settings.storage_backend,
+            "summary_memory": getattr(summary_memory_store, "backend", "unknown"),
+            "semantic_memory": getattr(semantic_memory_store, "backend", "unknown"),
+            "retrieval_decision": settings.retrieval_decision_mode,
             "checkpointer": settings.checkpointer_backend,
             "llm": settings.llm_mode,
             "llm_startup_error": customer_service_llm_setup.startup_error,
@@ -239,11 +252,18 @@ async def _process_chat(req: ChatRequest) -> ChatResponse:
     session_metadata = loaded_session["metadata"] if loaded_session else {}
     pending_choice = session_metadata.get("pending_choice")
     expected_session_version = loaded_session["version"] if loaded_session else 0
-    # 3. 加载长期记忆（按 user_id 跨会话共享）
-    user_memories = user_memory_manager.load_memories(req.user_id, req.message)
+    loaded_summary = summary_memory_store.load_summary(req.session_id)
+    retrieval_decision = await _decide_retrieval(req.message)
+    # 3. 根据检索决策加载长期记忆（按 user_id 跨会话共享）
+    user_memories = _load_user_memories_for_decision(
+        user_id=req.user_id,
+        message=req.message,
+        retrieval_decision=retrieval_decision,
+    )
     # 4. 短期记忆裁剪（按 session_id 内的消息列表）
+    summary_message = _summary_system_message(loaded_summary.summary if loaded_summary else "")
     messages = context_window_manager.trim(
-        [*prior_messages, HumanMessage(content=req.message)]
+        [*summary_message, *prior_messages, HumanMessage(content=req.message)]
     )
     estimated_tokens = context_window_manager.count_tokens(messages)
     try:
@@ -253,7 +273,7 @@ async def _process_chat(req: ChatRequest) -> ChatResponse:
             req=req,
             messages=messages,
             user_memories=user_memories,
-            memory_summary=_extract_memory_summary(messages),
+            memory_summary=_extract_memory_summary(messages) or (loaded_summary.summary if loaded_summary else ""),
             reason=exc.reason,
             token_used=exc.token_count,
             started_at=started_at,
@@ -274,6 +294,8 @@ async def _process_chat(req: ChatRequest) -> ChatResponse:
             "user_id": req.user_id,
             "messages": messages,
             "user_memories": user_memories,
+            "memory_summary": loaded_summary.summary if loaded_summary else "",
+            "retrieval_decision": retrieval_decision.to_dict(),
             "pending_choice": pending_choice,
         },
         config={
@@ -312,7 +334,7 @@ async def _process_chat(req: ChatRequest) -> ChatResponse:
             },
         )
         result = {**result, "messages": result_messages}
-    memory_summary = _extract_memory_summary(result.get("messages", []))
+    memory_summary = _extract_memory_summary(result.get("messages", [])) or (loaded_summary.summary if loaded_summary else "")
     response_time_ms = result.get("response_time_ms", 0)
     token_used = result.get("token_used", 0)
     evaluation = quality_evaluator.evaluate(
@@ -324,6 +346,7 @@ async def _process_chat(req: ChatRequest) -> ChatResponse:
             "needs_human_transfer": result.get("needs_human_transfer", False),
             "transfer_reason": result.get("transfer_reason", ""),
             "user_memories": user_memories,
+            "retrieval_decision": retrieval_decision.to_dict(),
         },
     )
     # 6. 保存长期记忆（按 user_id）
@@ -346,6 +369,8 @@ async def _process_chat(req: ChatRequest) -> ChatResponse:
             "quality_alert": not evaluation.passed,
             "trace_metadata": trace_config["metadata"],
             "llm_trace": llm_trace,
+            "summary_version": loaded_summary.version if loaded_summary else 0,
+            "retrieval_decision": retrieval_decision.to_dict(),
             "pending_choice": result.get("pending_choice"),
         },
         expected_version=expected_session_version,
@@ -399,6 +424,7 @@ async def get_session(session_id: str) -> dict:
 @app.delete("/users/{user_id}/memories", response_model=DeleteMemoriesResponse)
 async def delete_user_memories(user_id: str) -> DeleteMemoriesResponse:
     deleted = user_memory_manager.delete_memories(user_id)
+    semantic_memory_store.delete_user(user_id)
     return DeleteMemoriesResponse(user_id=user_id, deleted=deleted)
 
 
@@ -456,6 +482,55 @@ def _extract_memory_summary(messages: list[object]) -> str:
         if isinstance(message, SystemMessage) and message.additional_kwargs.get("type") == "summary":
             return str(message.content)
     return ""
+
+
+async def _decide_retrieval(message: str) -> RetrievalDecision:
+    llm = customer_service_llm if settings.retrieval_decision_mode.casefold() == "llm" else None
+    return await decide_retrieval(
+        message,
+        llm=llm,
+        mode=settings.retrieval_decision_mode,
+    )
+
+
+def _load_user_memories_for_decision(
+    *,
+    user_id: str,
+    message: str,
+    retrieval_decision: RetrievalDecision,
+) -> list[str]:
+    if not retrieval_decision.needs_memory:
+        return []
+
+    keyword_memories = user_memory_manager.load_memories(user_id, retrieval_decision.query_rewrite or message)
+    semantic_results = semantic_memory_store.search(
+        user_id=user_id,
+        query=retrieval_decision.query_rewrite or message,
+        filters=retrieval_decision.memory_filters,
+    )
+    return _merge_memory_texts(keyword_memories, [result.content for result in semantic_results])
+
+
+def _merge_memory_texts(primary: list[str], secondary: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in [*primary, *secondary]:
+        text = str(item).strip()
+        if text and text not in seen:
+            merged.append(text)
+            seen.add(text)
+    return merged
+
+
+def _summary_system_message(summary: str) -> list[SystemMessage]:
+    if not summary.strip():
+        return []
+    return [
+        SystemMessage(
+            content=summary,
+            additional_kwargs={"type": "summary", "source": "summary_memory"},
+        )
+    ]
 
 
 def _build_degraded_chat_response(
@@ -616,6 +691,8 @@ async def _generate_required_llm_answer(
             "model_used": "primary",
             "fallback_used": False,
             "reasoning_summary": _reasoning_summary(result.get("tool_name", ""), user_memories),
+            "retrieval_decision": result.get("retrieval_decision", {}),
+            "memory_summary": result.get("memory_summary", ""),
         }
     except Exception as exc:
         raise RuntimeError(_llm_error_message(exc)) from exc
@@ -626,6 +703,8 @@ async def _generate_required_llm_answer(
         "model_used": metadata_result.model_used,
         "fallback_used": metadata_result.fallback_used,
         "reasoning_summary": _reasoning_summary(result.get("tool_name", ""), user_memories),
+        "retrieval_decision": result.get("retrieval_decision", {}),
+        "memory_summary": result.get("memory_summary", ""),
     }
 
 
@@ -643,6 +722,8 @@ def _build_llm_messages(
         "needs_human_transfer": result.get("needs_human_transfer", False),
         "transfer_reason": result.get("transfer_reason", ""),
         "user_memories": user_memories,
+        "memory_summary": result.get("memory_summary", ""),
+        "retrieval_decision": result.get("retrieval_decision", {}),
         "draft_answer": draft_answer,
     }
     return [
