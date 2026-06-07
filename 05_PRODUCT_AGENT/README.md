@@ -1,6 +1,6 @@
 # 05_PRODUCT_AGENT
 
-生产级 AI Agent 平台的智能客服项目。当前已完成 M6 收尾强化、存储后端升级和 RocketMQ 业务消息接入：`/chat`、内置客服工作台、Mock 工具、规则型客服 Agent、短期记忆窗口、SQLite/Postgres 会话和用户长期记忆、LangGraph Postgres/Redis checkpointer、限流与 Token 预算降级、DeepSeek 真实 LLM 主路径、LLM fallback 与熔断测试层、FAQ/RAG 适配、RocketMQ 跨项目业务消息、管理接口、100 题自动评测、LangSmith trace metadata、Prometheus 兼容指标、Grafana 看板编排和 Locust 压测入口。
+生产级 AI Agent 平台的智能客服项目。当前已完成 M6 收尾强化、存储后端升级、RocketMQ 业务消息接入和三层记忆架构升级：`/chat`、内置客服工作台、Mock 工具、规则型客服 Agent、会话上下文、摘要记忆、SQLite/Postgres 用户长期记忆、SQLite fallback / Milvus 可选语义长期记忆、检索决策节点、LangGraph Postgres/Redis checkpointer、限流与 Token 预算降级、DeepSeek 真实 LLM 主路径、LLM fallback 与熔断测试层、FAQ/RAG 适配、RocketMQ 跨项目业务消息、管理接口、100 题自动评测、LangSmith trace metadata、Prometheus 兼容指标、Grafana 看板编排和 Locust 压测入口。
 
 ## 本地运行
 
@@ -239,7 +239,7 @@ docker compose --profile loadtest run --rm locust \
 pytest tests -q
 ```
 
-M6 的业务 guardrail 仍由规则层负责，包括退款二次确认、转人工优先级和工具上下文构造；用户可见客服回答必须由真实 LLM 基于规则/工具结果生成。pytest 通过注入 fake LLM 保持离线稳定，不再依赖 `offline_stub` 作为运行模式。Compose 会启动 Redis、Postgres/pgvector、RocketMQ、Prometheus 和 Grafana；Postgres 业务存储、LangGraph checkpoint 和 RocketMQ outbox 已接入，pgvector/Mem0 语义记忆仍留给后续优化。
+M6 的业务 guardrail 仍由规则层负责，包括退款二次确认、转人工优先级和工具上下文构造；用户可见客服回答必须由真实 LLM 基于规则/工具结果生成。pytest 通过注入 fake LLM 保持离线稳定，不再依赖 `offline_stub` 作为运行模式。Compose 会启动 Redis、Postgres/pgvector、RocketMQ、Prometheus 和 Grafana；Postgres 业务存储、LangGraph checkpoint、RocketMQ outbox、摘要记忆、检索决策和语义长期记忆接口已接入。Milvus Lite 可选 backend 已提供，真实 embedding 服务和远程 Milvus 集群效果验证仍留给后续专项。
 
 ## 教学文档
 

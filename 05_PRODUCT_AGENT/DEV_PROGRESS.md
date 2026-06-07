@@ -2,8 +2,8 @@
 
 > 本文档是 05_PRODUCT_AGENT 的工程进度入口。后续开发都在 `main` 分支进行，并以本文档记录迭代目标、验收状态、关键决策和未竟事项。
 >
-> 最后更新：2026-05-11
-> 当前阶段：**M6 已完成 + 存储后端升级 + RocketMQ 业务消息接入**（DeepSeek 主路径、FAQ/RAG、管理接口、自动评测、Postgres 业务存储、LangGraph checkpointer 和 RocketMQ 跨项目消息已接入）
+> 最后更新：2026-06-05
+> 当前阶段：**M6 已完成 + 存储后端升级 + RocketMQ 业务消息接入 + 三层记忆架构升级**（DeepSeek 主路径、FAQ/RAG、管理接口、自动评测、Postgres 业务存储、LangGraph checkpointer、RocketMQ 跨项目消息、摘要记忆、语义长期记忆和检索决策节点已接入）
 
 ---
 
@@ -16,10 +16,10 @@
 | 定位 | 面向真实流量的生产级客服 Agent，重点验证并发、记忆、限流、成本、监控、降级、评估和部署能力 |
 | PRD | `05_production_agent_customer_service.md` |
 | 工程设计 | `05_production_engineering.md` |
-| 当前代码状态 | 已完成 M6 + 存储升级 + RocketMQ 消息接入：FastAPI `/chat`、内置客服 UI、Mock 工具、规则型客服 Agent、短期记忆窗口、SQLite/Postgres 会话状态、SQLite/Postgres 用户长期记忆、LangGraph Postgres/Redis checkpointer 工厂、RocketMQ outbox 与跨项目消息契约、Hybrid 限流、Token 预算降级、DeepSeek 真实 LLM 主路径、LLM fallback/熔断测试层、FAQ/RAG 适配、管理接口、100 题自动评测、Prometheus 兼容指标、LangSmith trace metadata、自动质量评估、Docker Compose、Grafana provisioning、Locust 压测入口、pytest 测试 |
+| 当前代码状态 | 已完成 M6 + 存储升级 + RocketMQ 消息接入 + 三层记忆架构升级：FastAPI `/chat`、内置客服 UI、Mock 工具、规则型客服 Agent、短期记忆窗口、SQLite/Postgres 会话状态、SQLite/Postgres 用户长期记忆、SQLite/Postgres 摘要记忆、SQLite fallback / Milvus 可选语义长期记忆、检索决策节点、LangGraph Postgres/Redis checkpointer 工厂、RocketMQ outbox 与跨项目消息契约、Hybrid 限流、Token 预算降级、DeepSeek 真实 LLM 主路径、LLM fallback/熔断测试层、FAQ/RAG 适配、管理接口、100 题自动评测、Prometheus 兼容指标、LangSmith trace metadata、自动质量评估、Docker Compose、Grafana provisioning、Locust 压测入口、pytest 测试 |
 | 开发分支 | `main` |
 | API 默认端口 | `8000` |
-| 主要技术栈 | FastAPI、LangGraph、RocketMQ、Redis、PostgreSQL/pgvector、SQLite、LangSmith、Prometheus、Grafana、Docker Compose |
+| 主要技术栈 | FastAPI、LangGraph、RocketMQ、Redis、PostgreSQL/pgvector、SQLite、Milvus Lite（可选语义记忆）、LangSmith、Prometheus、Grafana、Docker Compose |
 
 05 的目标不是再证明 Agent 能“跑起来”，而是把 Agent 放到真实客服系统里，具备上线运营所需的稳定性、成本控制、质量追踪和恢复能力。
 
@@ -71,7 +71,7 @@
 **主要交付**
 - 短期记忆：Token 窗口裁剪、早期对话摘要、保留最近 8 轮
 - 会话状态：SQLite checkpointer 或等价持久化机制
-- 长期记忆：第一版使用 SQLite 轻量实现，保持 `UserMemoryManager` 接口稳定，后续可替换为 Mem0 + pgvector
+- 长期记忆：第一版使用 SQLite 轻量实现；当前已扩展为关键词/结构化记忆 + 语义长期记忆接口，默认 SQLite fallback，可配置 Milvus Lite
 - 记忆接口：加载用户记忆、保存关键事件、删除用户记忆
 - `GET /sessions/{session_id}`
 - `DELETE /users/{user_id}/memories`
@@ -399,7 +399,7 @@ Prometheus 指标出口。
 - 会话状态可通过 SQLite 重新实例化查询，满足本阶段恢复/查询要求。
 
 **遗留到 M3**
-- 当前记忆检索是轻量关键词匹配，不是向量检索；后续可替换为 Mem0 + pgvector。
+- M2 阶段记忆检索是轻量关键词匹配；当前三层记忆升级已补充语义长期记忆接口和检索决策节点。
 - 当前没有 Redis 限流、Token 预算和模型 fallback，M3 需要补齐生产弹性。
 - 当前质量分和 token 仍是轻量估算，M4 继续接入正式评估和指标。
 
@@ -468,7 +468,7 @@ Prometheus 指标出口。
 - Grafana dashboard 包含 QPS、平均响应时间、Token、错误率、转人工率和质量评分指标。
 
 **遗留到 M6**
-- 当前 Postgres/pgvector 作为部署拓扑服务启动，应用记忆实现仍使用 SQLite；后续可迁移到 pgvector/Mem0。
+- 当时 Postgres/pgvector 作为部署拓扑服务启动，应用记忆仍使用 SQLite；当前三层记忆升级已补充语义长期记忆接口和 Milvus Lite 可选 backend。
 - 真实 24 小时长稳运行和正式压测报告待具备 Docker daemon/CI 环境后执行并归档。
 - 真实 LLM 主路径、FAQ/RAG 工具和自动评测数据集仍在 M6 强化。
 
@@ -488,7 +488,7 @@ Prometheus 指标出口。
 - M6 评测数据集覆盖订单、物流、商品、退款、转人工、记忆、FAQ/RAG 和降级兜底场景。
 
 **后续优化**
-- Postgres 业务存储和 LangGraph checkpointer 已在后续专项接入；Mem0/pgvector 语义记忆仍可作为后续专项。
+- Postgres 业务存储和 LangGraph checkpointer 已在后续专项接入；三层记忆升级已补充摘要记忆、检索决策和语义长期记忆接口。
 - 24 小时长稳运行、真实 Docker 压测报告和线上告警通道仍需在具备 Docker daemon/CI 环境后执行并归档。
 - FAQ/RAG 当前通过适配层复用 01_RAG，本项目不复制 01 的索引构建流程。
 
@@ -531,6 +531,27 @@ Prometheus 指标出口。
 - 当前消费者 handler 已可被测试调用；真实 RocketMQ 消费 worker 和 DLQ 重放界面可作为下一步专项。
 - 事务消息、延迟消息已在 topic/config 契约中预留，尚未接入真实业务场景。
 
+### 2026-06-05：三层记忆架构与检索决策升级完成
+
+**实际交付**
+- 新增 `agent/retrieval.py`：提供 `RetrievalDecision`、规则检索决策和 LLM JSON 检索决策解析；LLM 决策失败时自动退回规则决策。
+- LangGraph 增加 `retrieval_decision` 节点，现有 `context_loader -> retrieval_decision -> agent -> finalizer` 主图保持轻量线性编排。
+- 新增 `memory/summary.py`：`SummaryMemoryStore` / `PostgresSummaryMemoryStore` 按 `session_id` 保存滚动摘要、版本、覆盖轮次和来源事件。
+- 新增 `memory/semantic.py`：`StructuredMemory`、SQLite semantic fallback、可选 `MilvusSemanticMemoryStore`，用于长期语义记忆检索。
+- `/chat` 在进入客服图前执行检索决策，按需加载关键词长期记忆和语义长期记忆，并在 `llm_trace.retrieval_decision` 中暴露决策信息。
+- `PostprocessEventHandler` 异步后处理 `PostprocessRequested` 时写入摘要记忆和语义长期记忆，重复事件通过 `postprocess_event_ids` 幂等跳过。
+- 管理接口扩展：`GET /admin/sessions/{session_id}/summary` 查看会话摘要；`GET /admin/users/{user_id}/memories` 同时返回关键词记忆和语义记忆。
+- 配置扩展：`SUMMARY_MEMORY_DB`、`SEMANTIC_MEMORY_DB`、`SEMANTIC_MEMORY_BACKEND`、`MILVUS_MEMORY_URI`、`MILVUS_MEMORY_COLLECTION`、`RETRIEVAL_DECISION_MODE`。
+
+**验收结果**
+- `cd 05_PRODUCT_AGENT && pytest tests -q`：93 passed。
+- 新增测试覆盖检索决策、摘要记忆、语义记忆、`/chat` 条件检索、postprocess 摘要/语义记忆写入和部署配置。
+
+**当前边界**
+- 默认语义记忆使用 SQLite fallback，便于本地演示和 pytest；Milvus Lite 通过 `SEMANTIC_MEMORY_BACKEND=milvus` 可选启用。
+- 当前 Milvus backend 使用确定性 hash embedding 作为离线可测实现；接真实 embedding 服务时应替换 `SemanticMemoryStore` 内部 embedding 策略，不改变 `/chat` 契约。
+- 检索决策默认 `rules`，`llm` 模式可用真实 LLM 产出结构化 JSON，但业务 guardrail 仍由规则层负责，不能由检索决策覆盖退款确认和转人工安全边界。
+
 ---
 
 ## 八、后续开发约定
@@ -546,7 +567,7 @@ Prometheus 指标出口。
 
 ## 九、未竟事项
 
-- 长期记忆后续是否升级为 Mem0 + pgvector 语义检索。
+- 语义记忆已具备 SQLite fallback 和 Milvus Lite 可选 backend；真实 embedding 服务、Milvus 远程集群和大规模召回效果评测仍需专项验证。
 - 真实 24 小时长稳运行和正式 Docker 压测报告待执行归档。
 - Postgres/Redis checkpointer 的容器级恢复演练待执行归档。
 - FAQ/RAG 的 01_RAG 索引构建仍由 01 项目负责，05 只维护适配层。

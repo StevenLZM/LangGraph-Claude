@@ -1,6 +1,6 @@
 # 05 Product Agent 教学文档
 
-这份文档用于讲解 `05_PRODUCT_AGENT` 当前已经完成的 M0-M6，以及新增的多用户并发与幂等一致性改造。重点不是背目录，而是能把一次客服请求从 UI 到 API、幂等记录、会话锁、记忆、限流、LangGraph、规则决策、DeepSeek 生成、FAQ/RAG、质量评估、指标记录、业务消息、Docker Compose 部署、Locust 压测和自动评测完整讲清楚。
+这份文档用于讲解 `05_PRODUCT_AGENT` 当前已经完成的 M0-M6，以及新增的多用户并发、幂等一致性和三层记忆架构改造。重点不是背目录，而是能把一次客服请求从 UI 到 API、幂等记录、会话锁、检索决策、三层记忆、限流、LangGraph、规则决策、DeepSeek 生成、FAQ/RAG、质量评估、指标记录、业务消息、Docker Compose 部署、Locust 压测和自动评测完整讲清楚。
 
 当前真实完成范围：
 
@@ -12,18 +12,19 @@
 - M5：Dockerfile、Docker Compose、Prometheus/Grafana 编排、Grafana 看板 provisioning、Locust 压测入口。
 - M6：DeepSeek 真实 LLM 主路径、FAQ/RAG 适配、管理接口、100 题评测集、自动评测报告。
 - 并发一致性增强：`request_id` 幂等协议、Postgres 幂等表、Redis 会话分布式锁、会话 version 乐观锁、Postgres RocketMQ outbox。
+- 三层记忆增强：会话上下文、摘要记忆、语义长期记忆、检索决策节点、SQLite fallback 和可选 Milvus Lite backend。
 
 尚未完成范围：
 
-- 24 小时长稳运行、正式 Docker 压测报告、pgvector/Mem0 语义记忆迁移和外部告警通道。
+- 24 小时长稳运行、正式 Docker 压测报告、真实 embedding 服务/远程 Milvus 效果验证、独立 outbox relay worker 和外部告警通道。
 
-面试时要明确：当前 M6 已具备本地可演示的“客服闭环 + 幂等重试 + 会话并发控制 + 记忆 + 限流 + 观测 + 质量评估 + DeepSeek + FAQ/RAG + RocketMQ outbox + 管理接口 + 容器编排 + Postgres 业务存储 + LangGraph checkpointer + 压测入口 + 自动评测”能力，但还不是完整线上生产系统；正式压测报告、24 小时长稳验证、pgvector 语义记忆迁移、独立 outbox relay worker 和外部告警通道仍需后续环境验证。
+面试时要明确：当前 M6 已具备本地可演示的“客服闭环 + 幂等重试 + 会话并发控制 + 三层记忆 + 检索决策 + 限流 + 观测 + 质量评估 + DeepSeek + FAQ/RAG + RocketMQ outbox + 管理接口 + 容器编排 + Postgres 业务存储 + LangGraph checkpointer + 压测入口 + 自动评测”能力，但还不是完整线上生产系统；正式压测报告、24 小时长稳验证、真实 embedding/Milvus 召回效果、独立 outbox relay worker 和外部告警通道仍需后续环境验证。
 
 ---
 
 ## 1. 项目一句话介绍
 
-`05_PRODUCT_AGENT` 是一个生产级 AI 客服系统的渐进式实现。当前阶段已经跑通可测试、可部署、可评测的客服服务：用户从 UI 或 API 发起咨询，FastAPI 先通过 `request_id` 处理客户端重试幂等，再用 Redis 会话锁和 Session version 防止同会话并发覆盖，然后做协议校验、限流和 Token 预算，加载会话与用户记忆，进入带可选 checkpointer 的 LangGraph 状态流，规则型客服决策调用 Mock 业务工具或 FAQ/RAG 适配层，然后必须通过 DeepSeek/真实 LLM 基于工具结果生成最终话术，最后保存会话、评估回答质量、记录 Prometheus 兼容指标、写入 RocketMQ outbox 并返回响应。M5 提供 Docker Compose、Prometheus、Grafana 和 Locust 压测入口，M6 补齐 DeepSeek、管理接口和 100 题自动评测，存储升级补齐 Postgres 业务存储和 LangGraph Postgres/Redis checkpointer。
+`05_PRODUCT_AGENT` 是一个生产级 AI 客服系统的渐进式实现。当前阶段已经跑通可测试、可部署、可评测的客服服务：用户从 UI 或 API 发起咨询，FastAPI 先通过 `request_id` 处理客户端重试幂等，再用 Redis 会话锁和 Session version 防止同会话并发覆盖，然后做协议校验、限流和 Token 预算，加载会话上下文、摘要记忆和长期记忆，执行检索决策判断是否读取语义记忆/FAQ/RAG/业务上下文，进入带可选 checkpointer 的 LangGraph 状态流，规则型客服决策调用 Mock 业务工具或 FAQ/RAG 适配层，然后必须通过 DeepSeek/真实 LLM 基于工具结果生成最终话术，最后保存会话、评估回答质量、记录 Prometheus 兼容指标、写入 RocketMQ outbox 并返回响应。M5 提供 Docker Compose、Prometheus、Grafana 和 Locust 压测入口，M6 补齐 DeepSeek、管理接口和 100 题自动评测，存储升级补齐 Postgres 业务存储和 LangGraph Postgres/Redis checkpointer，三层记忆升级补齐摘要记忆、语义长期记忆和检索决策。
 
 面试讲法：
 
@@ -52,7 +53,8 @@
 │   ├── checkpointing.py         # LangGraph Postgres/Redis/none checkpointer 工厂
 │   ├── graph.py                 # LangGraph 工作流装配
 │   ├── state.py                 # CustomerServiceState
-│   ├── nodes.py                 # context_loader / agent / finalizer 节点
+│   ├── nodes.py                 # context_loader / retrieval_decision / agent / finalizer 节点
+│   ├── retrieval.py             # 检索决策：rules fallback + LLM JSON 解析
 │   ├── intent.py                # 订单号和意图识别
 │   ├── service.py               # 规则型客服决策
 │   └── tools.py                 # Mock 业务工具
@@ -60,7 +62,9 @@
 │   ├── short_term.py            # 摘要 + 最近 8 轮的短期窗口
 │   ├── factory.py               # SQLite/Postgres 存储后端选择
 │   ├── session_store.py         # SQLite/Postgres 会话状态
-│   └── long_term.py             # SQLite/Postgres 用户长期记忆
+│   ├── summary.py               # SQLite/Postgres 会话摘要记忆
+│   ├── semantic.py              # SQLite fallback / Milvus 语义长期记忆
+│   └── long_term.py             # SQLite/Postgres 用户关键词长期记忆
 ├── llm/
 │   ├── factory.py               # DeepSeek/OpenAI-compatible/Anthropic 客户端工厂
 │   └── resilient_llm.py         # 主备模型、重试、熔断
@@ -104,14 +108,14 @@ api.main
   -> api.routers.admin
   -> api.idempotency / api.session_lock
   -> api.middleware.rate_limiter
-  -> memory.factory -> memory.session_store / memory.long_term / memory.short_term
-  -> agent.graph -> agent.nodes -> agent.service -> agent.intent / agent.tools / rag.faq_tool
+  -> memory.factory -> memory.session_store / memory.summary / memory.long_term / memory.semantic / memory.short_term
+  -> agent.graph -> agent.nodes -> agent.retrieval / agent.service -> agent.intent / agent.tools / rag.faq_tool
   -> llm.factory / llm.resilient_llm
   -> messaging.events / messaging.outbox / messaging.publisher
   -> monitoring.tracing / monitoring.evaluator / monitoring.metrics
 ```
 
-这个依赖方向说明：API 层是生产边界，负责协议、幂等、并发控制、限流、记忆、观测和响应落库；客服业务规则集中在 `agent/service.py`；业务数据访问集中在 `agent/tools.py`；业务消息集中在 `messaging/`；运营指标集中在 `monitoring/`。
+这个依赖方向说明：API 层是生产边界，负责协议、幂等、并发控制、限流、三层记忆装配、观测和响应落库；检索决策集中在 `agent/retrieval.py`；客服业务规则集中在 `agent/service.py`；业务数据访问集中在 `agent/tools.py`；业务消息集中在 `messaging/`；运营指标集中在 `monitoring/`。
 
 ---
 
@@ -131,12 +135,15 @@ api.main
   -> SessionLockManager 获取同 session_id 的会话锁
   -> RateLimiter 检查用户限流和全局 QPS
   -> SessionStore 加载历史会话和 version
-  -> UserMemoryManager 召回用户长期记忆
+  -> SummaryMemoryStore 加载 session_id 的滚动摘要
+  -> agent.retrieval 决策是否需要长期记忆、FAQ/RAG 或业务上下文
+  -> UserMemoryManager / SemanticMemoryStore 按决策召回用户长期记忆
   -> ContextWindowManager 裁剪短期上下文并估算 token
   -> RateLimiter 预留单次和全局 token 预算
   -> build_trace_config 生成 session/user metadata
   -> customer_service_graph.invoke(..., configurable.thread_id=session_id)
   -> context_loader_node 初始化上下文
+  -> retrieval_decision_node 保留 API 侧检索决策，缺省时规则 fallback
   -> agent_node 调 handle_customer_message 做客服决策
   -> get_order / get_logistics / get_product / apply_refund 读取 Mock 业务数据
   -> finalizer_node 计算窗口大小、轮次、响应耗时
@@ -161,12 +168,14 @@ api.main
 | 会话锁 | `api/session_lock.py::SessionLockManager` | Redis `SET NX PX` 串行化同一 `session_id` 的新请求 |
 | 限流/QPS | `api/middleware/rate_limiter.py::RateLimiter` | 用户每分钟限制和全局每秒限制 |
 | 会话加载 | `memory/session_store.py::load_session` | 读取同一 `session_id` 的历史消息 |
-| 记忆召回 | `memory/long_term.py::load_memories` | 按用户和当前问题召回长期记忆 |
+| 摘要记忆 | `memory/summary.py::load_summary` | 按 `session_id` 加载滚动摘要并注入上下文 |
+| 检索决策 | `agent/retrieval.py::decide_retrieval` | 判断是否查长期记忆、FAQ/RAG 或业务上下文 |
+| 记忆召回 | `memory/long_term.py` / `memory/semantic.py` | 按用户和检索决策召回关键词记忆与语义长期记忆 |
 | 窗口裁剪 | `memory/short_term.py::trim` | 摘要早期消息，保留最近 8 轮 |
 | Token 预算 | `RateLimiter.reserve_token_budget` | 单次/全局预算超限走降级回复 |
 | Trace metadata | `monitoring/tracing.py::build_trace_config` | 给 LangGraph 调用注入 session/user metadata |
 | Checkpoint | `agent/checkpointing.py::build_checkpointer` | 按配置接入 none/Postgres/Redis checkpointer |
-| 图编排 | `agent/graph.py::build_customer_service_graph` | 定义 `context_loader -> agent -> finalizer`，可注入 checkpointer |
+| 图编排 | `agent/graph.py::build_customer_service_graph` | 定义 `context_loader -> retrieval_decision -> agent -> finalizer`，可注入 checkpointer |
 | 客服决策 | `agent/service.py::handle_customer_message` | 按优先级处理转人工、退款、物流、订单、商品 |
 | 工具执行 | `agent/tools.py` | 返回 Mock 订单、物流、商品和退款结果 |
 | 质量评估 | `monitoring/evaluator.py::AutoQualityEvaluator` | 计算 `quality_score` 和低质告警 |
@@ -176,7 +185,7 @@ api.main
 
 面试重点：
 
-> 这里的关键不是“写了几个 if”，而是把接口、幂等、并发控制、限流、记忆、状态机、业务决策、工具访问、质量评估、消息 outbox 和指标记录拆成了不同层。当前已能在 SQLite/Postgres 间切换业务存储，并可注入 LangGraph checkpointer；后续把关键词记忆升级成 Mem0/pgvector，或者把规则型决策演进为 ToolNode 时，API 契约和测试可以保持稳定。
+> 这里的关键不是“写了几个 if”，而是把接口、幂等、并发控制、限流、三层记忆、检索决策、状态机、业务决策、工具访问、质量评估、消息 outbox 和指标记录拆成了不同层。当前已能在 SQLite/Postgres 间切换业务存储，摘要记忆和语义记忆有独立接口，并可注入 LangGraph checkpointer；后续把 hash embedding 替换成真实 embedding、或者把规则型决策演进为 ToolNode 时，API 契约和测试可以保持稳定。
 
 ---
 
@@ -194,13 +203,15 @@ session_store = build_session_store(settings)
 chat_request_store = build_chat_request_store(settings)
 session_lock_manager = SessionLockManager(redis_url=settings.redis_url)
 user_memory_manager = build_user_memory_manager(settings)
+summary_memory_store = build_summary_memory_store(settings)
+semantic_memory_store = build_semantic_memory_store(settings)
 quality_evaluator = AutoQualityEvaluator(alert_threshold=settings.quality_alert_threshold)
 rate_limiter = RateLimiter(...)
 ```
 
 含义：
 
-- 图、checkpointer、会话存储、长期记忆、限流器和质量评估器在进程内复用。
+- 图、checkpointer、会话存储、摘要记忆、关键词长期记忆、语义长期记忆、限流器和质量评估器在进程内复用。
 - `/chat` 不在每次请求重新构建图或初始化存储。
 - 本地默认使用 SQLite、无 checkpointer、内存限流和内存会话锁，便于离线演示和测试。
 - Docker Compose 默认使用 Postgres 业务存储、Postgres checkpointer、Redis 限流和 Redis 会话锁。
@@ -579,11 +590,15 @@ Mock 工具的设计要求：
 
 ---
 
-## 12. M2 记忆系统：短期、会话、长期三层
+## 12. 记忆系统：会话上下文、摘要记忆、长期记忆三层
 
-M2 的核心变化是把“每次请求都像第一次见用户”升级为“能管理当前会话，也能跨会话记住用户关键信息”。
+M2 的核心变化是把“每次请求都像第一次见用户”升级为“能管理当前会话，也能跨会话记住用户关键信息”。三层记忆升级后，05 的记忆边界进一步拆清楚：
 
-### 12.1 短期记忆：`ContextWindowManager`
+- 会话上下文：当前 `session_id` 的最近消息、pending choice、质量分和 trace metadata。
+- 摘要记忆：当前 `session_id` 的滚动摘要，异步 postprocess 更新，下一轮 `/chat` 注入上下文。
+- 长期记忆：当前 `user_id` 的跨会话偏好、资料、投诉等，分为关键词/结构化记忆和语义长期记忆。
+
+### 12.1 会话上下文：`SessionStore` + `ContextWindowManager`
 
 文件：`memory/short_term.py`
 
@@ -607,9 +622,7 @@ trimmed = [SystemMessage(content=summary)] + recent_messages
 - 避免 100 轮对话把上下文无限撑大。
 - 保留最近对话的细节。
 - 用摘要保留早期对话的关键背景。
-- 后续接真实 LLM 时，可以把摘要作为系统上下文。
-
-### 12.2 会话状态：`SessionStore`
+- 给摘要记忆留出边界：短期窗口负责当前请求 token 控制，持久化摘要由 `SummaryMemoryStore` 负责。
 
 文件：`memory/session_store.py`
 
@@ -661,11 +674,49 @@ async def get_session(session_id: str) -> dict:
 
 这不是为了替代 Redis 锁，而是数据库层的最后一致性保护。Redis 锁让同一会话的新请求尽量串行；version 乐观锁保证即便锁租约过期或未来有旁路写入，也不会静默覆盖会话历史。
 
-### 12.3 长期记忆：`UserMemoryManager`
+### 12.2 摘要记忆：`SummaryMemoryStore`
+
+文件：`memory/summary.py`
+
+摘要记忆按 `session_id` 保存滚动摘要，不和用户长期画像混在一起。核心字段：
+
+- `session_id`、`user_id`
+- `summary`
+- `version`
+- `covered_turns`
+- `source_event_id`
+- `updated_at`
+
+主链路读取：
+
+```python
+loaded_summary = summary_memory_store.load_summary(req.session_id)
+summary_message = _summary_system_message(loaded_summary.summary if loaded_summary else "")
+```
+
+异步写入：
+
+```python
+summary_record = summary_memory_store.save_summary(
+    session_id=session_id,
+    user_id=user_id,
+    summary=build_conversation_summary(messages),
+    covered_turns=sum(1 for message in messages if isinstance(message, HumanMessage)),
+    source_event_id=event.event_id,
+)
+```
+
+为什么摘要记忆单独成层：
+
+- 会话上下文只保留最近消息，不能无限增长。
+- 长期记忆只保存跨会话稳定事实，不应保存整段会话流水。
+- 摘要记忆让长会话重启后仍能带上早期背景，同时可以按 `session_id` 审计和覆盖。
+
+### 12.3 长期记忆：`UserMemoryManager` + `SemanticMemoryStore`
 
 文件：`memory/long_term.py`
 
-当前长期记忆保存三类信息：
+关键词/结构化长期记忆保存三类信息：
 
 - 偏好：例如“我喜欢顺丰配送”。
 - 投诉：例如“我对物流很不满”。
@@ -679,9 +730,45 @@ user_memory_manager.save_from_turn(req.user_id, req.message, answer)
 deleted = user_memory_manager.delete_memories(user_id)
 ```
 
+文件：`memory/semantic.py`
+
+语义长期记忆提供统一接口：
+
+```python
+semantic_memory_store.search(user_id=user_id, query=query, filters=filters)
+semantic_memory_store.upsert_from_turn(
+    user_id=user_id,
+    user_message=question,
+    assistant_answer=answer,
+    session_id=session_id,
+    request_id=event.event_id,
+)
+semantic_memory_store.delete_user(user_id)
+```
+
+默认 `SEMANTIC_MEMORY_BACKEND=sqlite`，用于本地演示和 pytest；配置 `SEMANTIC_MEMORY_BACKEND=milvus` 后使用 Milvus Lite collection 保存结构化字段和向量。当前离线实现使用确定性 hash embedding，后续可以替换成真实 embedding 服务而不改变 `/chat` 契约。
+
+### 12.4 检索决策：`agent/retrieval.py`
+
+检索决策节点回答的是“这一轮需要查哪些上下文”，而不是“业务怎么处理”。它输出结构化信息：
+
+```python
+RetrievalDecision(
+    intent="logistics",
+    needs_memory=True,
+    needs_faq=False,
+    needs_business_context=False,
+    memory_filters={"category": ["delivery_preference", "preference"]},
+    external_sources=["long_term_memory"],
+    query_rewrite="给我送货用什么快递？",
+)
+```
+
+默认 `RETRIEVAL_DECISION_MODE=rules`，也可以切到 `llm` 让真实 LLM 输出 JSON。LLM JSON 解析失败或超时时会退回规则决策。退款确认、转人工、投诉/法律风险等 guardrail 仍由 `agent/service.py` 负责，不能被检索决策覆盖。
+
 面试重点：
 
-> 短期记忆解决上下文窗口，会话状态解决同一 `session_id` 的连续性，长期记忆解决跨会话用户画像。长期记忆必须有删除接口，否则不满足用户可控性和隐私合规。
+> 会话上下文解决当前轮次连续性，摘要记忆解决长会话压缩和恢复，长期记忆解决跨会话用户画像。检索决策负责控制是否查这些上下文，避免每一轮都无脑查 Milvus 或 FAQ/RAG。长期记忆必须有删除接口，否则不满足用户可控性和隐私合规。
 
 ---
 
@@ -953,7 +1040,7 @@ Compose 服务：
 
 面试重点：
 
-> M5 先把 API、缓存、数据库、监控、看板和压测工具放进同一套可启动拓扑；存储升级后，Compose 默认已经使用 Postgres 保存业务会话、用户记忆和 LangGraph checkpoint。还没完成的是 Mem0/pgvector 语义记忆检索，而不是 Postgres 持久化本身。
+> M5 先把 API、缓存、数据库、监控、看板和压测工具放进同一套可启动拓扑；存储升级后，Compose 默认已经使用 Postgres 保存业务会话、用户记忆和 LangGraph checkpoint。三层记忆升级后，语义长期记忆接口和 Milvus Lite 可选 backend 已具备，仍需后续验证真实 embedding 服务和远程 Milvus 集群的召回效果。
 
 ### 16.2 Prometheus 和 Grafana provisioning
 
@@ -1171,7 +1258,7 @@ const response = await fetch("/chat", {
 当前 `/chat` 运行路径是：
 
 ```text
-idempotency -> session lock -> rate/token budget -> session/memory -> agent_node -> handle_customer_message -> intent/tools/FAQ-RAG -> ResilientLLM -> DeepSeek final answer -> session version save -> outbox
+idempotency -> session lock -> rate/token budget -> session summary -> retrieval decision -> semantic/keyword memory -> agent_node -> handle_customer_message -> intent/tools/FAQ-RAG -> ResilientLLM -> DeepSeek final answer -> session version save -> outbox
 ```
 
 原因：
@@ -1251,7 +1338,7 @@ agent -> tools -> agent -> finalizer
 
 面试讲法：
 
-> 我会明确区分已实现和计划实现。当前 M6 已经完成客服闭环、幂等重试、会话并发控制、记忆、限流、预算、弹性层、指标、质量评估、DeepSeek 必经主路径、FAQ/RAG、RocketMQ outbox、Docker Compose、Grafana provisioning、Locust 压测入口、100 题评测、Postgres 业务存储和 LangGraph Postgres/Redis checkpointer；但 ToolNode、Mem0/pgvector 语义记忆、独立 outbox relay worker、正式压测报告和 24 小时长稳验证还在后续阶段。
+> 我会明确区分已实现和计划实现。当前 M6 已经完成客服闭环、幂等重试、会话并发控制、三层记忆、检索决策、限流、预算、弹性层、指标、质量评估、DeepSeek 必经主路径、FAQ/RAG、RocketMQ outbox、Docker Compose、Grafana provisioning、Locust 压测入口、100 题评测、Postgres 业务存储和 LangGraph Postgres/Redis checkpointer；但 ToolNode、真实 embedding/Milvus 召回效果验证、独立 outbox relay worker、正式压测报告和 24 小时长稳验证还在后续阶段。
 
 ---
 
@@ -1333,7 +1420,7 @@ agent -> tools -> agent -> finalizer
 
 回答：
 
-> 最大短板是还没有正式压测报告、24 小时长稳验证、pgvector/Mem0 语义记忆迁移、独立 outbox relay worker 和外部告警通道。当前项目已经接入 DeepSeek 主路径、100 题评测和并发幂等控制，但不能宣称已经完成线上生产验证。
+> 最大短板是还没有正式压测报告、24 小时长稳验证、真实 embedding/Milvus 召回效果验证、独立 outbox relay worker 和外部告警通道。当前项目已经接入 DeepSeek 主路径、100 题评测、并发幂等控制和三层记忆架构，但不能宣称已经完成线上生产验证。
 
 ---
 
@@ -1502,7 +1589,7 @@ pytest tests -q
 - 正式压测报告。
 - 24 小时长稳验证。
 - 真实外部告警系统。
-- pgvector/Mem0 语义记忆迁移。
+- 真实 embedding 服务和远程 Milvus 集群召回效果验证。
 
 ### 误区 2：把规则型决策说成 LLM Agent
 

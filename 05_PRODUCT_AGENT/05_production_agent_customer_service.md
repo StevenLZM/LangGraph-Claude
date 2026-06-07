@@ -61,12 +61,24 @@
 - **F07** 当对话超过窗口时，自动压缩早期内容（摘要化）
 - **F08** 确保 Prompt 总 Token 数不超过模型限制的 80%
 
+#### 摘要记忆（会话级）
+
+- **F08a** 按 `session_id` 持久化滚动摘要，保留长会话早期关键背景
+- **F08b** 摘要生成走异步后处理，不阻塞用户可见 `/chat` 响应
+- **F08c** 下一轮对话自动加载会话摘要并注入上下文
+
 #### 长期记忆（用户级）
 
 - **F09** 跨会话记住用户信息：姓名、偏好、历史投诉记录
 - **F10** 关键事件自动提炼存储：如"用户对物流极度不满"
 - **F11** 对话开始时自动召回相关用户记忆（语义检索）
 - **F12** 用户可要求删除其记忆数据（隐私合规）
+
+#### 检索决策
+
+- **F12a** 对话进入 Agent 前判断是否需要长期记忆、FAQ/RAG 或业务上下文
+- **F12b** 支持规则决策和 LLM 结构化 JSON 决策，LLM 失败时退回规则
+- **F12c** 检索决策不得覆盖退款确认、转人工、投诉/法律风险等业务安全规则
 
 ### 3.3 限流与配额
 
@@ -141,14 +153,15 @@
 |------|------|------|
 | API 框架 | FastAPI + uvicorn | 异步支持高并发 |
 | Agent 框架 | LangGraph | 状态管理与工作流 |
-| 短期记忆 | LangGraph MemorySaver | 对话窗口管理 |
-| 长期记忆 | Mem0 / Chroma + 自定义 | 跨会话用户记忆 |
+| 会话上下文 | SessionStore + ContextWindowManager | 当前会话消息窗口与状态 |
+| 摘要记忆 | SummaryMemoryStore | 会话级滚动摘要 |
+| 长期记忆 | UserMemoryManager + SemanticMemoryStore | 跨会话用户记忆，SQLite fallback / Milvus 可选 |
 | 限流 | Redis + 令牌桶算法 | QPS 和 Token 配额 |
 | 监控 | LangSmith + Prometheus | 链路 + 指标 |
 | 可视化 | Grafana | 运营仪表盘 |
 | 主 LLM | claude-sonnet​​​-4-6 | 生产主力 |
 | 备用 LLM | GPT-4o-mini | 降级备用 |
-| 数据库 | PostgreSQL | 用户记忆持久化 |
+| 数据库 | PostgreSQL / SQLite / Milvus Lite | 业务状态、摘要记忆、长期记忆 |
 | 缓存 | Redis | 限流 + 热点缓存 |
 | 容器化 | Docker + docker-compose | 一键部署 |
 
@@ -174,38 +187,44 @@ def manage_context_window(messages: list, max_tokens: int = 3200):
     return trimmed
 ```
 
-### 5.2 长期记忆召回
+### 5.2 检索决策与长期记忆召回
 
 ```python
-async def load_user_memory(user_id: str, current_query: str) -> str:
-    """对话开始时，召回与当前话题相关的用户记忆"""
-    
-    # 语义检索相关记忆
-    relevant_memories = await memory_store.search(
-        namespace=f"user:{user_id}",
-        query=current_query,
-        top_k=5
-    )
-    
-    if not relevant_memories:
-        return ""
-    
-    memory_text = "\n".join([m.content for m in relevant_memories])
-    return f"关于该用户的背景信息：\n{memory_text}"
+decision = await decide_retrieval(message, mode=settings.retrieval_decision_mode)
 
-async def save_conversation_memory(user_id: str, conversation: list):
-    """对话结束时，提炼关键信息存入长期记忆"""
-    summary = await llm.ainvoke(
-        f"提炼以下对话中需要长期记住的用户信息（投诉、偏好、重要事件）：\n{conversation}"
+if decision.needs_memory:
+    keyword_memories = user_memory_manager.load_memories(
+        user_id,
+        decision.query_rewrite or message,
     )
-    await memory_store.put(
-        namespace=f"user:{user_id}",
-        content=summary.content,
-        metadata={"timestamp": datetime.now().isoformat()}
+    semantic_memories = semantic_memory_store.search(
+        user_id=user_id,
+        query=decision.query_rewrite or message,
+        filters=decision.memory_filters,
     )
 ```
 
-### 5.3 限流实现
+### 5.3 摘要记忆和长期记忆异步写入
+
+```python
+def handle_postprocess_requested(event):
+    summary_store.save_summary(
+        session_id=event.payload["session_id"],
+        user_id=event.payload["user_id"],
+        summary=build_conversation_summary(messages),
+        covered_turns=total_turns,
+        source_event_id=event.event_id,
+    )
+    semantic_memory_store.upsert_from_turn(
+        user_id=event.payload["user_id"],
+        user_message=event.payload["question"],
+        assistant_answer=event.payload["answer"],
+        session_id=event.payload["session_id"],
+        request_id=event.event_id,
+    )
+```
+
+### 5.4 限流实现
 
 ```python
 import redis.asyncio as redis

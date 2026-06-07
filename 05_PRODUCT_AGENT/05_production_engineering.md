@@ -29,8 +29,8 @@
           │           LangGraph Agent 层               │
           │                                            │
           │  ┌────────┐  ┌────────┐  ┌─────────────┐ │
-          │  │短期记忆 │  │长期记忆 │  │   工具调用   │ │
-          │  │Token管理│  │Mem0/PG │  │(订单/物流)  │ │
+          │  │会话上下文│ │摘要/长期│ │   工具调用   │ │
+          │  │Token管理│  │Milvus可选│ │(订单/物流)  │ │
           │  └────────┘  └────────┘  └─────────────┘ │
           └──────────────────┬────────────────────────┘
                              │
@@ -191,6 +191,8 @@ class CustomerServiceState(TypedDict):
     # 用户上下文
     user_profile: dict                        # 用户基本信息
     user_memories: List[str]                  # 从长期记忆召回的内容
+    memory_summary: str                       # 从摘要记忆加载的会话摘要
+    retrieval_decision: dict                  # 检索决策：是否查记忆、FAQ、业务上下文
     order_context: Optional[dict]             # 当前讨论的订单信息
     
     # 执行控制
@@ -207,56 +209,28 @@ class CustomerServiceState(TypedDict):
 
 ```python
 # agent/graph.py
-from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.prebuilt import ToolNode
+from langgraph.graph import START, END, StateGraph
 
 def build_customer_service_graph():
     workflow = StateGraph(CustomerServiceState)
 
     # 节点
-    workflow.add_node("memory_loader",    memory_loader_node)   # 加载用户记忆
-    workflow.add_node("context_trimmer",  context_trimmer_node) # Token 窗口管理
-    workflow.add_node("agent",            agent_node)           # 主 LLM 推理
-    workflow.add_node("tools",            ToolNode(cs_tools))   # 工具执行
-    workflow.add_node("quality_checker",  quality_checker_node) # 质量评估
-    workflow.add_node("memory_saver",     memory_saver_node)    # 保存长期记忆
-    workflow.add_node("human_transfer",   human_transfer_node)  # 转人工
-
-    # 入口
-    workflow.set_entry_point("memory_loader")
+    workflow.add_node("context_loader",      context_loader_node)      # 初始化上下文
+    workflow.add_node("retrieval_decision",  retrieval_decision_node)  # 保留/补齐检索决策
+    workflow.add_node("agent",               agent_node)               # 规则客服决策
+    workflow.add_node("finalizer",           finalizer_node)           # 统计窗口和耗时
     
     # 固定边
-    workflow.add_edge("memory_loader",   "context_trimmer")
-    workflow.add_edge("context_trimmer", "agent")
-    workflow.add_edge("tools",           "agent")
-    workflow.add_edge("quality_checker", "memory_saver")
-    workflow.add_edge("memory_saver",    END)
-    workflow.add_edge("human_transfer",  END)
-
-    # 条件路由
-    workflow.add_conditional_edges(
-        "agent",
-        route_agent_output,
-        {
-            "tool_call":       "tools",
-            "human_transfer":  "human_transfer",
-            "respond":         "quality_checker",
-        }
-    )
+    workflow.add_edge(START, "context_loader")
+    workflow.add_edge("context_loader", "retrieval_decision")
+    workflow.add_edge("retrieval_decision", "agent")
+    workflow.add_edge("agent", "finalizer")
+    workflow.add_edge("finalizer", END)
     
-    checkpointer = SqliteSaver.from_conn_string("sessions.db")
     return workflow.compile(checkpointer=checkpointer)
-
-def route_agent_output(state: CustomerServiceState) -> str:
-    last_msg = state["messages"][-1]
-    
-    if state["needs_human_transfer"]:
-        return "human_transfer"
-    if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-        return "tool_call"
-    return "respond"
 ```
+
+说明：当前生产边界由 FastAPI 主链路负责加载会话、摘要记忆、检索决策、长期记忆、限流和持久化；LangGraph 图保持轻量，负责把上下文、检索决策、规则客服决策和 finalizer 串起来。这样做的好处是 `/chat` 的幂等、会话锁、版本保存和消息 outbox 不被图内部副作用打散。
 
 ---
 
@@ -341,87 +315,98 @@ async def context_trimmer_node(state: CustomerServiceState) -> dict:
     }
 ```
 
-### 4.2 长期记忆：跨会话用户记忆
+### 4.2 摘要记忆：会话级滚动摘要
+
+摘要记忆独立于短期窗口和长期用户画像，按 `session_id` 保存。它解决的问题是：短期窗口只能保留最近消息，但长会话重启或后续追问仍需要早期背景。
 
 ```python
-# memory/long_term.py
-from mem0 import Memory  # 使用 Mem0 框架（可选：自研）
-import asyncpg
+# memory/summary.py
+class SummaryMemoryStore:
+    def load_summary(self, session_id: str) -> SummaryMemoryRecord | None: ...
 
-class UserMemoryManager:
-    """
-    跨会话用户记忆管理
-    - 存储：PostgreSQL + pgvector（语义检索）
-    - 读取：对话开始时语义召回
-    - 写入：对话结束后自动提炼
-    """
-    
-    def __init__(self):
-        self.mem0 = Memory.from_config({
-            "vector_store": {
-                "provider": "pgvector",
-                "config": {
-                    "host": os.getenv("PG_HOST"),
-                    "dbname": "customer_memories"
-                }
-            },
-            "llm": {
-                "provider": "anthropic",
-                "config": {"model": "claude-haiku-4-5-20251001"}  # 用小模型做记忆操作
-            }
-        })
-    
-    async def load_memories(self, user_id: str, current_query: str) -> List[str]:
-        """对话开始时，召回与当前问题相关的用户记忆"""
-        results = self.mem0.search(
-            query=current_query,
-            user_id=user_id,
-            limit=5
-        )
-        return [r["memory"] for r in results["results"]]
-    
-    async def save_memories(self, user_id: str, conversation: list):
-        """
-        对话结束后，从对话中提炼需要长期记忆的信息
-        Mem0 会自动判断哪些内容值得记忆，避免垃圾信息
-        """
-        messages_for_mem0 = [
-            {"role": "user" if isinstance(m, HumanMessage) else "assistant",
-             "content": m.content}
-            for m in conversation if hasattr(m, "content")
-        ]
-        
-        self.mem0.add(
-            messages_for_mem0,
-            user_id=user_id,
-            metadata={"source": "customer_service", "timestamp": datetime.now().isoformat()}
-        )
-    
-    async def delete_user_memories(self, user_id: str):
-        """GDPR 合规：用户要求删除记忆"""
-        self.mem0.delete_all(user_id=user_id)
-
-
-# 节点实现
-async def memory_loader_node(state: CustomerServiceState) -> dict:
-    manager = UserMemoryManager()
-    
-    # 获取最新用户消息
-    last_human_msg = next(
-        (m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)),
-        ""
-    )
-    
-    memories = await manager.load_memories(state["user_id"], last_human_msg)
-    
-    return {"user_memories": memories}
-
-async def memory_saver_node(state: CustomerServiceState) -> dict:
-    """对话结束后保存记忆（异步，不影响响应速度）"""
-    manager = UserMemoryManager()
-    await manager.save_memories(state["user_id"], state["messages"])
-    return {}
+    def save_summary(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        summary: str,
+        covered_turns: int,
+        source_event_id: str = "",
+    ) -> SummaryMemoryRecord: ...
 ```
+
+主链路读取摘要：
+
+```python
+loaded_summary = summary_memory_store.load_summary(req.session_id)
+summary_message = _summary_system_message(loaded_summary.summary if loaded_summary else "")
+messages = context_window_manager.trim([*summary_message, *prior_messages, HumanMessage(content=req.message)])
+```
+
+异步写入摘要：
+
+```python
+summary_record = summary_memory_store.save_summary(
+    session_id=session_id,
+    user_id=user_id,
+    summary=build_conversation_summary(messages),
+    covered_turns=sum(1 for message in messages if isinstance(message, HumanMessage)),
+    source_event_id=event.event_id,
+)
+```
+
+### 4.3 长期记忆：关键词/结构化 + 语义检索
+
+长期记忆按 `user_id` 隔离，服务跨会话用户画像。当前实现分两层：
+
+- `UserMemoryManager`：SQLite/Postgres 关键词和结构化记忆，保存偏好、投诉、用户资料。
+- `SemanticMemoryStore`：语义长期记忆接口，默认 SQLite fallback，可配置 Milvus Lite backend。
+
+```python
+# memory/semantic.py
+class StructuredMemory:
+    user_id: str
+    category: str
+    entity_type: str
+    key: str
+    value: dict
+    content: str
+    source_session_id: str
+    source_request_id: str
+
+class SemanticMemoryStore(Protocol):
+    def search(self, *, user_id: str, query: str, filters: dict | None = None, limit: int = 5): ...
+    def upsert_from_turn(self, *, user_id: str, user_message: str, assistant_answer: str, session_id: str, request_id: str): ...
+    def delete_user(self, user_id: str) -> int: ...
+```
+
+Milvus backend 配置：
+
+```bash
+SEMANTIC_MEMORY_BACKEND=milvus
+MILVUS_MEMORY_URI=./data/memory_milvus.db
+MILVUS_MEMORY_COLLECTION=customer_long_term_memories
+```
+
+当前 Milvus backend 使用确定性 hash embedding 保持离线可测。生产可替换为真实 embedding 服务，但不应改变 `/chat` 响应契约和 `SemanticMemoryStore` 接口。
+
+### 4.4 检索决策节点
+
+检索决策节点决定是否读取长期记忆、FAQ/RAG 或业务上下文。默认规则决策，`RETRIEVAL_DECISION_MODE=llm` 时可使用真实 LLM 输出 JSON；解析失败时退回规则决策。
+
+```python
+RetrievalDecision(
+    intent="logistics",
+    needs_memory=True,
+    needs_faq=False,
+    needs_business_context=False,
+    memory_filters={"category": ["delivery_preference", "preference"]},
+    external_sources=["long_term_memory"],
+    query_rewrite="给我送货用什么快递？",
+)
+```
+
+检索决策不负责业务安全判断。退款二次确认、投诉/法律转人工等 guardrail 仍由规则客服层负责。
 
 ---
 
@@ -922,11 +907,14 @@ volumes:
 │   ├── graph.py                 # LangGraph 图
 │   ├── state.py                 # 状态定义
 │   ├── nodes.py                 # 所有节点实现
+│   ├── retrieval.py             # 检索决策
 │   ├── tools.py                 # 工具定义
 │   └── prompts.py               # Prompt 模板
 ├── memory/
 │   ├── short_term.py            # Token 窗口管理
-│   └── long_term.py             # Mem0 长期记忆
+│   ├── summary.py               # 会话摘要记忆
+│   ├── semantic.py              # SQLite/Milvus 语义长期记忆
+│   └── long_term.py             # 用户关键词/结构化长期记忆
 ├── llm/
 │   └── resilient_llm.py         # 弹性 LLM（重试+熔断）
 ├── mcp_servers/

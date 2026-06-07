@@ -9,6 +9,18 @@ from typing import Any
 from fastapi import HTTPException
 
 
+_REDIS_COUNTER_LIMIT_SCRIPT = """
+local count = redis.call("INCR", KEYS[1])
+redis.call("EXPIRE", KEYS[1], tonumber(ARGV[1]))
+local ttl = redis.call("TTL", KEYS[1])
+local limit = tonumber(ARGV[2])
+if count > limit then
+    return {0, count, ttl}
+end
+return {1, count, ttl}
+"""
+
+
 @dataclass(frozen=True)
 class TokenBudgetExceeded(Exception):
     reason: str
@@ -124,19 +136,18 @@ class RateLimiter:
         assert self._redis is not None
         key = f"ratelimit:user:{user_id}:{int(self._clock() // 60)}"
         try:
-            pipe = self._redis.pipeline()
-            pipe.incr(key)
-            pipe.expire(key, 120)
-            result = await pipe.execute()
-            count = int(result[0])
-            if count > self.user_rate_limit_per_minute:
-                ttl = await self._redis.ttl(key)
+            allowed, _, ttl = await self._check_redis_counter_limit(
+                key=key,
+                ttl_seconds=120,
+                limit=self.user_rate_limit_per_minute,
+            )
+            if not allowed:
                 raise HTTPException(
                     status_code=429,
                     detail={
                         "error": "rate_limit_exceeded",
                         "message": "请求过于频繁，请稍后再试。",
-                        "retry_after": max(1, int(ttl)),
+                        "retry_after": ttl,
                     },
                 )
         except HTTPException:
@@ -148,9 +159,12 @@ class RateLimiter:
         assert self._redis is not None
         key = f"qps:{int(self._clock())}"
         try:
-            count = int(await self._redis.incr(key))
-            await self._redis.expire(key, 2)
-            if count > self.global_qps_limit:
+            allowed, _, _ = await self._check_redis_counter_limit(
+                key=key,
+                ttl_seconds=2,
+                limit=self.global_qps_limit,
+            )
+            if not allowed:
                 raise HTTPException(
                     status_code=503,
                     detail={
@@ -163,6 +177,23 @@ class RateLimiter:
             raise
         except Exception as exc:  # pragma: no cover - exercised with real Redis
             raise self._redis_unavailable() from exc
+
+    async def _check_redis_counter_limit(
+        self,
+        *,
+        key: str,
+        ttl_seconds: int,
+        limit: int,
+    ) -> tuple[bool, int, int]:
+        assert self._redis is not None
+        allowed, count, ttl = await self._redis.eval(
+            _REDIS_COUNTER_LIMIT_SCRIPT,
+            1,
+            key,
+            int(ttl_seconds),
+            int(limit),
+        )
+        return int(allowed) == 1, int(count), max(1, int(ttl))
 
     async def _reserve_token_budget_redis(self, token_count: int) -> None:
         assert self._redis is not None
