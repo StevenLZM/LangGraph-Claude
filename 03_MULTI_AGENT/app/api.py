@@ -106,6 +106,7 @@ async def start_research(req: StartReq) -> StartResp:
 @app.post("/research/{thread_id}/resume", response_model=StartResp)
 async def resume_research(thread_id: str, req: ResumeReq) -> StartResp:
     cfg = _config(thread_id)
+    # 必须用Command，告诉框架"这是恢复指令，不是新输入"
     result = await _invoke(Command(resume={"plan": req.plan.model_dump()}), cfg)
     interrupt_val = _extract_interrupt(result)
     return StartResp(
