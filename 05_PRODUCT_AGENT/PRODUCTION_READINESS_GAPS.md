@@ -9,7 +9,7 @@
 当前 05 项目更接近“生产工程化教学样板”，还不是“可直接多实例、高并发、强合规上线”的生产系统。主要原因：
 
 - `/chat` 是 async 入口，但核心路径仍混合同步 graph、同步存储、同步消息发送。
-- Agent 形态是规则客服骨架加 LLM 最终回答，不是完整受控 tool-calling Agent。
+- Agent 形态已升级为确定性多轮状态机 + 受控只读 ReAct + LLM 最终回答，但还不是完整 LLM tool-calling Agent。
 - 订单、物流、商品、退款工具仍是 mock 数据。
 - 三层记忆架构已经接入，但摘要、记忆抽取和 embedding 仍偏轻量。
 - Admin、用户记忆删除、会话查询等接口还没有认证、授权和租户隔离。
@@ -108,20 +108,21 @@
 
 ## P1 优先级
 
-### 4. 从规则客服骨架升级为受控 tool-calling Agent
+### 4. 从受控多轮 Agent 升级为完整 tool-calling Agent
 
 当前依据：
 
 - `agent/graph.py` 已升级为多轮状态机主图，覆盖 `turn_router`、`slot_filling`、`confirmation_guard`、`tool_planner_or_react`、`tool_executor` 和 `response_builder`。
 - `dialog_state` 已替代内部 `pending_choice`，退货/退款、物流追问和商品后续操作具备显式任务状态。
-- 当前工具计划仍以规则和 mock 工具为主，受控 ReAct v1 仅覆盖只读工具循环。
+- 当前工具计划仍以规则和 mock 工具为主，受控 ReAct v1 覆盖只读工具循环；退款资格 + 物流复合问题已能执行 `get_order -> get_logistics -> faq_rag`。
+- 写工具已通过确认门和 `dialog_state.idempotency_key` 做本地幂等演示，Mock `apply_refund` 会对同一幂等键返回同一工单。
 - `api/main.py` 中真实 LLM 主要基于规则草稿和上下文生成最终回答。
 
 生产风险：
 
 - 更复杂的多意图、多工具、多轮澄清场景仍需要统一 tool schema 和更强评测覆盖。
 - 规则分支容易和 LLM 最终回答产生语义偏差。
-- 工具调用缺少统一 schema、预算、权限和错误恢复。
+- 工具调用缺少统一 schema、预算、权限、超时和真实 adapter 错误恢复。
 
 优化方向：
 
@@ -143,12 +144,12 @@
 当前依据：
 
 - `agent/tools.py` 中 `MOCK_ORDERS`、`MOCK_LOGISTICS`、`MOCK_PRODUCTS` 是内存 mock。
-- `apply_refund()` 只返回模拟退款提交结果。
+- `apply_refund()` 维护本地 mock 幂等账本，同一幂等键会返回同一模拟工单。
 
 生产风险：
 
 - 业务数据不可用或不准确，无法真实服务用户。
-- 退款等写操作缺少真实事务、审计和工单状态。
+- 退款等写操作缺少真实事务、审计和工单状态持久化。
 - 工具异常、慢调用、权限失败没有真实处理链路。
 
 优化方向：

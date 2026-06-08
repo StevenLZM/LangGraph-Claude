@@ -59,7 +59,11 @@ def _execute(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
     if tool_name == "get_product":
         return get_product(str(args.get("query") or ""))
     if tool_name == "apply_refund":
-        return apply_refund(str(args.get("order_id") or ""), confirmed=bool(args.get("confirmed", False)))
+        return apply_refund(
+            str(args.get("order_id") or ""),
+            confirmed=bool(args.get("confirmed", False)),
+            idempotency_key=str(args.get("idempotency_key") or ""),
+        )
     if tool_name == "faq_rag":
         faq_result = _faq_rag_tool.search(str(args.get("query") or ""))
         return {

@@ -34,7 +34,19 @@ def is_human_transfer_request(text: str) -> bool:
 
 
 def is_refund_request(text: str) -> bool:
-    return contains_any(text, ("退款", "退货", "refund", "return"))
+    return contains_any(
+        text,
+        (
+            "退款",
+            "退货",
+            "能退",
+            "还能退",
+            "可以退",
+            "能不能退",
+            "refund",
+            "return",
+        ),
+    )
 
 
 def is_refund_confirmed(text: str) -> bool:

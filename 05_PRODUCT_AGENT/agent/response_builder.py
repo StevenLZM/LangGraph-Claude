@@ -208,12 +208,19 @@ def _tool_response(state: dict[str, Any], tool_results: list[dict[str, Any]]) ->
         logistics = dict(latest_by_name["get_logistics"].get("output") or {})
         order = dict(latest_by_name.get("get_order", {}).get("output") or {})
         context = {**order, **logistics}
+        if "faq_rag" in latest_by_name:
+            faq_output = dict(latest_by_name["faq_rag"].get("output") or {})
+            context.update(_rag_context(faq_output))
         order_id = str(logistics.get("order_id") or order.get("order_id") or "")
         answer = (
             f"订单 {order_id} 的物流由{logistics.get('carrier', '')}承运，"
             f"运单号 {logistics.get('tracking_no', '')}。"
             f"最新状态：{logistics.get('latest_status', '')}，当前位置：{logistics.get('latest_location', '')}。"
         )
+        if "faq_rag" in latest_by_name:
+            faq_answer = str((latest_by_name["faq_rag"].get("output") or {}).get("answer") or "")
+            if faq_answer:
+                answer = f"{answer} 关于退货/退款资格：{faq_answer}"
         task_status = terminal_task_status("logistics", "completed") if active_task == "logistics" else None
         return _response(
             answer=answer,
@@ -255,13 +262,7 @@ def _tool_response(state: dict[str, Any], tool_results: list[dict[str, Any]]) ->
 
     if "faq_rag" in latest_by_name:
         output = dict(latest_by_name["faq_rag"].get("output") or {})
-        context = {
-            "rag_matched": output.get("matched", False),
-            "rag_sources": output.get("sources", []),
-            "rag_backend": output.get("backend", ""),
-        }
-        if output.get("error"):
-            context["rag_error"] = output["error"]
+        context = _rag_context(output)
         return _response(answer=str(output.get("answer") or ""), order_context=context, tool_name="faq_rag", quality_score=86)
 
     return _response(answer="已收到，我会继续帮你处理。", tool_name="fallback", quality_score=72)
@@ -293,6 +294,17 @@ def _memory_recall_response(user_memories: list[str]) -> dict[str, Any]:
     if not memory_text:
         return _response(answer="我暂时没有查到你已保存的相关记忆。", tool_name="load_user_memory", quality_score=72)
     return _response(answer=f"我记得这些信息：{memory_text}", tool_name="load_user_memory", quality_score=86)
+
+
+def _rag_context(output: dict[str, Any]) -> dict[str, Any]:
+    context = {
+        "rag_matched": output.get("matched", False),
+        "rag_sources": output.get("sources", []),
+        "rag_backend": output.get("backend", ""),
+    }
+    if output.get("error"):
+        context["rag_error"] = output["error"]
+    return context
 
 
 def _cancelled_answer(active_task: str) -> str:

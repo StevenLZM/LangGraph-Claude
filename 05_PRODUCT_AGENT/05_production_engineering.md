@@ -242,6 +242,13 @@ def build_customer_service_graph():
 
 说明：当前生产边界仍由 FastAPI 主链路负责加载会话、摘要记忆、检索决策、长期记忆、限流和持久化；LangGraph 图负责多轮任务状态推进。`dialog_state` 保存当前任务、阶段、槽位、确认状态、过期时间和幂等键；缺槽时停在 `slot_filling -> response_builder`，写操作必须经过 `confirmation_guard`，只读复杂问题可在 `tool_planner_or_react -> tool_executor` 内最多循环 3 步。这样既保留 `/chat` 的幂等、会话锁、版本保存和消息 outbox 边界，也让十轮以上连续对话不依赖自然语言历史猜状态。
 
+生产级收口：
+
+- 只读 ReAct 的典型路径是“退款资格 + 物流追问”：`get_order -> get_logistics -> faq_rag`。三步均为只读，超过 `max_tool_steps=3` 后必须停止循环。
+- `response_builder` 会合并同轮多工具结果。物流上下文和 FAQ/RAG 的 `rag_matched`、`rag_sources`、`rag_backend` 进入同一个 `order_context`，避免最终回答只呈现最后一个工具结果。
+- 写工具不能依赖 LLM 决策。`apply_refund` 只能在 `confirmation_guard` 放行后由 `tool_executor` 调用，并且调用参数必须包含 `dialog_state.idempotency_key`。
+- Mock 售后工具维护退款提交账本，同一 `idempotency_key` 重放返回同一工单；真实生产系统应把该账本迁移到售后系统或业务数据库事务中。
+
 ---
 
 ## 四、记忆系统设计
@@ -416,7 +423,7 @@ RetrievalDecision(
 )
 ```
 
-检索决策不负责业务安全判断。退款二次确认、投诉/法律转人工等 guardrail 仍由规则客服层负责。
+检索决策不负责业务安全判断。退款二次确认、投诉/法律转人工等 guardrail 仍由 `turn_router`、`slot_filling` 和 `confirmation_guard` 等确定性图节点负责。
 
 ---
 

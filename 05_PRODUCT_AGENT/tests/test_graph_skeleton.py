@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -92,3 +94,94 @@ def test_graph_confirmation_required_stops_before_refund_execution():
     assert result["choices"]["scenario"] == "refund"
     assert result["tool_trace"] == []
     assert "已提交" not in result["messages"][-1].content
+
+
+def test_read_only_refund_eligibility_react_runs_policy_and_logistics_tools():
+    graph = build_customer_service_graph(checkpointer=MemorySaver())
+    initial_state: CustomerServiceState = {
+        "session_id": "readonly_refund_eligibility_session",
+        "user_id": "user_001",
+        "messages": [HumanMessage(content="我这个订单 ORD123456 还能退吗，物流到哪了？")],
+        "max_tool_steps": 3,
+    }
+
+    result = graph.invoke(
+        initial_state,
+        config={"configurable": {"thread_id": "readonly_refund_eligibility_session"}},
+    )
+
+    assert [step["tool_name"] for step in result["tool_trace"]] == [
+        "get_order",
+        "get_logistics",
+        "faq_rag",
+    ]
+    assert all(step["read_only"] is True for step in result["tool_trace"])
+    assert result["task_status"] is None
+    assert "rag_sources" in result["order_context"]
+    assert "rag_matched" in result["order_context"]
+    assert result["order_context"]["rag_backend"]
+
+
+def test_refund_write_tool_receives_idempotency_key(monkeypatch):
+    captured: list[dict[str, str | bool]] = []
+
+    def fake_apply_refund(order_id: str, *, confirmed: bool, idempotency_key: str = "") -> dict:
+        captured.append(
+            {
+                "order_id": order_id,
+                "confirmed": confirmed,
+                "idempotency_key": idempotency_key,
+            }
+        )
+        return {
+            "order_id": order_id,
+            "refund_status": "submitted",
+            "refund_ticket_id": "RF-TEST",
+        }
+
+    monkeypatch.setattr("agent.tool_executor.apply_refund", fake_apply_refund)
+
+    graph = build_customer_service_graph(checkpointer=MemorySaver())
+    dialog_state = {
+        "active_task": "refund",
+        "phase": "awaiting_confirmation",
+        "required_slots": ["order_id"],
+        "collected_slots": {"order_id": "ORD123456"},
+        "missing_slots": [],
+        "confirmation": {
+            "required": True,
+            "confirmed": False,
+            "action": "apply_refund",
+            "preview": "将为订单 ORD123456 提交退款申请。",
+        },
+        "attempt_count": 0,
+        "expires_at": "2999-01-01T00:00:00+00:00",
+        "idempotency_key": "apply_refund:ORD123456",
+    }
+    initial_state: CustomerServiceState = {
+        "session_id": "refund_idempotency_session",
+        "user_id": "user_001",
+        "messages": [HumanMessage(content="确认退款")],
+        "dialog_state": dialog_state,
+        "max_tool_steps": 3,
+    }
+
+    result = graph.invoke(
+        initial_state,
+        config={"configurable": {"thread_id": "refund_idempotency_session"}},
+    )
+
+    assert captured == [
+        {
+            "order_id": "ORD123456",
+            "confirmed": True,
+            "idempotency_key": "apply_refund:ORD123456",
+        }
+    ]
+    assert result["task_status"]["phase"] == "completed"
+
+
+def test_teaching_guide_does_not_describe_current_graph_as_linear():
+    guide = Path("Codex_TEACHING_GUIDE.md").read_text(encoding="utf-8")
+
+    assert "LangGraph 当前是线性图" not in guide

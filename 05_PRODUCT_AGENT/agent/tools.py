@@ -69,6 +69,8 @@ MOCK_PRODUCTS: dict[str, dict] = {
     },
 }
 
+REFUND_SUBMISSION_LEDGER: dict[str, dict] = {}
+
 
 def get_order(order_id: str) -> dict:
     order = MOCK_ORDERS.get(order_id.upper())
@@ -106,7 +108,7 @@ def get_product(query: str) -> dict:
     }
 
 
-def apply_refund(order_id: str, *, confirmed: bool) -> dict:
+def apply_refund(order_id: str, *, confirmed: bool, idempotency_key: str = "") -> dict:
     order = get_order(order_id)
     if order.get("status") == "未找到":
         return {
@@ -120,12 +122,22 @@ def apply_refund(order_id: str, *, confirmed: bool) -> dict:
             "refund_status": "confirmation_required",
             "message": "退款会进入人工复核，请确认是否继续提交退款申请。",
         }
-    return {
+    if idempotency_key and idempotency_key in REFUND_SUBMISSION_LEDGER:
+        return {
+            **deepcopy(REFUND_SUBMISSION_LEDGER[idempotency_key]),
+            "idempotent_replay": True,
+        }
+    submitted = {
         **order,
         "refund_status": "submitted",
         "refund_ticket_id": f"RF-{order_id.upper()}",
+        "idempotency_key": idempotency_key,
+        "idempotent_replay": False,
         "message": "退款申请已提交，预计 1-3 个工作日内完成审核。",
     }
+    if idempotency_key:
+        REFUND_SUBMISSION_LEDGER[idempotency_key] = deepcopy(submitted)
+    return submitted
 
 
 def list_customer_service_tools() -> list[str]:

@@ -571,6 +571,24 @@ Prometheus 指标出口。
 - v1 继续使用 mock 业务工具；真实订单、售后、库存系统适配仍是后续专项。
 - 受控 ReAct 当前只覆盖只读工具计划，写操作仍由确定性状态机和确认门控制。
 
+### 2026-06-08：多轮 Agent Graph 生产级收口
+
+**实际交付**
+- 扩展退款资格只读意图识别：`能退`、`还能退`、`可以退`、`能不能退` 等表达会进入只读 ReAct 路径。
+- 复合只读问题“订单还能退吗，物流到哪了？”会规划 `get_order -> get_logistics -> faq_rag`，并受 `max_tool_steps=3` 限制。
+- `response_builder` 合并同轮多工具上下文，物流结果和 FAQ/RAG 的 `rag_matched`、`rag_sources`、`rag_backend` 会进入同一个 `order_context`。
+- 写工具幂等升级：`tool_executor` 调用 `apply_refund` 时传入 `dialog_state.idempotency_key`，Mock 售后工具维护提交账本，同一键重复提交返回同一工单。
+- 教学文档移除“当前 graph 是线性图”的旧描述，改为多轮状态机 + 写确认门 + 受控只读 ReAct。
+
+**验收结果**
+- `cd 05_PRODUCT_AGENT && pytest tests -q`：104 passed。
+- `python -m compileall agent api tests`：通过。
+- `git diff --check`：通过。
+
+**当前边界**
+- Mock 幂等账本只用于本地教学和测试；真实生产应由售后系统或业务数据库持久化幂等提交记录、审计事件和工单状态。
+- 只读 ReAct 仍是规则规划，不是开放式 LLM tool-calling；写操作继续由确定性状态机控制。
+
 ---
 
 ## 八、后续开发约定

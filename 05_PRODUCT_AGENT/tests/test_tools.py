@@ -39,6 +39,24 @@ def test_refund_tool_submits_only_after_confirmation():
     assert refund["refund_status"] == "submitted"
 
 
+def test_refund_tool_replays_same_submission_for_idempotency_key():
+    first = apply_refund(
+        "ORD123456",
+        confirmed=True,
+        idempotency_key="apply_refund:test-tools-idempotent",
+    )
+    replay = apply_refund(
+        "ORD123456",
+        confirmed=True,
+        idempotency_key="apply_refund:test-tools-idempotent",
+    )
+
+    assert replay["refund_status"] == "submitted"
+    assert replay["refund_ticket_id"] == first["refund_ticket_id"]
+    assert replay["idempotency_key"] == "apply_refund:test-tools-idempotent"
+    assert replay["idempotent_replay"] is True
+
+
 def test_tool_registry_lists_m1_tools():
     assert list_customer_service_tools() == [
         "get_order",

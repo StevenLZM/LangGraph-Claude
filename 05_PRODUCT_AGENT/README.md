@@ -193,6 +193,12 @@ START
 
 `dialog_state` 记录当前任务、阶段、槽位、确认状态、过期时间和幂等键。退货/退款、物流追问和商品后续操作都通过显式状态恢复，不再只依赖自然语言历史。`tool_planner_or_react` 只允许只读工具进入多步循环；`apply_refund` 等写工具必须先经过 `confirmation_guard` 并在用户明确确认后由 `tool_executor` 调用。
 
+生产级收口点：
+
+- 只读 ReAct：退款资格 + 物流类复合问题会在最多 3 步内执行 `get_order`、`get_logistics`、`faq_rag`，并把物流上下文和 FAQ/RAG 结构化上下文合并到同一轮 `order_context`。
+- 写工具幂等：`apply_refund` 调用必须携带 `dialog_state.idempotency_key`，Mock 售后工具维护提交账本，同一幂等键重复执行会返回同一工单，避免重复创建退款申请。
+- 用户可见状态：`task_status` 只暴露任务名、阶段、缺失槽位、过期时间和尝试次数，不暴露内部确认 payload、幂等键或完整槽位。
+
 语义记忆配置：
 
 ```bash

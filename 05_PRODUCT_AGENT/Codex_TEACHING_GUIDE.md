@@ -1,6 +1,6 @@
 # 05 Product Agent 教学文档
 
-这份文档用于讲解 `05_PRODUCT_AGENT` 当前已经完成的 M0-M6，以及新增的多用户并发、幂等一致性和三层记忆架构改造。重点不是背目录，而是能把一次客服请求从 UI 到 API、幂等记录、会话锁、检索决策、三层记忆、限流、LangGraph、规则决策、DeepSeek 生成、FAQ/RAG、质量评估、指标记录、业务消息、Docker Compose 部署、Locust 压测和自动评测完整讲清楚。
+这份文档用于讲解 `05_PRODUCT_AGENT` 当前已经完成的 M0-M6，以及新增的多用户并发、幂等一致性、三层记忆架构和生产级多轮 Agent Graph 改造。重点不是背目录，而是能把一次客服请求从 UI 到 API、幂等记录、会话锁、检索决策、三层记忆、限流、LangGraph 状态机、受控只读 ReAct、写工具确认门、业务幂等账本、DeepSeek 生成、FAQ/RAG、质量评估、指标记录、业务消息、Docker Compose 部署、Locust 压测和自动评测完整讲清楚。
 
 当前真实完成范围：
 
@@ -13,18 +13,19 @@
 - M6：DeepSeek 真实 LLM 主路径、FAQ/RAG 适配、管理接口、100 题评测集、自动评测报告。
 - 并发一致性增强：`request_id` 幂等协议、Postgres 幂等表、Redis 会话分布式锁、会话 version 乐观锁、Postgres RocketMQ outbox。
 - 三层记忆增强：会话上下文、摘要记忆、语义长期记忆、检索决策节点、SQLite fallback 和可选 Milvus Lite backend。
+- 多轮 Agent Graph 增强：`dialog_state` 显式任务状态、补槽、确认门、只读 ReAct 三步上限、FAQ/RAG 结果合并、写工具业务幂等键和脱敏 `task_status`。
 
 尚未完成范围：
 
 - 24 小时长稳运行、正式 Docker 压测报告、真实 embedding 服务/远程 Milvus 效果验证、独立 outbox relay worker 和外部告警通道。
 
-面试时要明确：当前 M6 已具备本地可演示的“客服闭环 + 幂等重试 + 会话并发控制 + 三层记忆 + 检索决策 + 限流 + 观测 + 质量评估 + DeepSeek + FAQ/RAG + RocketMQ outbox + 管理接口 + 容器编排 + Postgres 业务存储 + LangGraph checkpointer + 压测入口 + 自动评测”能力，但还不是完整线上生产系统；正式压测报告、24 小时长稳验证、真实 embedding/Milvus 召回效果、独立 outbox relay worker 和外部告警通道仍需后续环境验证。
+面试时要明确：当前 M6 已具备本地可演示的“客服闭环 + 幂等重试 + 会话并发控制 + 三层记忆 + 检索决策 + 限流 + 观测 + 质量评估 + DeepSeek + FAQ/RAG + 生产级多轮状态机 + 受控只读 ReAct + 写工具确认和幂等 + RocketMQ outbox + 管理接口 + 容器编排 + Postgres 业务存储 + LangGraph checkpointer + 压测入口 + 自动评测”能力，但还不是完整线上生产系统；正式压测报告、24 小时长稳验证、真实 embedding/Milvus 召回效果、独立 outbox relay worker 和外部告警通道仍需后续环境验证。
 
 ---
 
 ## 1. 项目一句话介绍
 
-`05_PRODUCT_AGENT` 是一个生产级 AI 客服系统的渐进式实现。当前阶段已经跑通可测试、可部署、可评测的客服服务：用户从 UI 或 API 发起咨询，FastAPI 先通过 `request_id` 处理客户端重试幂等，再用 Redis 会话锁和 Session version 防止同会话并发覆盖，然后做协议校验、限流和 Token 预算，加载会话上下文、摘要记忆和长期记忆，执行检索决策判断是否读取语义记忆/FAQ/RAG/业务上下文，进入带可选 checkpointer 的 LangGraph 状态流，规则型客服决策调用 Mock 业务工具或 FAQ/RAG 适配层，然后必须通过 DeepSeek/真实 LLM 基于工具结果生成最终话术，最后保存会话、评估回答质量、记录 Prometheus 兼容指标、写入 RocketMQ outbox 并返回响应。M5 提供 Docker Compose、Prometheus、Grafana 和 Locust 压测入口，M6 补齐 DeepSeek、管理接口和 100 题自动评测，存储升级补齐 Postgres 业务存储和 LangGraph Postgres/Redis checkpointer，三层记忆升级补齐摘要记忆、语义长期记忆和检索决策。
+`05_PRODUCT_AGENT` 是一个生产级 AI 客服系统的渐进式实现。当前阶段已经跑通可测试、可部署、可评测的客服服务：用户从 UI 或 API 发起咨询，FastAPI 先通过 `request_id` 处理客户端重试幂等，再用 Redis 会话锁和 Session version 防止同会话并发覆盖，然后做协议校验、限流和 Token 预算，加载会话上下文、摘要记忆和长期记忆，执行检索决策判断是否读取语义记忆/FAQ/RAG/业务上下文，进入带可选 checkpointer 的 LangGraph 多轮状态机，确定性节点负责路由、补槽、确认和工具边界，只读复合问题可进入最多 3 步 ReAct 工具循环，写工具必须经过确认门并携带业务幂等键，然后通过 DeepSeek/真实 LLM 基于工具结果生成最终话术，最后保存会话、评估回答质量、记录 Prometheus 兼容指标、写入 RocketMQ outbox 并返回响应。M5 提供 Docker Compose、Prometheus、Grafana 和 Locust 压测入口，M6 补齐 DeepSeek、管理接口和 100 题自动评测，存储升级补齐 Postgres 业务存储和 LangGraph Postgres/Redis checkpointer，三层记忆升级补齐摘要记忆、语义长期记忆和检索决策。
 
 面试讲法：
 
@@ -61,7 +62,7 @@
 │   ├── response_builder.py      # 统一回复、choices、task_status 构造
 │   ├── retrieval.py             # 检索决策：rules fallback + LLM JSON 解析
 │   ├── intent.py                # 订单号和意图识别
-│   ├── service.py               # 规则型客服决策
+│   ├── service.py               # 旧版规则客服兼容层，部分回归测试仍覆盖
 │   └── tools.py                 # Mock 业务工具
 ├── memory/
 │   ├── short_term.py            # 摘要 + 最近 8 轮的短期窗口
@@ -188,8 +189,8 @@ api.main
 | Checkpoint | `agent/checkpointing.py::build_checkpointer` | 按配置接入 none/Postgres/Redis checkpointer |
 | 图编排 | `agent/graph.py::build_customer_service_graph` | 定义多轮状态机主图和条件边，可注入 checkpointer |
 | 多轮状态 | `agent/dialog_state.py` / `agent/slot_filling.py` | 保存任务阶段、槽位、确认状态，并支持旧 `pending_choice` 转换 |
-| 工具计划与执行 | `agent/tool_planner.py` / `agent/tool_executor.py` | 只读工具可多步规划，写工具必须经过确认门 |
-| 工具执行 | `agent/tools.py` | 返回 Mock 订单、物流、商品和退款结果 |
+| 工具计划与执行 | `agent/tool_planner.py` / `agent/tool_executor.py` | 只读工具可多步规划，写工具必须经过确认门并携带幂等键 |
+| 工具执行 | `agent/tools.py` | 返回 Mock 订单、物流、商品和退款结果；退款提交具备幂等账本 |
 | 质量评估 | `monitoring/evaluator.py::AutoQualityEvaluator` | 计算 `quality_score` 和低质告警 |
 | 指标记录 | `monitoring/metrics.py::record_chat_request` | 记录请求数、延迟、Token、质量分等 |
 | 消息 outbox | `messaging/outbox.py` | 保存 ChatCompleted/PostprocessRequested 等事件状态 |
@@ -197,7 +198,7 @@ api.main
 
 面试重点：
 
-> 这里的关键不是“写了几个 if”，而是把接口、幂等、并发控制、限流、三层记忆、检索决策、状态机、业务决策、工具访问、质量评估、消息 outbox 和指标记录拆成了不同层。当前已能在 SQLite/Postgres 间切换业务存储，摘要记忆和语义记忆有独立接口，并可注入 LangGraph checkpointer；后续把 hash embedding 替换成真实 embedding、或者把规则型决策演进为 ToolNode 时，API 契约和测试可以保持稳定。
+> 这里的关键不是“写了几个 if”，而是把接口、幂等、并发控制、限流、三层记忆、检索决策、状态机、业务决策、工具访问、质量评估、消息 outbox 和指标记录拆成了不同层。当前已能在 SQLite/Postgres 间切换业务存储，摘要记忆和语义记忆有独立接口，并可注入 LangGraph checkpointer；只读工具可以在受控 ReAct 内组合，写工具通过确认门和业务幂等键隔离。后续把 hash embedding 替换成真实 embedding、或者把规则型决策演进为 ToolNode 时，API 契约和测试可以保持稳定。
 
 ---
 
@@ -255,7 +256,7 @@ async def get_chat_request(request_id: str, user_id: str, session_id: str) -> di
 
 面试重点：
 
-> API 层是生产边界。它接住 HTTP 请求，处理幂等、会话并发、限流、预算、观测和持久化，再把业务判断交给 Agent 图和 service 层。这样服务治理能力不会散落在业务规则里。
+> API 层是生产边界。它接住 HTTP 请求，处理幂等、会话并发、限流、预算、观测和持久化，再把业务判断交给 Agent 图。这样服务治理能力不会散落在业务规则里。
 
 ---
 
@@ -448,13 +449,15 @@ messages: Annotated[list[BaseMessage], add_messages]
 
 - 简单任务走确定性工具计划。
 - 复杂只读任务允许最多 3 步 ReAct 式工具循环。
-- 写工具只由确认门放行后执行，并记录 `tool_trace`。
+- 退款资格 + 物流复合问题会规划 `get_order -> get_logistics -> faq_rag`，所有步骤都标记为只读。
+- 写工具只由确认门放行后执行，必须携带 `dialog_state.idempotency_key`，并记录脱敏 `tool_trace`。
 
 ### 8.7 `response_builder_node`
 
 职责：
 
 - 统一生成 `answer`、`choices`、脱敏 `task_status` 和下一轮 `dialog_state`。
+- 只读多工具执行后合并上下文，例如物流结果和 FAQ/RAG 的 `rag_matched`、`rag_sources`、`rag_backend` 会进入同一轮 `order_context`。
 - 完成/取消/转人工后清空内部 `dialog_state`。
 - 保留前端 `choices` 兼容。
 
@@ -519,39 +522,38 @@ def contains_any(text: str, keywords: tuple[str, ...]) -> bool:
 
 ## 10. 客服决策层：业务核心
 
-文件：`agent/service.py`
+主路径文件：`agent/nodes.py`、`agent/dialog_state.py`、`agent/slot_filling.py`、`agent/tool_planner.py`、`agent/tool_executor.py`、`agent/response_builder.py`
 
-返回对象：
+`agent/service.py` 仍保留为旧版规则客服兼容层，部分 FAQ/RAG 和回归测试还会覆盖它；新的 `/chat` 主路径已经迁移到 LangGraph 多轮状态机节点。业务核心不再是一个函数里按意图从头走到尾，而是把高风险客服流程拆成可观察、可测试的阶段：
 
-```python
-@dataclass(frozen=True)
-class CustomerServiceDecision:
-    answer: str
-    order_context: dict[str, Any] | None
-    needs_human_transfer: bool
-    transfer_reason: str
-    quality_score: int
-    tool_name: str
+```text
+turn_router
+  -> pending_task_resolver / retrieval_decision
+  -> slot_filling
+  -> confirmation_guard
+  -> tool_planner_or_react
+  -> tool_executor
+  -> response_builder
 ```
 
-这个对象把客服决策标准化：
+每层负责的业务边界：
 
-- `answer`：给用户看的回答。
-- `order_context`：给 UI、质量评估或后续节点看的结构化上下文。
-- `needs_human_transfer`：是否转人工。
-- `transfer_reason`：为什么转人工。
-- `quality_score`：规则路径的初始分，M4 最终返回值由评估器计算。
-- `tool_name`：本轮用了什么工具或路径。
+- `turn_router_node`：判断新任务、续接任务、确认、取消、转人工或过期。
+- `slot_filling_node`：抽取订单号、退货原因、商品状态等槽位，缺槽时追问，不执行工具。
+- `confirmation_guard_node`：退款/退货等写操作必须先停在 `awaiting_confirmation`。
+- `tool_planner_or_react_node`：只读复杂问题最多规划 3 步工具；写工具只能在确认后进入计划。
+- `tool_executor_node`：执行工具、结构化记录 `tool_results` 和脱敏 `tool_trace`。
+- `response_builder_node`：统一生成 `answer`、`choices`、`task_status`、`order_context` 和下一轮状态。
 
-决策优先级：
+业务优先级：
 
 ```text
 转人工/投诉/法律
-  -> 记忆召回
-  -> 退款
-  -> 物流
-  -> 订单
-  -> 商品
+  -> 续接未完成 dialog_state
+  -> 取消/确认当前任务
+  -> 新退款/退货任务
+  -> 物流追问
+  -> 订单/商品/FAQ/记忆只读工具
   -> 偏好保存
   -> fallback
 ```
@@ -561,37 +563,43 @@ class CustomerServiceDecision:
 未确认时：
 
 ```python
-refund = apply_refund(order_id, confirmed=is_refund_confirmed(message))
-...
-answer = (
-    f"订单 {order_id} 当前可以发起退款。退款会进入人工复核，"
-    "请回复“确认退款”后我再提交申请。"
-)
+dialog_state = {
+    "active_task": "refund",
+    "phase": "awaiting_confirmation",
+    "collected_slots": {"order_id": "ORD123456"},
+    "idempotency_key": "apply_refund:ORD123456",
+}
 ```
 
 确认后：
 
 ```python
-if refund["refund_status"] == "submitted":
-    answer = (
-        f"订单 {order_id} 的退款申请已提交，工单号 {refund['refund_ticket_id']}。"
-        "预计 1-3 个工作日内完成审核。"
-    )
+tool_plan = {
+    "steps": [{
+        "tool_name": "apply_refund",
+        "args": {
+            "order_id": "ORD123456",
+            "confirmed": True,
+            "idempotency_key": "apply_refund:ORD123456",
+        },
+        "read_only": False,
+    }]
+}
 ```
 
 面试重点：
 
-> 客服系统不能把“用户提到退款”直接理解成“用户确认提交退款”。当前实现要求用户明确确认后才调用 `apply_refund(..., confirmed=True)`，这是高风险动作的安全边界。
+> 客服系统不能把“用户提到退款”直接理解成“用户确认提交退款”。当前实现要求用户明确确认后才由 `confirmation_guard_node` 放行写工具，并把 `dialog_state.idempotency_key` 带到 `apply_refund`，这是高风险动作的安全边界和业务幂等边界。
 
 ### 10.2 物流和订单为什么分开
 
 物流查询：
 
 ```python
-if order_id and is_logistics_query(message):
-    logistics = get_logistics(order_id)
-    order = get_order(order_id)
-    context = {**order, **logistics}
+steps = [
+    {"tool_name": "get_order", "read_only": True},
+    {"tool_name": "get_logistics", "read_only": True},
+]
 ```
 
 订单查询：
@@ -606,6 +614,7 @@ if order_id and is_order_query(message):
 - 订单查询回答商品、金额、订单状态、预计送达。
 - 物流查询回答承运商、运单号、当前位置、物流事件。
 - `order_context` 在物流场景会合并订单和物流信息，方便 UI、转人工和质检复用。
+- 当用户同时问“还能退吗，物流到哪了”时，只读 ReAct 会额外调用 `faq_rag`，`response_builder` 会把 RAG 上下文合并到同一轮 `order_context`。
 
 ---
 
@@ -810,7 +819,7 @@ RetrievalDecision(
 )
 ```
 
-默认 `RETRIEVAL_DECISION_MODE=rules`，也可以切到 `llm` 让真实 LLM 输出 JSON。LLM JSON 解析失败或超时时会退回规则决策。退款确认、转人工、投诉/法律风险等 guardrail 仍由 `agent/service.py` 负责，不能被检索决策覆盖。
+默认 `RETRIEVAL_DECISION_MODE=rules`，也可以切到 `llm` 让真实 LLM 输出 JSON。LLM JSON 解析失败或超时时会退回规则决策。退款确认、转人工、投诉/法律风险等 guardrail 仍由 `turn_router_node`、`slot_filling_node` 和 `confirmation_guard_node` 负责，不能被检索决策覆盖。
 
 面试重点：
 
@@ -870,9 +879,22 @@ release 用 Lua 校验 token 后删除
 
 本地测试不要求 Redis，`SessionLockManager` 会退回到 `asyncio.Lock`。生产环境通过 `REDIS_URL` 使用 Redis，保证多进程、多实例之间共享锁。
 
-### 13.4 面试讲法
+### 13.4 写工具还需要业务幂等键
 
-> 我把并发问题拆成两类：同一条消息的重复提交，用 `request_id + 幂等表` 解决；同一会话多条不同消息同时处理，用 Redis 会话锁和 DB version 乐观锁解决。这样客户端可以安全重试，服务端也不会因为多实例并发把会话写乱。
+`request_id` 解决的是 HTTP 请求层面的重复提交；退款、退货、改地址这类业务写操作还需要独立的业务幂等键。原因是同一个业务任务可能跨多轮对话完成，最终确认动作必须绑定任务本身，而不是只绑定某一次 HTTP 请求。
+
+当前做法：
+
+- `dialog_state.idempotency_key` 由任务动作和订单号生成，例如 `apply_refund:ORD123456`。
+- `tool_planner_or_react_node` 只有在 `confirmation_guard_node` 放行后才生成 `apply_refund` 写工具计划。
+- `tool_executor_node` 调用 `apply_refund` 时传入 `idempotency_key`，但 `tool_trace` 对用户和运维视图脱敏，不暴露该键。
+- Mock `apply_refund` 维护提交账本，同一 `idempotency_key` 重放会返回同一 `refund_ticket_id`，不会重复创建工单。
+
+真实业务系统中，这个账本应落到售后系统或业务数据库中，并和审计事件、工单状态、业务错误码放在同一个事务边界内。
+
+### 13.5 面试讲法
+
+> 我把并发和重复提交拆成三层：同一条 HTTP 消息的重复提交，用 `request_id + 幂等表` 解决；同一会话多条不同消息同时处理，用 Redis 会话锁和 DB version 乐观锁解决；退款等业务写操作，用 `dialog_state.idempotency_key` 绑定业务任务，防止确认动作重复创建工单。
 
 ---
 
@@ -1235,6 +1257,15 @@ const response = await fetch("/chat", {
 - 同一个 `request_id` 改换消息内容会返回 `409 idempotency_key_conflict`。
 - `GET /chat/requests/{request_id}` 能查询已存储的请求状态和响应。
 
+### 18.4.1 `tests/test_graph_skeleton.py` / `tests/test_tools.py`
+
+保护多轮 Agent Graph 的生产级边界：
+
+- 只读退款资格 + 物流复合问题会执行 `get_order -> get_logistics -> faq_rag`，且 3 步都是只读。
+- 待确认退款不会进入 `tool_executor`，确认后写工具会收到 `dialog_state.idempotency_key`。
+- `apply_refund` 同一幂等键重复调用返回同一工单，避免重复创建退款申请。
+- 教学文档不能再把当前 graph 描述成线性图。
+
 ### 18.5 `tests/test_session_lock.py`
 
 保护同会话并发控制：
@@ -1356,13 +1387,14 @@ customer_service_graph = build_customer_service_graph(checkpointer=checkpointer)
 
 ### 19.4 当前工具不是 LangChain ToolNode
 
-当前工具是普通 Python 函数，由 `agent/service.py` 直接调用。
+当前工具仍是普通 Python 函数，但主路径已经改为由 `tool_planner_or_react_node` 规划、`tool_executor_node` 执行，而不是让 LLM 或旧 `service.py` 直接决定写工具调用。
 
 好处：
 
 - 简单可测。
 - 不依赖 LLM tool calling。
 - 适合建立业务规则基线。
+- 可以在 LangChain ToolNode 之前先验证工具权限、只读/写边界、确认门和幂等语义。
 
 当前已演进为：
 
@@ -1535,7 +1567,7 @@ Monitoring / Load Test Demo
 - UI 和 API 在同一个 FastAPI 服务中。
 - API 是生产边界，处理幂等、会话并发、限流、预算、记忆、观测和持久化。
 - 客户端重试通过 `request_id` 变成显式协议，不靠服务端猜测。
-- LangGraph 当前是线性图，但为后续 ToolNode、真实 LLM 和质量节点留扩展空间。
+- LangGraph 当前是多轮状态机主图，写操作经过确认门，只读复杂问题可进入受控 ReAct 工具循环。
 - 业务工具返回结构化数据，不只是拼接字符串。
 - 响应包含客服答案、结构化上下文和运营字段。
 - M5 用 Docker Compose 把 API、Redis、Postgres、Prometheus、Grafana 和 Locust 放入同一个本地演示拓扑。
