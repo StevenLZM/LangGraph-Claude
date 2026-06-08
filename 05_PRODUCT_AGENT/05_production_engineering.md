@@ -214,23 +214,33 @@ from langgraph.graph import START, END, StateGraph
 def build_customer_service_graph():
     workflow = StateGraph(CustomerServiceState)
 
-    # 节点
-    workflow.add_node("context_loader",      context_loader_node)      # 初始化上下文
-    workflow.add_node("retrieval_decision",  retrieval_decision_node)  # 保留/补齐检索决策
-    workflow.add_node("agent",               agent_node)               # 规则客服决策
-    workflow.add_node("finalizer",           finalizer_node)           # 统计窗口和耗时
-    
-    # 固定边
+    workflow.add_node("context_loader", context_loader_node)
+    workflow.add_node("turn_router", turn_router_node)
+    workflow.add_node("pending_task_resolver", pending_task_resolver_node)
+    workflow.add_node("retrieval_decision", retrieval_decision_node)
+    workflow.add_node("slot_filling", slot_filling_node)
+    workflow.add_node("confirmation_guard", confirmation_guard_node)
+    workflow.add_node("tool_planner_or_react", tool_planner_or_react_node)
+    workflow.add_node("tool_executor", tool_executor_node)
+    workflow.add_node("response_builder", response_builder_node)
+    workflow.add_node("finalizer", finalizer_node)
+
     workflow.add_edge(START, "context_loader")
-    workflow.add_edge("context_loader", "retrieval_decision")
-    workflow.add_edge("retrieval_decision", "agent")
-    workflow.add_edge("agent", "finalizer")
+    workflow.add_edge("context_loader", "turn_router")
+    workflow.add_conditional_edges("turn_router", route_after_turn_router, ...)
+    workflow.add_edge("pending_task_resolver", "slot_filling")
+    workflow.add_edge("retrieval_decision", "slot_filling")
+    workflow.add_conditional_edges("slot_filling", route_after_slot_filling, ...)
+    workflow.add_conditional_edges("confirmation_guard", route_after_confirmation_guard, ...)
+    workflow.add_edge("tool_planner_or_react", "tool_executor")
+    workflow.add_conditional_edges("tool_executor", route_after_tool_executor, ...)
+    workflow.add_edge("response_builder", "finalizer")
     workflow.add_edge("finalizer", END)
-    
+
     return workflow.compile(checkpointer=checkpointer)
 ```
 
-说明：当前生产边界由 FastAPI 主链路负责加载会话、摘要记忆、检索决策、长期记忆、限流和持久化；LangGraph 图保持轻量，负责把上下文、检索决策、规则客服决策和 finalizer 串起来。这样做的好处是 `/chat` 的幂等、会话锁、版本保存和消息 outbox 不被图内部副作用打散。
+说明：当前生产边界仍由 FastAPI 主链路负责加载会话、摘要记忆、检索决策、长期记忆、限流和持久化；LangGraph 图负责多轮任务状态推进。`dialog_state` 保存当前任务、阶段、槽位、确认状态、过期时间和幂等键；缺槽时停在 `slot_filling -> response_builder`，写操作必须经过 `confirmation_guard`，只读复杂问题可在 `tool_planner_or_react -> tool_executor` 内最多循环 3 步。这样既保留 `/chat` 的幂等、会话锁、版本保存和消息 outbox 边界，也让十轮以上连续对话不依赖自然语言历史猜状态。
 
 ---
 

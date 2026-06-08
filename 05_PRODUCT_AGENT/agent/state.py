@@ -18,6 +18,14 @@ class CustomerServiceState(TypedDict, total=False):
     user_memories: list[str]
     memory_summary: str
     retrieval_decision: dict[str, Any]
+    route: str
+    latest_user_message: str
+    dialog_state: dict[str, Any] | None
+    task_status: dict[str, Any] | None
+    tool_plan: dict[str, Any]
+    tool_results: list[dict[str, Any]]
+    tool_trace: list[dict[str, Any]]
+    max_tool_steps: int
     order_context: dict[str, Any] | None
     choices: dict[str, Any] | None
     pending_choice: dict[str, Any] | None

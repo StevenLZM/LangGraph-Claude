@@ -1,6 +1,6 @@
 # 05_PRODUCT_AGENT
 
-生产级 AI Agent 平台的智能客服项目。当前已完成 M6 收尾强化、存储后端升级、RocketMQ 业务消息接入和三层记忆架构升级：`/chat`、内置客服工作台、Mock 工具、规则型客服 Agent、会话上下文、摘要记忆、SQLite/Postgres 用户长期记忆、SQLite fallback / Milvus 可选语义长期记忆、检索决策节点、LangGraph Postgres/Redis checkpointer、限流与 Token 预算降级、DeepSeek 真实 LLM 主路径、LLM fallback 与熔断测试层、FAQ/RAG 适配、RocketMQ 跨项目业务消息、管理接口、100 题自动评测、LangSmith trace metadata、Prometheus 兼容指标、Grafana 看板编排和 Locust 压测入口。
+生产级 AI Agent 平台的智能客服项目。当前已完成 M6 收尾强化、存储后端升级、RocketMQ 业务消息接入、三层记忆架构升级和生产级多轮 Agent Graph 改造：`/chat`、内置客服工作台、Mock 工具、确定性业务状态机、受控只读 ReAct 子循环、会话上下文、摘要记忆、SQLite/Postgres 用户长期记忆、SQLite fallback / Milvus 可选语义长期记忆、检索决策节点、LangGraph Postgres/Redis checkpointer、限流与 Token 预算降级、DeepSeek 真实 LLM 主路径、LLM fallback 与熔断测试层、FAQ/RAG 适配、RocketMQ 跨项目业务消息、管理接口、100 题自动评测、LangSmith trace metadata、Prometheus 兼容指标、Grafana 看板编排和 Locust 压测入口。
 
 ## 本地运行
 
@@ -167,11 +167,31 @@ docker compose down -v
 
 当前记忆架构分为三层：
 
-- 会话上下文：`SessionStore` 保存当前 `session_id` 的最近消息、pending choice 和质量 metadata。
+- 会话上下文：`SessionStore` 保存当前 `session_id` 的最近消息、`dialog_state` 多轮任务状态、脱敏 `task_status` 和质量 metadata。
 - 摘要记忆：`SummaryMemoryStore` 按 `session_id` 保存滚动摘要，postprocess worker 可异步更新，下一轮 `/chat` 会注入摘要上下文。
 - 长期记忆：`UserMemoryManager` 保留关键词/结构化业务记忆，`SemanticMemoryStore` 提供语义长期记忆接口，默认 SQLite fallback，可配置 Milvus Lite。
 
 `/chat` 主链路会先执行检索决策，决定是否读取长期记忆、FAQ/RAG 或业务工具上下文。默认 `RETRIEVAL_DECISION_MODE=rules`，可切到 `llm` 使用真实 LLM 输出结构化检索决策；LLM 决策失败时会自动退回规则决策，避免阻塞客服回复。
+
+## 多轮 Agent Graph
+
+LangGraph 主图已从线性规则链路升级为“确定性业务状态机 + 受控只读 ReAct 子循环”：
+
+```text
+START
+  -> context_loader
+  -> turn_router
+  -> pending_task_resolver | retrieval_decision | response_builder
+  -> slot_filling
+  -> confirmation_guard
+  -> tool_planner_or_react
+  -> tool_executor
+  -> response_builder
+  -> finalizer
+  -> END
+```
+
+`dialog_state` 记录当前任务、阶段、槽位、确认状态、过期时间和幂等键。退货/退款、物流追问和商品后续操作都通过显式状态恢复，不再只依赖自然语言历史。`tool_planner_or_react` 只允许只读工具进入多步循环；`apply_refund` 等写工具必须先经过 `confirmation_guard` 并在用户明确确认后由 `tool_executor` 调用。
 
 语义记忆配置：
 
@@ -239,8 +259,9 @@ docker compose --profile loadtest run --rm locust \
 pytest tests -q
 ```
 
-M6 的业务 guardrail 仍由规则层负责，包括退款二次确认、转人工优先级和工具上下文构造；用户可见客服回答必须由真实 LLM 基于规则/工具结果生成。pytest 通过注入 fake LLM 保持离线稳定，不再依赖 `offline_stub` 作为运行模式。Compose 会启动 Redis、Postgres/pgvector、RocketMQ、Prometheus 和 Grafana；Postgres 业务存储、LangGraph checkpoint、RocketMQ outbox、摘要记忆、检索决策和语义长期记忆接口已接入。Milvus Lite 可选 backend 已提供，真实 embedding 服务和远程 Milvus 集群效果验证仍留给后续专项。
+M6 的业务 guardrail 仍由确定性状态机负责，包括退款/退货二次确认、补槽追问、转人工优先级和工具上下文构造；用户可见客服回答必须由真实 LLM 基于后端状态和工具结果生成。pytest 通过注入 fake LLM 保持离线稳定，不再依赖 `offline_stub` 作为运行模式。Compose 会启动 Redis、Postgres/pgvector、RocketMQ、Prometheus 和 Grafana；Postgres 业务存储、LangGraph checkpoint、RocketMQ outbox、摘要记忆、检索决策和语义长期记忆接口已接入。Milvus Lite 可选 backend 已提供，真实 embedding 服务和远程 Milvus 集群效果验证仍留给后续专项。
 
 ## 教学文档
 
 - `Codex_TEACHING_GUIDE.md`：已开发部分的关键代码、流程对照解释和面试重点。
+- `PRODUCTION_READINESS_GAPS.md`：当前代码距离真正生产级 Agent 的差距、风险、优化方向和验收标准。

@@ -53,7 +53,12 @@
 │   ├── checkpointing.py         # LangGraph Postgres/Redis/none checkpointer 工厂
 │   ├── graph.py                 # LangGraph 工作流装配
 │   ├── state.py                 # CustomerServiceState
-│   ├── nodes.py                 # context_loader / retrieval_decision / agent / finalizer 节点
+│   ├── nodes.py                 # 多轮状态机 Graph 节点
+│   ├── dialog_state.py          # dialog_state 生命周期和旧 pending_choice 兼容
+│   ├── slot_filling.py          # 多轮任务补槽
+│   ├── tool_planner.py          # 受控只读 ReAct / 工具计划
+│   ├── tool_executor.py         # 统一工具执行和 trace
+│   ├── response_builder.py      # 统一回复、choices、task_status 构造
 │   ├── retrieval.py             # 检索决策：rules fallback + LLM JSON 解析
 │   ├── intent.py                # 订单号和意图识别
 │   ├── service.py               # 规则型客服决策
@@ -109,13 +114,14 @@ api.main
   -> api.idempotency / api.session_lock
   -> api.middleware.rate_limiter
   -> memory.factory -> memory.session_store / memory.summary / memory.long_term / memory.semantic / memory.short_term
-  -> agent.graph -> agent.nodes -> agent.retrieval / agent.service -> agent.intent / agent.tools / rag.faq_tool
+  -> agent.graph -> agent.nodes -> agent.dialog_state / agent.slot_filling / agent.tool_planner / agent.tool_executor / agent.response_builder
+  -> agent.retrieval / agent.intent / agent.tools / rag.faq_tool
   -> llm.factory / llm.resilient_llm
   -> messaging.events / messaging.outbox / messaging.publisher
   -> monitoring.tracing / monitoring.evaluator / monitoring.metrics
 ```
 
-这个依赖方向说明：API 层是生产边界，负责协议、幂等、并发控制、限流、三层记忆装配、观测和响应落库；检索决策集中在 `agent/retrieval.py`；客服业务规则集中在 `agent/service.py`；业务数据访问集中在 `agent/tools.py`；业务消息集中在 `messaging/`；运营指标集中在 `monitoring/`。
+这个依赖方向说明：API 层是生产边界，负责协议、幂等、并发控制、限流、三层记忆装配、观测和响应落库；检索决策集中在 `agent/retrieval.py`；多轮任务状态集中在 `agent/dialog_state.py`、补槽集中在 `agent/slot_filling.py`，工具计划和执行集中在 `agent/tool_planner.py` / `agent/tool_executor.py`；业务数据访问集中在 `agent/tools.py`；业务消息集中在 `messaging/`；运营指标集中在 `monitoring/`。
 
 ---
 
@@ -143,9 +149,14 @@ api.main
   -> build_trace_config 生成 session/user metadata
   -> customer_service_graph.invoke(..., configurable.thread_id=session_id)
   -> context_loader_node 初始化上下文
+  -> turn_router_node 判断新任务、继续任务、确认、取消或转人工
+  -> pending_task_resolver_node 恢复上一轮 dialog_state
   -> retrieval_decision_node 保留 API 侧检索决策，缺省时规则 fallback
-  -> agent_node 调 handle_customer_message 做客服决策
-  -> get_order / get_logistics / get_product / apply_refund 读取 Mock 业务数据
+  -> slot_filling_node 抽取订单号、退货原因、商品状态等槽位
+  -> confirmation_guard_node 拦截退款/退货等写操作，等待明确确认
+  -> tool_planner_or_react_node 规划只读工具或确认后的写工具
+  -> tool_executor_node 执行 get_order / get_logistics / get_product / apply_refund / FAQ
+  -> response_builder_node 生成 answer / choices / task_status / dialog_state
   -> finalizer_node 计算窗口大小、轮次、响应耗时
   -> AutoQualityEvaluator 评估准确性、礼貌性、完整性
   -> UserMemoryManager 提取并保存长期记忆
@@ -175,8 +186,9 @@ api.main
 | Token 预算 | `RateLimiter.reserve_token_budget` | 单次/全局预算超限走降级回复 |
 | Trace metadata | `monitoring/tracing.py::build_trace_config` | 给 LangGraph 调用注入 session/user metadata |
 | Checkpoint | `agent/checkpointing.py::build_checkpointer` | 按配置接入 none/Postgres/Redis checkpointer |
-| 图编排 | `agent/graph.py::build_customer_service_graph` | 定义 `context_loader -> retrieval_decision -> agent -> finalizer`，可注入 checkpointer |
-| 客服决策 | `agent/service.py::handle_customer_message` | 按优先级处理转人工、退款、物流、订单、商品 |
+| 图编排 | `agent/graph.py::build_customer_service_graph` | 定义多轮状态机主图和条件边，可注入 checkpointer |
+| 多轮状态 | `agent/dialog_state.py` / `agent/slot_filling.py` | 保存任务阶段、槽位、确认状态，并支持旧 `pending_choice` 转换 |
+| 工具计划与执行 | `agent/tool_planner.py` / `agent/tool_executor.py` | 只读工具可多步规划，写工具必须经过确认门 |
 | 工具执行 | `agent/tools.py` | 返回 Mock 订单、物流、商品和退款结果 |
 | 质量评估 | `monitoring/evaluator.py::AutoQualityEvaluator` | 计算 `quality_score` 和低质告警 |
 | 指标记录 | `monitoring/metrics.py::record_chat_request` | 记录请求数、延迟、Token、质量分等 |
@@ -308,29 +320,24 @@ class ChatResponse(BaseModel):
 
 ---
 
-## 6. LangGraph 层：为什么现在仍保持线性图
+## 6. LangGraph 层：为什么升级为多轮状态机图
 
 文件：`agent/graph.py`
 
 当前图：
 
-```python
-workflow = StateGraph(CustomerServiceState)
-
-workflow.add_node("context_loader", context_loader_node)
-workflow.add_node("agent", agent_node)
-workflow.add_node("finalizer", finalizer_node)
-
-workflow.add_edge(START, "context_loader")
-workflow.add_edge("context_loader", "agent")
-workflow.add_edge("agent", "finalizer")
-workflow.add_edge("finalizer", END)
-```
-
-当前流程：
-
 ```text
-START -> context_loader -> agent -> finalizer -> END
+START
+  -> context_loader
+  -> turn_router
+  -> pending_task_resolver | retrieval_decision | response_builder
+  -> slot_filling
+  -> confirmation_guard
+  -> tool_planner_or_react
+  -> tool_executor
+  -> response_builder
+  -> finalizer
+  -> END
 ```
 
 为什么不用普通函数直接写完？
@@ -338,11 +345,12 @@ START -> context_loader -> agent -> finalizer -> END
 - M2 已经加入记忆加载、窗口裁剪和会话持久化。
 - M3 在 API 边界加入限流、预算和降级，图内部保持业务状态流简单。
 - M4 在 API 边界加入 trace metadata、质量评估和指标记录，图调用天然可被追踪。
-- 后续如果引入 ToolNode、LLM agent、多轮工具调用或 quality node，图结构可以平滑扩展。
+- M6 后多轮退货/退款确认、物流追问和商品后续操作需要显式状态恢复，不能只靠自然语言历史猜测。
+- 受控 ReAct 只允许只读工具循环；写操作必须经过 `confirmation_guard`。
 
 面试重点：
 
-> 这个阶段的图看起来简单，但它固定了“客服系统是一条状态流”这个架构。生产能力不一定都塞进图里：限流和 HTTP 指标更适合 API 边界，业务推理和工具链路更适合图里。
+> 生产级客服 Agent 不应该让 LLM 自由决定是否执行高风险动作。顶层用确定性状态机保证任务阶段、补槽、确认和人工兜底；只读工具可以在受控 ReAct 子循环里提高灵活性。限流、幂等、HTTP 指标和 outbox 仍留在 API 边界。
 
 ---
 
@@ -382,7 +390,7 @@ messages: Annotated[list[BaseMessage], add_messages]
 
 - `messages` 不是普通 list 覆盖。
 - LangGraph 合并节点输出时会用 `add_messages` reducer，把新消息追加进去。
-- `agent_node` 返回 `AIMessage` 后，最终 state 中同时包含用户消息和客服消息。
+- `response_builder_node` 返回 `AIMessage` 后，最终 state 中同时包含用户消息和客服消息。
 
 面试重点：
 
@@ -390,7 +398,7 @@ messages: Annotated[list[BaseMessage], add_messages]
 
 ---
 
-## 8. Node 层：三个节点分别负责什么
+## 8. Node 层：生产级多轮节点分别负责什么
 
 文件：`agent/nodes.py`
 
@@ -402,17 +410,55 @@ messages: Annotated[list[BaseMessage], add_messages]
 - 计算当前消息窗口大小和用户轮次。
 - 记录 `_started_at`，供 `finalizer_node` 计算响应耗时。
 
-### 8.2 `agent_node`
+### 8.2 `turn_router_node`
 
 职责：
 
-- 找到最新用户消息。
-- 调用 `handle_customer_message()` 做客服决策。
-- 把决策结果转换成 LangGraph state patch。
-- 返回新的 `AIMessage`，由 `add_messages` 追加到消息列表。
-- 根据输入长度给出轻量 `token_used` 估算。
+- 判断本轮是新任务、继续上轮任务、确认、取消、转人工，还是过期任务。
+- 当已有 `dialog_state` 且用户补订单号/确认/取消时，优先续接当前任务。
+- 当物流追问中途切到退款/退货时，允许高优先级新任务覆盖旧任务。
 
-### 8.3 `finalizer_node`
+### 8.3 `pending_task_resolver_node`
+
+职责：
+
+- 恢复上一轮未完成的 `dialog_state`。
+- 将确认/取消/过期路由转换为明确的任务阶段。
+- 保证“用户只发 ORD123456”也能归回上一轮物流或退货任务。
+
+### 8.4 `slot_filling_node`
+
+职责：
+
+- 抽取 `order_id`、退货原因、商品状态和商品后续选项。
+- 缺槽时停在 `collecting_slots`，不进入工具执行。
+- 超过补槽阈值后进入人工兜底。
+
+### 8.5 `confirmation_guard_node`
+
+职责：
+
+- 对退款/退货等写操作生成确认预览和 `choices`。
+- 用户没有明确确认前，不允许进入 `apply_refund`。
+- 用户确认后把任务推进到 `executing`。
+
+### 8.6 `tool_planner_or_react_node` / `tool_executor_node`
+
+职责：
+
+- 简单任务走确定性工具计划。
+- 复杂只读任务允许最多 3 步 ReAct 式工具循环。
+- 写工具只由确认门放行后执行，并记录 `tool_trace`。
+
+### 8.7 `response_builder_node`
+
+职责：
+
+- 统一生成 `answer`、`choices`、脱敏 `task_status` 和下一轮 `dialog_state`。
+- 完成/取消/转人工后清空内部 `dialog_state`。
+- 保留前端 `choices` 兼容。
+
+### 8.8 `finalizer_node`
 
 职责：
 
@@ -423,7 +469,7 @@ messages: Annotated[list[BaseMessage], add_messages]
 
 面试重点：
 
-> 节点要单一职责。`context_loader` 负责上下文准备，`agent` 负责业务决策，`finalizer` 负责运行指标收尾。质量评估和 Prometheus 指标目前放在 API 边界，是因为它们关注 HTTP 请求和最终响应，而不是单个图节点。
+> 节点要单一职责。`context_loader` 负责上下文准备，`turn_router` 负责本轮入口路由，`slot_filling` 负责补槽，`confirmation_guard` 负责写操作安全门，`tool_planner_or_react` 和 `tool_executor` 负责工具闭环，`response_builder` 负责用户可见响应和下一轮状态。质量评估和 Prometheus 指标仍放在 API 边界，因为它们关注 HTTP 请求和最终响应，而不是单个图节点。
 
 ---
 
@@ -1258,7 +1304,7 @@ const response = await fetch("/chat", {
 当前 `/chat` 运行路径是：
 
 ```text
-idempotency -> session lock -> rate/token budget -> session summary -> retrieval decision -> semantic/keyword memory -> agent_node -> handle_customer_message -> intent/tools/FAQ-RAG -> ResilientLLM -> DeepSeek final answer -> session version save -> outbox
+idempotency -> session lock -> rate/token budget -> session summary -> retrieval decision -> semantic/keyword memory -> multiturn graph -> tool planning/execution -> response_builder -> ResilientLLM -> DeepSeek final answer -> session version save -> outbox
 ```
 
 原因：
@@ -1318,13 +1364,13 @@ customer_service_graph = build_customer_service_graph(checkpointer=checkpointer)
 - 不依赖 LLM tool calling。
 - 适合建立业务规则基线。
 
-后续可以演进为：
+当前已演进为：
 
 ```text
-agent -> tools -> agent -> finalizer
+turn_router -> slot_filling -> confirmation_guard -> tool_planner_or_react -> tool_executor -> response_builder -> finalizer
 ```
 
-或者保留规则 guardrail，让 LLM 只处理表达和复杂语义。
+并保留规则 guardrail，让 LLM 只处理表达、检索决策和复杂语义，不越过后端状态执行写操作。
 
 ### 19.5 当前 Token 仍是轻量估算
 
@@ -1384,7 +1430,7 @@ agent -> tools -> agent -> finalizer
 
 回答：
 
-> 用户明确要求人工、投诉、法律、纠纷等场景继续让 AI 硬答会有业务风险。当前 `handle_customer_message()` 先判断转人工，再判断退款、物流、订单和商品，体现的是客服系统的安全优先级。
+> 用户明确要求人工、投诉、法律、纠纷等场景继续让 AI 硬答会有业务风险。当前 `turn_router_node` 会优先识别转人工和高风险诉求，`confirmation_guard_node` 会拦截退款/退货等写操作，体现的是客服系统的安全优先级。
 
 ### Q8：为什么 Token 预算超限返回 200，而不是报错？
 
@@ -1453,9 +1499,9 @@ Session / Memory Layer
    v
 LangGraph StateGraph
    |
-   | context_loader -> agent -> finalizer
+   | context_loader -> turn_router -> slot_filling -> confirmation_guard -> tool_executor -> response_builder -> finalizer
    v
-Rule-based Customer Service Decision
+State-machine Customer Service Decision
    |
    | intent + mock tools
    v

@@ -552,6 +552,25 @@ Prometheus 指标出口。
 - 当前 Milvus backend 使用确定性 hash embedding 作为离线可测实现；接真实 embedding 服务时应替换 `SemanticMemoryStore` 内部 embedding 策略，不改变 `/chat` 契约。
 - 检索决策默认 `rules`，`llm` 模式可用真实 LLM 产出结构化 JSON，但业务 guardrail 仍由规则层负责，不能由检索决策覆盖退款确认和转人工安全边界。
 
+### 2026-06-08：生产级多轮 Agent Graph 改造完成
+
+**实际交付**
+- LangGraph 从轻量线性链路升级为多轮状态机主图：`context_loader -> turn_router -> pending_task_resolver/retrieval_decision -> slot_filling -> confirmation_guard -> tool_planner_or_react -> tool_executor -> response_builder -> finalizer`。
+- 新增 `agent/dialog_state.py`：统一保存 `active_task`、`phase`、槽位、确认状态、过期时间和幂等键，并兼容旧 `pending_choice` metadata。
+- 新增 `agent/slot_filling.py`：支持退货/退款订单号、退货原因、商品状态、物流订单号和商品后续选项抽槽。
+- 新增 `agent/tool_planner.py` 与 `agent/tool_executor.py`：只读工具可多步计划，写工具 `apply_refund` 只能在确认门通过后执行。
+- 新增 `agent/response_builder.py`：统一构造 `answer`、`choices`、脱敏 `task_status` 和下一轮 `dialog_state`。
+- `/chat` 响应新增可选 `task_status`，现有 `choices` 和请求协议保持兼容。
+- LLM 最终回答 prompt 增加安全约束：不得声称未执行的退款、退货、改地址或取消订单已经完成。
+
+**验收结果**
+- `cd 05_PRODUCT_AGENT && pytest tests -q`：100 passed。
+- 新增测试覆盖图节点存在、退货补槽、确认前不执行写工具、旧 `pending_choice` 转换、物流追问和十轮稳定会话。
+
+**当前边界**
+- v1 继续使用 mock 业务工具；真实订单、售后、库存系统适配仍是后续专项。
+- 受控 ReAct 当前只覆盖只读工具计划，写操作仍由确定性状态机和确认门控制。
+
 ---
 
 ## 八、后续开发约定

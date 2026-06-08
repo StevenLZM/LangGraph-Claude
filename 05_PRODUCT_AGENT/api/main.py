@@ -12,6 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages import SystemMessage
 
 from agent.checkpointing import build_checkpointer, close_checkpointer_resources
+from agent.dialog_state import load_dialog_state_from_metadata
 from agent.graph import build_customer_service_graph
 from agent.retrieval import RetrievalDecision, decide_retrieval
 from api.idempotency import IdempotencyConflict, build_chat_request_store, chat_message_hash
@@ -250,7 +251,7 @@ async def _process_chat(req: ChatRequest) -> ChatResponse:
     loaded_session = session_store.load_session(req.session_id)
     prior_messages = loaded_session["messages"] if loaded_session else []
     session_metadata = loaded_session["metadata"] if loaded_session else {}
-    pending_choice = session_metadata.get("pending_choice")
+    dialog_state = load_dialog_state_from_metadata(session_metadata)
     expected_session_version = loaded_session["version"] if loaded_session else 0
     loaded_summary = summary_memory_store.load_summary(req.session_id)
     retrieval_decision = await _decide_retrieval(req.message)
@@ -296,7 +297,8 @@ async def _process_chat(req: ChatRequest) -> ChatResponse:
             "user_memories": user_memories,
             "memory_summary": loaded_summary.summary if loaded_summary else "",
             "retrieval_decision": retrieval_decision.to_dict(),
-            "pending_choice": pending_choice,
+            "dialog_state": dialog_state,
+            "max_tool_steps": 3,
         },
         config={
             "configurable": {"thread_id": req.session_id},
@@ -371,7 +373,10 @@ async def _process_chat(req: ChatRequest) -> ChatResponse:
             "llm_trace": llm_trace,
             "summary_version": loaded_summary.version if loaded_summary else 0,
             "retrieval_decision": retrieval_decision.to_dict(),
+            "dialog_state": result.get("dialog_state"),
             "pending_choice": result.get("pending_choice"),
+            "task_status": result.get("task_status"),
+            "tool_trace": result.get("tool_trace", []),
         },
         expected_version=expected_session_version,
     )
@@ -402,6 +407,7 @@ async def _process_chat(req: ChatRequest) -> ChatResponse:
         transfer_reason=result.get("transfer_reason", ""),
         order_context=result.get("order_context"),
         choices=result.get("choices"),
+        task_status=result.get("task_status"),
         token_used=token_used,
         response_time_ms=response_time_ms,
         quality_score=quality_score,
@@ -573,7 +579,9 @@ def _build_degraded_chat_response(
             "degraded": True,
             "degrade_reason": reason,
             "llm_trace": _offline_llm_trace(settings.llm_mode, "degraded", user_memories),
+            "dialog_state": None,
             "pending_choice": None,
+            "task_status": None,
         },
         expected_version=expected_session_version,
     )
@@ -594,6 +602,7 @@ def _build_degraded_chat_response(
         transfer_reason="",
         order_context=None,
         choices=None,
+        task_status=None,
         token_used=token_used,
         response_time_ms=response_time_ms,
         quality_score=evaluation.score,
@@ -725,6 +734,8 @@ def _build_llm_messages(
         "memory_summary": result.get("memory_summary", ""),
         "retrieval_decision": result.get("retrieval_decision", {}),
         "draft_answer": draft_answer,
+        "task_status": result.get("task_status"),
+        "tool_trace": result.get("tool_trace", []),
     }
     return [
         SystemMessage(
@@ -732,6 +743,8 @@ def _build_llm_messages(
                 "你是电商智能客服。请基于后端工具结果回答用户，不要编造订单、物流或退款信息。"
                 "如果没有订单号，只能说明会参考用户偏好，并提示提供订单号查询实际承运商。"
                 "如果后端上下文包含 choices，必须保留这些选项含义，不要新增后端未提供的选项。"
+                "如果后端上下文没有显示工具已执行，不得声称已经退款、退货、改地址或取消订单。"
+                "如果 task_status 处于 awaiting_confirmation，只能请求用户确认，不得说动作已完成。"
                 "回答要简洁、礼貌、中文。"
             )
         ),

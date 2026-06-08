@@ -4,8 +4,10 @@ import uuid
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage, HumanMessage
 
 from api.main import app
+from agent.choices import create_refund_choice
 
 
 class FakeChatLLM:
@@ -95,6 +97,35 @@ def test_refund_requires_explicit_confirmation_before_submit():
     assert "退款申请已提交" in confirmed["answer"]
     assert confirmed["order_context"]["refund_status"] == "submitted"
     assert confirmed["choices"] is None
+    assert confirmed["task_status"]["phase"] == "completed"
+
+
+def test_return_flow_collects_slots_before_confirmation_and_submit():
+    session_id = "return_multiturn_session"
+
+    first = _chat("我要退货", session_id=session_id)
+    assert first["task_status"]["active_task"] == "refund"
+    assert first["task_status"]["phase"] == "collecting_slots"
+    assert "order_id" in first["task_status"]["missing_slots"]
+    assert "已提交" not in first["answer"]
+
+    second = _chat("ORD123456", session_id=session_id)
+    assert second["task_status"]["phase"] == "collecting_slots"
+    assert "order_id" not in second["task_status"]["missing_slots"]
+    assert "reason" in second["task_status"]["missing_slots"]
+    assert "已提交" not in second["answer"]
+
+    third = _chat("不想要了，商品完好", session_id=session_id)
+    assert third["task_status"]["phase"] == "awaiting_confirmation"
+    assert third["choices"]["scenario"] == "refund"
+    assert third["order_context"]["refund_status"] == "confirmation_required"
+    assert "已提交" not in third["answer"]
+
+    confirmed = _chat("确认退货", session_id=session_id)
+    assert "退款申请已提交" in confirmed["answer"]
+    assert confirmed["order_context"]["refund_status"] == "submitted"
+    assert confirmed["task_status"]["phase"] == "completed"
+    assert confirmed["choices"] is None
 
 
 def test_chat_marks_human_transfer_for_complaint_and_legal_issue():
@@ -182,10 +213,83 @@ def test_chat_uses_latest_delivery_preference_when_carrier_query_has_no_order_id
     assert payload["llm_trace"]["tool_name"] == "delivery_preference"
     assert "已读取配送偏好" in payload["llm_trace"]["reasoning_summary"]
     assert payload["choices"]["scenario"] == "logistics"
+    assert payload["task_status"]["active_task"] == "logistics"
+    assert payload["task_status"]["phase"] == "collecting_slots"
+    assert payload["task_status"]["missing_slots"] == ["order_id"]
 
     follow_up = _chat_for_user(user_id, "delivery_preference_query", "ORD123456")
     assert follow_up["order_context"]["tracking_no"] == "SF100200300CN"
     assert follow_up["choices"] is None
+    assert follow_up["task_status"]["phase"] == "completed"
+
+
+def test_legacy_pending_choice_metadata_converts_to_dialog_state():
+    import api.main as main_module
+
+    session_id = "legacy_pending_choice_session"
+    choice_set = create_refund_choice(
+        "ORD123456",
+        {"order_id": "ORD123456", "refund_status": "confirmation_required"},
+    )
+    main_module.session_store.save_session(
+        session_id=session_id,
+        user_id="user_001",
+        messages=[
+            HumanMessage(content="我要给订单 ORD123456 退款"),
+            AIMessage(content="请确认是否继续提交退款申请。"),
+        ],
+        metadata={"pending_choice": choice_set},
+        expected_version=0,
+    )
+
+    confirmed = _chat("确认退款", session_id=session_id)
+
+    assert "退款申请已提交" in confirmed["answer"]
+    assert confirmed["order_context"]["refund_status"] == "submitted"
+    assert confirmed["task_status"]["phase"] == "completed"
+
+
+def test_ten_turn_session_keeps_task_state_stable():
+    user_id = "ten_turn_user_001"
+    session_id = "ten_turn_session_001"
+
+    first = _chat_for_user(user_id, session_id, "我喜欢顺丰配送，以后发货优先顺丰")
+    assert "已记住" in first["answer"]
+
+    second = _chat_for_user(user_id, session_id, "查下物流")
+    assert second["task_status"]["active_task"] == "logistics"
+    assert second["task_status"]["missing_slots"] == ["order_id"]
+
+    third = _chat_for_user(user_id, session_id, "ORD123456")
+    assert third["order_context"]["tracking_no"] == "SF100200300CN"
+    assert third["task_status"]["phase"] == "completed"
+
+    fourth = _chat_for_user(user_id, session_id, "AirBuds Pro 2 还有库存吗？")
+    assert fourth["choices"]["scenario"] == "product"
+
+    fifth = _chat_for_user(user_id, session_id, "库存")
+    assert "有货" in fifth["answer"]
+
+    sixth = _chat_for_user(user_id, session_id, "我要退货")
+    assert sixth["task_status"]["active_task"] == "refund"
+    assert sixth["task_status"]["phase"] == "collecting_slots"
+
+    seventh = _chat_for_user(user_id, session_id, "取消")
+    assert seventh["task_status"]["phase"] == "cancelled"
+    assert "取消" in seventh["answer"]
+
+    eighth = _chat_for_user(user_id, session_id, "我要给订单 ORD123456 退款")
+    assert eighth["task_status"]["phase"] == "awaiting_confirmation"
+    assert eighth["order_context"]["refund_status"] == "confirmation_required"
+
+    ninth = _chat_for_user(user_id, session_id, "确认退款")
+    assert ninth["order_context"]["refund_status"] == "submitted"
+    assert ninth["task_status"]["phase"] == "completed"
+
+    tenth = _chat_for_user(user_id, session_id, "你记得我的配送偏好吗？")
+    assert "顺丰" in tenth["answer"]
+    assert tenth["user_memories"]
+    assert tenth["task_status"] is None
 
 
 def test_replacing_delivery_preference_refreshes_response_memories():

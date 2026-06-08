@@ -29,6 +29,7 @@ class ChatResponse(BaseModel):
     transfer_reason: str
     order_context: dict[str, Any] | None
     choices: dict[str, Any] | None = None
+    task_status: dict[str, Any] | None = None
     token_used: int
     response_time_ms: int
     quality_score: int | None
