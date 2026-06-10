@@ -18,6 +18,14 @@ class ResearchPlan(BaseModel):
     estimated_depth: Literal["quick", "standard", "deep"] = "standard"
 
 
+class EvidenceQuality(BaseModel):
+    support_level: Literal["direct", "indirect", "background", "irrelevant"] = "background"
+    source_authority: Literal["primary", "secondary", "unknown"] = "unknown"
+    extracted_claim: str = ""
+    limitations: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
 class Evidence(BaseModel):
     sub_question_id: str
     source_type: Literal["web", "academic", "code", "kb"]
@@ -25,6 +33,7 @@ class Evidence(BaseModel):
     snippet: str
     relevance_score: float = 0.0
     fetched_at: str = ""
+    quality: EvidenceQuality | None = None
 
     # 定义数据结构的序列化输出，继承BaseModel里本身也有，不写也行，写了就覆盖
     def __repr__(self):

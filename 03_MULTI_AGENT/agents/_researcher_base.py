@@ -11,6 +11,7 @@ import logging
 from typing import Any
 
 from agents.schemas import Evidence
+from runtime_skills.evidence_grounded_research import build_default_quality
 from tools.base import SearchTool, SourceType, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,10 @@ def _to_evidence(
                 snippet=(r.get("snippet") or "")[:2000],
                 relevance_score=float(r.get("relevance_score") or 0.0),
                 fetched_at=now,
+                quality=build_default_quality(
+                    r.get("snippet") or "",
+                    float(r.get("relevance_score") or 0.0),
+                ),
             )
         )
     return evs

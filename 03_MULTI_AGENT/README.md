@@ -14,6 +14,7 @@ AI 行业深度研究多 Agent 系统。设计文档：
 - ✅ Reflector: LLM 覆盖度评分 + 补查/收敛 + 3 轮硬兜底
 - ✅ Writer: DeepSeek max tier Markdown 报告 + [^N] 引用脚注 + 落盘归档
 - ✅ Evidence reducer: URL 去重 + relevance_score 排序
+- ✅ Runtime LLM Skills: evidence-grounded-research 证据质量 guardrails + citation-report-writing 引用审计
 - ✅ FastAPI: `/research` `/resume` `/turn` `/state` `/threads` `/reports`
 - ✅ **外部 MCP Client**：官方 `mcp` SDK + Brave Search MCP（降级链位置 2）
 - ✅ **内部 MCP Server**：5 个 tool 暴露本项目能力给 Claude Desktop
@@ -137,13 +138,14 @@ make eval        # 20 题完整评测
 
 1. **Supervisor + Research Subgraph + Send fan-out**：主图把调研阶段封装为 `research_subgraph`；子图内部 1 次 dispatcher 派发 N 个并行 Researcher（4 源 × M 子问题）；`merge_evidence` reducer 自动 URL 去重 + relevance 排序
 2. **`interrupt()` + `Command(resume=...)` HITL**：Planner 暂停等用户编辑计划；同 thread_id 跨 turn 状态恢复
-3. **Reflector 反思循环**：LLM 评分 evidence 覆盖度 → 决定补查/收敛；`max_iterations=3` 硬兜底
+3. **Reflector 反思循环**：LLM 结合 runtime 已计算的 support/confidence 与 coverage guardrails 评分覆盖度 → 决定补查/收敛；`max_iterations=3` 硬兜底
 4. **统一 SearchTool 协议 + ToolRegistry 降级链**：HTTP 工具、官方 MCP 工具、LLM 内置搜索**同一协议**，Researcher 无 if/else
-5. **MCP 双向**：
+5. **Runtime LLM Skills**：`skills/*/SKILL.md` 编写如何消费证据质量 guardrails 与引用写作的契约，`runtime_skills/` 负责加载和本地 validator
+6. **MCP 双向**：
    - **Client**：官方 `mcp.ClientSession` 连接 Brave MCP（stdio 子进程，lifespan 绑定）
    - **Server**：暴露 `kb_search` / `list_reports` / `read_report` / `list_evidence` / `trigger_research` 5 个 tool 给 Claude Desktop
-6. **复用 01_RAG**：`tools/kb_retriever.py` 通过 surgical sys.path/sys.modules 隔离，在不修改 01_RAG、不污染本项目 import 解析的前提下加载其 `ParentChildHybridRetriever`
-7. **纯 async 图**：Py3.11+ 下所有节点 async，`await graph.ainvoke` 并发调度 HTTP/LLM，AsyncSqliteSaver 异步持久化
+7. **复用 01_RAG**：`tools/kb_retriever.py` 通过 surgical sys.path/sys.modules 隔离，在不修改 01_RAG、不污染本项目 import 解析的前提下加载其 `ParentChildHybridRetriever`
+8. **纯 async 图**：Py3.11+ 下所有节点 async，`await graph.ainvoke` 并发调度 HTTP/LLM，AsyncSqliteSaver 异步持久化
 
 ## 架构图
 

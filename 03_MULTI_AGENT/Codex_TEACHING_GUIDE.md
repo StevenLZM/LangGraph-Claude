@@ -40,12 +40,50 @@
 
 ## 2. 学这个项目最正确的姿势
 
+这份文档不是让你背目录，而是带你按“一个请求从进来到出报告”的顺序读项目。
+
 很多人读多 Agent 项目有两个常见错误：
 
 - 从 `api.py` 开始逐文件平推，最后只记住一堆函数名
 - 只看 `ENGINEERING.md`，不对照真实代码和测试，最后把未实现的能力也讲进面试
 
-更高效的顺序应该是：
+更高效的方式是把项目拆成 5 个学习关卡。
+
+### 2.1 五个学习关卡
+
+| 关卡 | 你要解决的问题 | 先看哪里 | 看到什么程度算过关 |
+|---|---|---|---|
+| 第 1 关：先知道它要干什么 | 为什么需要多 Agent，而不是一次 LLM 调用 | `PROJECT_SCENARIO.md` + 本文第 1 节 | 能用 1 分钟讲清“拆计划、取证、反思、写报告”这条主线 |
+| 第 2 关：跑通一条链路 | 用户请求怎么变成 LangGraph 执行 | `app/bootstrap.py` + `app/api.py` | 能说清 `thread_id`、`configurable.thread_id`、`interrupt`、`resume` 的关系 |
+| 第 3 关：读懂图结构 | 父图和 research 子图怎么分工 | `graph/workflow.py` + `graph/router.py` + `graph/research_subgraph.py` | 能画出 `planner -> supervisor -> research_subgraph -> reflector -> writer`，并说明 `Send` 在子图内发生 |
+| 第 4 关：读懂每个 Agent | 每个节点到底负责什么状态变更 | `agents/` + `prompts/` + `runtime_skills/` | 能说明 Planner、Researcher、Reflector、Writer 各自的输入、输出和失败兜底 |
+| 第 5 关：读懂工程化 | 它如何变成可调试、可评测、可部署的后端系统 | `tools/` + `tests/` + `evals/` + `infra/` | 能把 ToolRegistry、checkpoint、SSE、LangSmith、eval、Docker 串成生产化闭环 |
+
+这 5 关的核心是：先学业务链路，再学图编排，再学节点实现，最后学工程化能力。
+
+### 2.2 技术栈不要背名词，要看它们解决什么问题
+
+| 技术 / 模块 | 在项目里的位置 | 它解决的问题 | 学习时要盯住的代码 |
+|---|---|---|---|
+| `FastAPI` | 接入层 | 把 HTTP 请求、SSE 流、HITL resume、多轮追问变成后端 API | `app/api.py` |
+| `Streamlit` | UI 层 | 给研究任务、计划确认、流式状态、报告展示提供最小可用界面 | `app/ui_streamlit.py` |
+| `LangGraph` | 编排层 | 用显式状态机管理多 Agent 流程、条件边、回环、子图和 checkpoint | `graph/workflow.py` |
+| `interrupt()` / `Command(resume=...)` | HITL 控制点 | 让 Planner 在生成计划后暂停，并在用户确认后恢复同一条执行链 | `agents/planner.py` + `app/api.py` |
+| `Send` | 并行调度机制 | 把 `sub_question x recommended_sources` 拆成多个 researcher 任务并行执行 | `graph/research_subgraph.py` |
+| `Annotated reducer` | 状态聚合机制 | 并行节点 fan-in 时对 evidence 去重、排序、合并 | `graph/state.py` |
+| `Pydantic` | 结构化契约 | 约束计划、证据、反思结果、API 入参出参的形状 | `graph/state.py` + `app/schemas.py` |
+| `ToolRegistry` | 工具适配层 | 把 Tavily、Brave MCP、DashScope、Arxiv、GitHub、KB 等工具组织成 fallback chain | `tools/registry.py` + `app/bootstrap.py` |
+| `AsyncSqliteSaver` | 状态持久化 | 让 interrupt/resume、多轮追问和线程状态恢复有持久化基础 | `app/bootstrap.py` |
+| `SSE` | 运行过程可视化 | 把节点进度、writer token、interrupt 事件流式推给前端 | `app/sse.py` |
+| `Runtime LLM Skills` | LLM 行为约束 | 用 Markdown skill 把 Planner / Reflector / Writer 的规则变成运行时 prompt 与可测 guardrail | `runtime_skills/` + `skills/` |
+| `LangSmith` + `evals` | 观测与评测 | 让一次研究任务可追踪、可评分、可回归 | `config/tracing.py` + `evals/` |
+| `Docker Compose` | 交付层 | 把 API、UI、依赖配置打包成可演示的部署形态 | `infra/` + `docker-compose.yml` |
+
+面试时不要说“我用了 FastAPI、LangGraph、Streamlit”。更好的表达是：
+
+> 我用 FastAPI 做服务入口，用 LangGraph 承载可恢复的多 Agent 状态机，用 Send 在 research 子图内做并行取证，用 SQLite checkpoint 支撑 HITL resume 和多轮追问，用 ToolRegistry 管理外部工具降级链，用 SSE + Streamlit 展示执行过程，并用 LangSmith、pytest、evals 做观测和回归。
+
+### 2.3 推荐阅读顺序
 
 1. 先看 `PROJECT_SCENARIO.md`，理解它想解决什么业务问题
 2. 再看 `ENGINEERING.md`，理解它原本想怎么设计
@@ -54,6 +92,22 @@
 5. 最后再回头看技术选型、调优和面试表达
 
 这份文档的组织方式也是按这个顺序来的。
+
+### 2.4 每读完一层都要能回答三个问题
+
+读这个项目时，不要只问“代码在哪里”，要反复问：
+
+1. 这一层接收什么输入？
+2. 这一层修改了哪些 state 字段？
+3. 这一层失败时靠什么降级或收敛？
+
+比如读 `research_subgraph` 时，合格的理解不是“这里有 4 个 researcher”，而是：
+
+- 输入来自已确认的 `ResearchPlan`
+- dispatcher 把 `sub_questions` 和 `recommended_sources` 变成 `list[Send]`
+- researcher 返回的 `evidence` 通过 `merge_evidence()` fan-in
+- 工具失败时走 `ToolRegistry` fallback chain
+- 没有更多可查任务时回到父图，由 `reflector` 或 `writer` 收敛
 
 ---
 
@@ -70,7 +124,7 @@
 - `merge_evidence()` 统一 fan-in 聚合
 - `reflector` 做覆盖度判断和补查控制
 - `writer` 生成报告并落盘
-- `FastAPI` 提供 `/research`、`/resume`、`/turn`、`/state`
+- `FastAPI` 提供 `POST /research`、`POST /research/{thread_id}/resume`、`POST /research/{thread_id}/turn`、`GET /research/{thread_id}/state`、`GET /threads`、`GET /reports`
 - SSE 流式接口和 Streamlit 单页 UI
 - `ToolRegistry` + fallback chain
 - external MCP client + internal MCP server
@@ -91,7 +145,8 @@
 - SSE 真实端点是 `GET /research/stream`、`GET /research/{tid}/resume_stream`、`GET /research/{tid}/turn_stream`
 - 是否进入调研阶段由 `graph/router.py::supervisor_route()` 决定；真正的 Send fan-out 在 `graph/research_subgraph.py`
 - `agents/writer.py` 顶部注释还写着旧说明，但真实实现已经是 `await llm.ainvoke(...)`
-- 当前离线测试基线是 59 个测试
+- 当前离线测试基线是 70 个测试
+- Runtime LLM Skills 的正文在 `skills/*/SKILL.md`，`runtime_skills/` 负责加载、拼接和确定性校验
 - `ENGINEERING.md` 有些示例还保留了更早期的 reducer 说明，但真实实现已经升级为 `merge_evidence()`
 
 这类差异不是坏事，反而说明这是个还在演进的项目，不是静态样板。
@@ -99,6 +154,8 @@
 ---
 
 ## 4. 先建立一张学习脑图
+
+这张图不要当成普通目录树看，而要当成“你读代码时的导航图”。
 
 目录层次如下：
 
@@ -124,6 +181,14 @@ prompts 被 agents 使用
 
 这条依赖链非常重要，因为它说明项目不是把 API、agent、tool 全都搅在一个文件里，而是按照“接入层 -> 编排层 -> 节点层 -> 外部能力层”拆开的。
 
+你读代码时也应该按这条依赖链向下走：
+
+1. `app/`：请求怎么进来，服务生命周期怎么管理
+2. `graph/`：流程怎么被显式建模，哪些地方会分支、回环、并行
+3. `agents/`：每个节点怎么读 state、写 state、调用 LLM 或工具
+4. `tools/`：外部能力如何注册、降级和适配
+5. `tests/`：哪些行为已经被测试锁住，哪些还只是设计目标
+
 ---
 
 ## 5. 用一条主流程带你看整个系统
@@ -131,20 +196,38 @@ prompts 被 agents 使用
 如果你只记一条线，就记这条：
 
 ```text
-HTTP 请求
-  -> app/bootstrap.py 启动依赖
-  -> app/api.py 接收 research_query
-  -> graph/workflow.py 进入主图
-  -> planner 生成计划并 interrupt
-  -> resume 后 supervisor_route 进入 research_subgraph
-  -> research_subgraph 内部 Send fan-out，researchers 并行取证
-  -> merge_evidence fan-in 聚合
-  -> reflector 判断是否补查
-  -> writer 写报告并落盘
-  -> turn_research 复用历史 evidence 做下一轮
+服务启动
+  -> app/bootstrap.py 初始化 ToolRegistry、checkpointer、graph
+用户发起研究
+  -> app/api.py 创建 thread_id，并用 configurable.thread_id 调图
+主图开始执行
+  -> graph/workflow.py 进入 planner
+计划确认
+  -> planner 生成 ResearchPlan，并通过 interrupt 暂停
+用户恢复执行
+  -> POST /research/{thread_id}/resume 用 Command(resume=...) 回到同一条 thread
+调研阶段
+  -> supervisor_route 进入 research_subgraph
+  -> research_dispatcher 生成 list[Send]
+  -> web / academic / code / kb researchers 并行取证
+状态聚合
+  -> merge_evidence 对 evidence fan-in 去重和排序
+质量判断
+  -> reflector 判断是否补查，最多 3 轮
+报告生成
+  -> writer 写 Markdown 报告、审计引用并落盘
+多轮追问
+  -> turn_research 复用历史 evidence 和同一个 thread 继续研究
 ```
 
-接下来我们就按这条线，一个节点一个节点地学。
+这条线就是你学习项目的主干。后面每一节都在回答这条线上的一个问题：
+
+- 入口层如何把请求变成可恢复执行？
+- 图层如何决定下一步去哪？
+- 子图层如何并行取证？
+- 状态层如何把并行结果合回来？
+- LLM 节点如何把不稳定输出变成可控流程？
+- 工程层如何让它可测试、可追踪、可部署？
 
 ---
 
@@ -154,15 +237,20 @@ HTTP 请求
 
 | 流程阶段 | 关键代码 | 对应测试 | 你应该学会什么 |
 |---|---|---|---|
-| 图能否搭起来 | `graph/workflow.py` | `tests/test_graph_skeleton.py` | 先确认主图节点齐全、编译正常 |
-| Planner 中断恢复 | `agents/planner.py` | `tests/tutorial/test_05_interrupt_resume.py` | 理解 `interrupt()` / `Command(resume=...)` |
-| Research Subgraph 并行扇出 | `graph/router.py` + `graph/research_subgraph.py` | `tests/tutorial/test_03_supervisor_send_fanout.py` | 理解主图路由到子图、子图内部用 `Send` 拆并行 researcher 任务 |
-| Researcher 工具降级 | `agents/_researcher_base.py` + `tools/registry.py` | `tests/tutorial/test_02_registry_degradation.py` | 理解主工具失败时如何 fallback |
+| 启动依赖 | `app/bootstrap.py` | `tests/test_end_to_end_offline.py` | 理解工具、checkpoint、graph 为什么在服务启动期初始化 |
+| API 入口 | `app/api.py` | `tests/test_end_to_end_offline.py` | 理解 `thread_id` 如何把 HTTP 请求绑定到 LangGraph checkpoint |
+| 图能否搭起来 | `graph/workflow.py` | `tests/test_graph_skeleton.py` | 确认父图节点齐全，且 researcher 不直接暴露在父图 |
+| Planner 中断恢复 | `agents/planner.py` | `tests/tutorial/test_05_interrupt_resume.py` | 理解 `interrupt()` / `Command(resume=...)` 如何实现计划确认 |
+| Supervisor 路由 | `agents/supervisor.py` + `graph/router.py` | `tests/tutorial/test_03_supervisor_send_fanout.py` | 理解节点本身很薄，复杂控制流在条件边里 |
+| Research Subgraph 并行扇出 | `graph/research_subgraph.py` | `tests/tutorial/test_03_supervisor_send_fanout.py` | 理解子图内部用 `Send` 把 `sub_question x source_type` 拆成并行任务 |
+| Researcher 工具降级 | `agents/_researcher_base.py` + `tools/registry.py` | `tests/tutorial/test_02_registry_degradation.py` | 理解主工具失败时如何 fallback，以及为什么工具链顺序很重要 |
 | 节点级容错 | `agents/_safe.py` | `tests/tutorial/test_04_safe_node_decorator.py` | 理解为什么单个节点失败不能拖垮整张图 |
-| 并行结果聚合 | `graph/state.py` | `tests/tutorial/test_01_state_reducer.py` | 理解 reducer 为什么要去重和排序 |
-| Reflector 兜底 | `agents/reflector.py` | `tests/tutorial/test_06_reflector_hard_fallback.py` | 理解为什么最多只补查 3 轮 |
-| Writer 收敛出报告 | `agents/writer.py` + `app/report_store.py` | `tests/test_end_to_end_offline.py` | 理解报告如何基于 evidence 生成并保存 |
-| 全流程闭环 | `app/api.py` + `graph/workflow.py` | `tests/test_end_to_end_offline.py` | 把一次完整请求串起来 |
+| 并行结果聚合 | `graph/state.py` | `tests/tutorial/test_01_state_reducer.py` | 理解 reducer 为什么要去重、排序，并作为 fan-in 合并点 |
+| Runtime LLM Skills | `skills/*/SKILL.md` + `runtime_skills/` | `tests/test_runtime_skills.py` | 理解 prompt 规则如何从 Markdown skill 进入运行时，并用 helper 变成可测约束 |
+| Reflector 兜底 | `agents/reflector.py` | `tests/tutorial/test_06_reflector_hard_fallback.py` | 理解覆盖度判断、补查控制和最多 3 轮收敛 |
+| Writer 收敛出报告 | `agents/writer.py` + `app/report_store.py` | `tests/test_writer_citation_audit.py` + `tests/test_end_to_end_offline.py` | 理解报告如何基于 evidence 生成、引用审计并保存 |
+| SSE 前端可视化 | `app/sse.py` + `app/ui_streamlit.py` | `tests/test_sse_stream.py` | 理解为什么要 `subgraphs=True`，以及为什么过滤结构节点 `research_subgraph` |
+| 全流程闭环 | `app/api.py` + `graph/workflow.py` | `tests/test_end_to_end_offline.py` | 把一次完整请求从启动、计划、取证、反思、写报告串起来 |
 
 如果你时间很少，就按上表顺序读。
 
@@ -293,9 +381,21 @@ interrupt_val = _extract_interrupt(result)
 START
   -> planner
   -> supervisor
-  -> researchers（条件扇出）
+  -> research_subgraph
   -> reflector
   -> writer
+  -> END
+```
+
+注意：父图里没有直接挂 `web_researcher`、`academic_researcher`、`code_researcher`、`kb_researcher`。这四个 researcher 在 `research_subgraph` 内部。
+
+子图结构可以这样理解：
+
+```text
+research_subgraph
+  -> research_dispatcher
+  -> list[Send]
+  -> web_researcher / academic_researcher / code_researcher / kb_researcher
   -> END
 ```
 
@@ -305,14 +405,33 @@ START
 
 - 图入口固定
 - 条件分支显式
-- 并行和回环都写在图里
+- 父图负责阶段流转
+- 子图负责并行调研细节
 - 收敛点清楚
+
+也就是说，学习主图时先不要急着进入 researcher 细节，先确认父图的阶段顺序：
+
+```text
+plan -> route -> research -> reflect -> write
+```
+
+然后再钻进 `research_subgraph` 看并行取证：
+
+```text
+dispatch -> Send fan-out -> evidence fan-in
+```
 
 ### 9.4 对应测试
 
 - `tests/test_graph_skeleton.py`
 
-这个测试不是在测业务逻辑，而是在测“主图至少能被正确编译、节点至少没有缺失”。在真实工程里，这种骨架测试非常有价值，因为它能第一时间拦住 wiring 级别的破坏。
+这个测试不是在测业务逻辑，而是在测“主图至少能被正确编译、节点边界没有被破坏”。它特别有价值的地方是：
+
+- 父图必须包含 `planner`、`supervisor`、`research_subgraph`、`reflector`、`writer`
+- 父图不能直接包含四个 researcher
+- `research_subgraph` 内部必须能看到 dispatcher 和 researcher 节点
+
+在真实工程里，这种骨架测试能第一时间拦住 wiring 级别的破坏。比如有人把 researcher 又塞回父图，测试会立刻提醒你架构边界被改坏了。
 
 ---
 
@@ -423,7 +542,7 @@ A：因为计划确认不是 UI 事件，而是研究流程的一部分。放进
 先看 `planner_node()` 的真实执行顺序：
 
 ```python
-structured = llm.with_structured_output(ResearchPlan, method="function_calling")
+structured = llm.with_structured_output(ResearchPlan, method="json_mode")
 plan = await structured.ainvoke([...])
 decision = interrupt({"phase": "plan_review", "plan": plan.model_dump()})
 confirmed = _coerce_plan(decision, fallback=plan)
@@ -978,6 +1097,8 @@ merged.sort(key=lambda e: -float(e.relevance_score or 0.0))
 
 - `agents/reflector.py`
 - `graph/router.py::reflector_route()`
+- `skills/evidence-grounded-research/SKILL.md`
+- `runtime_skills/evidence_grounded_research.py`
 
 ### 15.2 Reflector 的职责
 
@@ -992,6 +1113,8 @@ Reflector 先把：
 
 - `plan`
 - `evidence`
+- runtime 已写入的 `support/confidence`
+- runtime skill helper 生成的 `coverage_guardrails`
 
 压缩成摘要，再让强模型输出结构化 `ReflectionResult`，包括：
 
@@ -1001,6 +1124,31 @@ Reflector 先把：
 - `additional_queries`
 
 然后把这些结果写回 state。
+
+### 15.3.1 M7 后新增的 evidence quality 视角
+
+本次 skills 改动后，`Evidence` 不再只有 `snippet/relevance_score/source_url`，还多了一个可选的 `quality` 字段：
+
+```python
+class EvidenceQuality(BaseModel):
+    support_level: Literal["direct", "indirect", "background", "irrelevant"]
+    source_authority: Literal["primary", "secondary", "unknown"]
+    extracted_claim: str
+    limitations: list[str]
+    confidence: float
+```
+
+这件事的教学重点是：
+
+- `skills/evidence-grounded-research/SKILL.md` 写的是给 Reflector 看的消费规则：如何使用已提供的 quality metadata / coverage guardrails
+- `runtime_skills.loader.load_skill_prompt()` 负责把 Markdown skill 正文读出来并去掉 frontmatter
+- `agents/_researcher_base.py::_to_evidence()` 用 `build_default_quality()` 给工具结果写入保守默认质量标注
+- `agents/reflector.py::_format_evidence_summary()` 把 `support=... confidence=...` 放进 Reflector 上下文
+- `format_coverage_guardrails()` 再给每个子问题生成一个确定性覆盖度参考，比如 `sq1: estimated_coverage=50`
+
+所以 Reflector 不是“纯靠 prompt 猜证据够不够”，而是：
+
+> helper 提供确定性质量标注和保护栏，Markdown skill 告诉 Reflector 如何消费这些信号，LLM 做最终覆盖裁决。
 
 ### 15.4 最关键的不是 LLM，而是硬兜底
 
@@ -1065,7 +1213,7 @@ if rc >= MAX_REVISION:
 如果没走硬兜底，后面才会进入：
 
 ```python
-structured = llm.with_structured_output(ReflectionResult, method="function_calling")
+structured = llm.with_structured_output(ReflectionResult, method="json_mode")
 result = await structured.ainvoke([...])
 ```
 
@@ -1076,6 +1224,15 @@ result = await structured.ainvoke([...])
 - 每条 snippet 只取前 200 字
 
 这说明 Reflector 的输入不是“全量 evidence 原文”，而是压缩过的 coverage 视图。
+
+M7 后还要补看一段：
+
+```python
+coverage_guardrails = format_coverage_guardrails([sq.id for sq in plan], evidence)
+HumanMessage(content=reflector_user(plan_summary, evidence_summary, rc, coverage_guardrails))
+```
+
+这说明 runtime skill helper 的结果不是另起一个节点，也不是 LLM 通过 skill `name/description` 自己选择调用；它作为 Reflector 的输入上下文进入同一次 LLM 判断。
 
 `tests/tutorial/test_06_reflector_hard_fallback.py` 要盯住两个断言：
 
@@ -1092,6 +1249,8 @@ result = await structured.ainvoke([...])
 
 - `agents/writer.py`
 - `app/report_store.py`
+- `skills/citation-report-writing/SKILL.md`
+- `runtime_skills/citation_report_writing.py`
 
 ### 16.2 Writer 的职责
 
@@ -1111,6 +1270,8 @@ Writer 先做了一层确定性预处理：
 
 - 由后端自己生成 `citations`
 - 如果正文缺少引用章节，就自动补 `## 引用`
+- 如果正文已有引用章节但缺少某个已使用编号，就补缺失条目
+- 如果正文引用了不存在的 `[^N]`，就写入 `citation_audit_issues`
 
 这说明 Writer 不是单纯靠 prompt 撑住，而是：
 
@@ -1202,6 +1363,17 @@ if not _has_citation_section(report_md) and citations:
 - 这说明“有引用章节”是系统级要求，不完全信任模型遵守
 - `_has_citation_section()` 用的是正则，不是简单字符串 contains，因此兼容 `引用`、`参考文献`、`references`
 
+M7 后 Writer 还有两步引用审计：
+
+```python
+missing_reference_entries = build_missing_reference_entries(report_md, citations)
+citation_issues = validate_citation_ids(report_md, len(citations))
+```
+
+- `build_missing_reference_entries()` 处理“正文用了 `[^2]`，引用章节漏了 `[^2]: url`”
+- `validate_citation_ids()` 处理“正文写了 `[^99]`，但 evidence 只有 3 条”
+- `citation_audit_issues` 会写回 state，便于 UI、测试或后续 repair 策略读取
+
 第四段：
 
 ```python
@@ -1213,6 +1385,30 @@ path = report_store.save(query, thread_id, report_md)
 - 如果没有 config，也不会崩，而是退回 `"unknown"`，这是典型的防御式写法
 
 把这段和 `app/report_store.py` 一起看，你会更容易明白报告不是普通字符串，而是一个可回查资产。
+
+### 16.9 Runtime Skill 和普通 prompt 的区别
+
+本次改动容易被误解成“只是多加了两段 prompt”。实际不是。
+
+项目里现在有两个层次：
+
+```text
+skills/<skill-name>/SKILL.md       # 人维护的 Markdown skill 正文
+runtime_skills/*.py                # 程序加载 skill，并提供可测 helper / validator
+```
+
+这比把规则直接写死在 `prompts/templates.py` 好，原因是：
+
+1. skill 正文可以按主题独立维护，不会把 agent base prompt 越写越长
+2. `SKILL.md` 有 frontmatter，适合教学和未来做 discovery
+3. 运行时仍然用 Python helper 把关键规则变成可测试的确定性行为
+
+本次对应测试：
+
+- `tests/test_runtime_skills.py`：验证 Markdown skill 能被加载、coverage guardrails 生效、quality metadata 写入 evidence
+- `tests/test_writer_citation_audit.py`：验证 Writer 能补引用条目，并把未知引用编号写入 `citation_audit_issues`
+
+还有一个提交前注意点：当前 git 未提交状态里还包含本地配置类变更，例如 `.codex/config.toml`、`03_MULTI_AGENT/.env`、`05_PRODUCT_AGENT/.env`。教学文档只记录它们属于“本地配置需审核”，不能把任何密钥或具体 `.env` 值写进文档。
 
 ---
 
@@ -1304,7 +1500,7 @@ patch["missing_aspects"] = []
 9. 并行结果通过 `merge_evidence()` 自动 fan-in 聚合
 10. `reflector` 判断证据是否充分，不够就补查，最多 3 轮
 11. `writer` 基于 evidence 生成 Markdown 报告，并保存到本地
-12. 后续追问通过 `/research/{thread_id}/turn` 复用历史 evidence 再进入下一轮
+12. 后续追问通过 `POST /research/{thread_id}/turn` 复用历史 evidence 再进入下一轮
 
 如果你能把上面这 12 步按顺序讲清楚，这个项目你就已经不是“看懂”，而是“能讲懂”了。
 
@@ -1625,7 +1821,7 @@ docker compose down
 
 ## 22. 面试里最值得讲的设计思想
 
-你可以把这个项目提炼成下面 5 个设计思想。
+你可以把这个项目提炼成下面 6 个设计思想。
 
 ### 22.1 流程显式化
 
@@ -1657,6 +1853,15 @@ docker compose down
 ### 22.5 把用户参与设计进流程
 
 HITL 不是前端插个确认框，而是图里的一个正式阶段。
+
+### 22.6 把 LLM 规则文档化，同时把硬边界程序化
+
+M7 Runtime LLM Skills 的设计重点不是“多写两句 prompt”，而是把规则拆成两层：
+
+- `skills/*/SKILL.md`：适合人维护、教学和未来 discovery 的行为契约
+- `runtime_skills/*.py`：适合测试和兜底的确定性 helper / validator
+
+这让项目既保留 LLM 的语言判断能力，又不会把证据质量计算、覆盖保护栏和引用编号完全交给模型自觉。
 
 ---
 
@@ -1696,11 +1901,317 @@ A：因为报告不是瞬时字符串，而是可复盘资产。落盘后更适�
 
 ### Q9：为什么这个项目更像工程项目而不是 demo？
 
-A：因为它有 checkpoint、interrupt/resume、fallback、safe_node、report store、multi-turn 和一组保护核心机制的测试。
+A：因为它有 checkpoint、interrupt/resume、fallback、safe_node、report store、multi-turn、runtime skills 和一组保护核心机制的测试。
 
-### Q10：如果继续做下一步，你会优先做什么？
+### Q10：Runtime skill 和普通 prompt 有什么区别？
 
-A：M6 后我会优先补三件事：selective re-fanout、工具层限速/重试、报告 PDF 导出和历史浏览页。SSE、Streamlit、LangSmith、评测、Docker 已经是当前可讲的已交付能力。
+A：普通 prompt 通常直接写在 `prompts/templates.py`，规则越来越长也不容易测试。Runtime skill 把规则放进 `skills/<name>/SKILL.md`，运行时用 loader 去掉 frontmatter 后注入 Reflector / Writer；`name/description` 只是元数据，当前不是让 LLM 自选 skill。同时用 Python helper 把关键规则变成可测行为，比如 `EvidenceQuality`、coverage guardrails、citation audit。它是“Markdown 规则 + 运行时加载 + 确定性校验”，不是单纯 prompt。
+
+### Q11：如果继续做下一步，你会优先做什么？
+
+A：M7 后我会优先补三件事：citation repair 二次修复、selective re-fanout、工具层限速/重试。SSE、Streamlit、LangSmith、评测、Docker 和 Runtime LLM Skills 已经是当前可讲的已交付能力。
+
+---
+
+## 24. 面试官视角深挖题
+
+这一节不是让你背答案，而是训练你从面试官视角判断“回答有没有工程深度”。每题都包含考察点、期望回答和容易扣分的回答方式。
+
+### Q12：请你现场画一下 03 的完整执行链路
+
+考察点：候选人是否真的理解当前真实代码，而不是只记住“多 Agent”这个词。
+
+我期望候选人这样回答：
+
+> 用户从 `POST /research` 或 SSE 入口进入 FastAPI，API 生成 `thread_id` 并通过 `configurable.thread_id` 调 LangGraph。主图先进入 `planner`，Planner 用结构化输出生成 `ResearchPlan`，再通过 `interrupt()` 把计划交给用户确认。用户确认后，`POST /research/{thread_id}/resume` 用 `Command(resume=...)` 恢复同一个 thread。`supervisor` 节点本身很薄，真正是否进入调研由 `graph/router.py::supervisor_route()` 决定。进入 `research_subgraph` 后，`research_dispatcher` 通过 `build_research_sends()` 把 `sub_question x recommended_sources` 转成 `Send`，并行派发给 web、academic、code、kb researcher。各 researcher 通过 `ToolRegistry` 走工具降级链收集 evidence。并行结果 fan-in 时由 `merge_evidence()` 按 URL 去重、按分数排序。随后 `reflector` 判断覆盖度和是否补查，最多 3 轮；最后 `writer` 基于 evidence 生成带引用的 Markdown 报告并落盘。
+
+容易扣分的回答：
+
+- 只说“Planner、Researcher、Writer 三步”。
+- 把 `Send` fan-out 说在 `graph/router.py`，而不是 `graph/research_subgraph.py`。
+- 说不清 `interrupt()` 和 `Command(resume=...)` 如何连接。
+
+### Q13：为什么当前主图里只有 `research_subgraph`，看不到四个 researcher？
+
+考察点：是否理解主图和子图边界。
+
+我期望候选人这样回答：
+
+> 当前父图把 research 当作一个阶段，只暴露 `research_subgraph`。四个业务 researcher 在子图内部：`web_researcher`、`academic_researcher`、`code_researcher`、`kb_researcher`。这样父图保持清晰：`planner -> supervisor -> research_subgraph -> reflector -> writer`；并行 fan-out 细节由 research 子图管理。测试也验证了父图节点不直接包含 researcher，但 `graph.get_subgraphs()` 里能看到 research 子图及其内部节点。
+
+容易扣分的回答：
+
+- 认为 researcher 被删掉了。
+- 认为 `research_subgraph` 是一个普通 researcher。
+- 不知道 `get_subgraphs()` 可以验证子图结构。
+
+### Q14：为什么 Supervisor 节点这么薄？是不是设计不完整？
+
+考察点：能否理解“节点薄、路由显式”的设计取舍。
+
+我期望候选人这样回答：
+
+> 这是刻意设计，不是不完整。`agents/supervisor.py` 只负责标记当前节点和推进 iteration，复杂决策放在 `graph/router.py::supervisor_route()`。这样节点没有隐藏副作用，路由函数可以独立测试，也更符合 LangGraph 的条件边模型。Supervisor 不负责自己调工具或写状态，避免把控制流和业务执行混在一个节点里。
+
+容易扣分的回答：
+
+- 说“Supervisor 没什么用，可以删掉”。
+- 把路由逻辑讲成 Supervisor 内部 LLM 决策。
+
+### Q15：`interrupt()` 比前端弹窗加一个确认接口好在哪里？
+
+考察点：HITL 是否理解到图执行语义层。
+
+我期望候选人这样回答：
+
+> 前端弹窗只是 UI 交互，不能天然保存图执行位置。`interrupt()` 把计划确认变成 LangGraph 执行态的一部分，checkpointer 会记录线程停在哪个节点，恢复时通过 `Command(resume=...)` 继续同一个 `thread_id`。这样计划确认、状态持久化和恢复语义是统一的，而不是 API 层手写一套“临时 pending 状态”协议。
+
+容易扣分的回答：
+
+- 只说“用户体验好”。
+- 不提 checkpoint、thread_id 和 `Command(resume=...)`。
+
+### Q16：如果用户修改了 Planner 生成的计划，系统怎么接住？
+
+考察点：resume payload 和结构化 plan 的理解。
+
+我期望候选人这样回答：
+
+> `POST /research/{thread_id}/resume` 接收用户确认或修改后的 `ResearchPlan`，然后用 `Command(resume={"plan": req.plan.model_dump()})` 恢复图。Planner 中 `_coerce_plan()` 会把 resume 回来的 dict 或 `ResearchPlan` 统一校验成 `ResearchPlan`，校验失败才回退到原 plan。这保证用户可以改子问题，但进入后续节点的仍然是结构化 `SubQuestion` 列表。
+
+容易扣分的回答：
+
+- 说“用户确认后就继续”，但不知道修改后的 plan 如何进入 state。
+- 不提 Pydantic 结构化校验。
+
+### Q17：`Send` fan-out 的粒度是什么？为什么不是只按 researcher 类型扇出？
+
+考察点：并行调度模型。
+
+我期望候选人这样回答：
+
+> 当前 fan-out 粒度是 `sub_question x recommended_sources`。每个子问题可以指定多个来源，比如 web、academic、code、kb，`build_research_sends()` 会为每个组合创建一个 `Send(node, payload)`。这样同一个子问题可以并行走多类证据来源，不是简单地固定四个 researcher 各跑一次。payload 里带 `sub_question` 和 `research_query`，researcher 再从 payload 解析子问题 id 和 query。
+
+容易扣分的回答：
+
+- 只说“四个 researcher 并行跑”。
+- 不提 `recommended_sources` 和子问题维度。
+
+### Q18：fan-in 时为什么不能直接 `operator.add` 拼 evidence？
+
+考察点：状态 reducer 和证据质量控制。
+
+我期望候选人这样回答：
+
+> 并行 researcher 很容易命中同一个 URL。直接 `operator.add` 会保留重复 evidence，导致 writer token 膨胀、reflector 高估覆盖度、报告引用重复。当前 `merge_evidence()` 先把 old/new 合并，再按 `source_url` 去重，同 URL 保留 `relevance_score` 更高的一条，最后按分数倒序排序。这个 reducer 本质上是在控制状态质量和成本。
+
+容易扣分的回答：
+
+- 说“为了去重”但讲不出重复的后果。
+- 不知道 reducer 在 LangGraph fan-in 时自动执行。
+
+### Q19：ToolRegistry 的 fallback chain 怎么工作？
+
+考察点：工具层工程化。
+
+我期望候选人这样回答：
+
+> `ToolRegistry` 按 `source_type` 保存工具链，注册顺序就是降级顺序。以 web 为例，启动时按 Tavily、外部 MCP Brave、DashScope 等顺序注册。Researcher 调 `registry.get_chain(source_type)` 后顺序尝试，每个工具用 `asyncio.wait_for(..., timeout=45)` 控制超时，失败记录 warning 后继续下一个；第一个返回非空结果的工具会短路返回 evidence。这样上层依赖的是“web 搜索能力”，不是某个供应商。
+
+容易扣分的回答：
+
+- 说“用了多个搜索工具，所以更准”。
+- 不提注册顺序、失败继续和非空短路。
+
+### Q20：`safe_node` 是为了吞异常吗？会不会掩盖问题？
+
+考察点：节点级容错的边界。
+
+我期望候选人这样回答：
+
+> `safe_node` 不是为了无脑吞异常，而是让单个 researcher 或 reflector 的异常转成最小合法状态，避免整张图崩溃。它会记录 warning，并返回空 evidence 和一条 `[skip]` 消息。这样主流程可以降级继续，但生产里还要把异常接入指标、告警和 trace，避免“用户没感知、运维也没感知”。
+
+容易扣分的回答：
+
+- 说“报错就忽略”。
+- 不提日志、告警和最小合法状态。
+
+### Q21：Reflector 为什么最多 3 轮，而且第 3 轮不再调 LLM？
+
+考察点：成本和收敛控制。
+
+我期望候选人这样回答：
+
+> 研究任务有收益递减，不能为了“更完整”无限补查。`reflector_node` 里 `MAX_REVISION=3`，当 `rc >= MAX_REVISION` 时直接返回 `force_complete`，不再调用 LLM。这样保证成本、时延和用户体验有硬上限。真实生产也可以把轮数、证据数量、费用预算一起纳入收敛条件。
+
+容易扣分的回答：
+
+- 说“3 是随便写的”。
+- 不提不再调用 LLM 的成本边界。
+
+### Q22：Writer 的引用编号如何避免乱掉？
+
+考察点：报告可信度和后处理。
+
+我期望候选人这样回答：
+
+> Writer 会先把 evidence 编号传给 LLM，要求正文用 `[^N]` 引用；但最终 citations 不是完全相信 LLM，而是后端从 evidence 直接生成 `Citation(idx, source_url, title)`。如果报告缺引用章节，会自动追加；如果引用章节缺某些 reference entries，会用 `build_missing_reference_entries()` 补齐；如果出现未知脚注，比如 `[^99]`，`validate_citation_ids()` 会写入 `citation_audit_issues`。所以这是 LLM 写作加后端引用审计。
+
+容易扣分的回答：
+
+- 只说“Prompt 要求模型写引用”。
+- 不知道 citations 是后端从 evidence 生成。
+
+### Q23：Runtime skill 和普通 prompt 的边界是什么？
+
+考察点：是否理解 M7 的真正价值。
+
+我期望候选人这样回答：
+
+> Runtime skill 不是让模型自由选择技能。当前 `skills/*/SKILL.md` 是可维护的 Markdown 行为契约，`runtime_skills/loader.py` 去掉 frontmatter 后把正文注入 Reflector / Writer 的 system prompt。真正关键的硬边界则由 Python helper 兜住，比如 evidence quality、coverage guardrails、citation audit。也就是说，skill 负责让 LLM 知道规则，helper 负责把关键规则变成可测试行为。
+
+容易扣分的回答：
+
+- 把 runtime skill 说成 OpenAI/Codex 的外部技能自动发现。
+- 只说“就是 prompt 模板换了位置”。
+
+### Q24：SSE 为什么只推 Writer token，不推 Planner/Reflector token？
+
+考察点：前端事件设计和用户体验。
+
+我期望候选人这样回答：
+
+> `app/sse.py` 里只把 `metadata.langgraph_node == "writer"` 的 `on_chat_model_stream` 转成 token 事件。Planner 和 Reflector 的中间 token 对用户没有稳定价值，还会造成前端刷屏和误导。前端需要的是节点开始、节点结束、evidence_count、next_action、最终报告等结构化进度；真正需要流式展示的是最终报告生成阶段。
+
+容易扣分的回答：
+
+- 说“SSE 会把所有模型 token 都推给前端”。
+- 不知道 `research_subgraph` 这种结构节点会被过滤。
+
+### Q25：为什么 SSE 要用 `subgraphs=True`？
+
+考察点：LangGraph 事件流和子图可观测性。
+
+我期望候选人这样回答：
+
+> 因为 researcher 节点在 `research_subgraph` 内部。如果 `astream_events(..., subgraphs=True)` 不打开，前端只能看到父图层级，可能看不到子图里 web、academic、code、kb researcher 的业务事件。项目打开 `subgraphs=True`，但同时在 `sse.map_event()` 里过滤 `research_subgraph` 这种结构外壳节点，只展示真正的业务 researcher 事件。
+
+容易扣分的回答：
+
+- 不知道子图事件需要 `subgraphs=True`。
+- 把结构节点和业务节点都展示给用户。
+
+### Q26：多轮追问为什么不是直接新建一个 thread？
+
+考察点：长期研究上下文复用。
+
+我期望候选人这样回答：
+
+> `POST /research/{thread_id}/turn` 是在已有 thread 上继续追问。它通过 `reset_per_turn()` 清理 `revision_count`、`iteration`、`next_action`、`missing_aspects` 等易变字段，但保留 messages、evidence、plan、final_report 等历史资产，再把 `plan_confirmed=False` 触发重新 planner。这样下一轮可以复用上一轮证据和报告上下文，而不是每次从零开始。
+
+容易扣分的回答：
+
+- 说“追问就是重新调用 `/research`”。
+- 不知道哪些状态该清，哪些状态该保留。
+
+### Q27：如果外部 MCP Brave 不可用，系统怎么处理？
+
+考察点：外部依赖降级。
+
+我期望候选人这样回答：
+
+> 启动阶段 `load_external_mcp()` 失败会记录 warning，不会阻止服务启动。工具注册顺序里 MCP Brave 只是 web 搜索降级链的一环；researcher 调用某个工具失败也会 warning 后继续下一个 provider。这样 Brave 不可用不会导致整条研究链路失败，但如果所有 web provider 都不可用，该 source_type 就返回空 evidence，后续 reflector 和 writer 需要基于现有证据降级。
+
+容易扣分的回答：
+
+- 说“MCP 不可用 API 就启动失败”。
+- 不知道外部 MCP 是 web fallback chain 的一部分。
+
+### Q28：为什么这个项目强调 report_path 和报告落盘？
+
+考察点：研究结果资产化。
+
+我期望候选人这样回答：
+
+> 报告不是一次性聊天消息，而是可归档资产。`writer_node` 生成 `final_report` 后调用 `report_store.save()` 落盘，并把 `report_path` 写回 state。这样 API 可以列出报告、读取报告，前端也能展示历史结果；多轮追问时也能把上一轮报告作为上下文资产。面试里可以把它讲成“从聊天回复到可复盘研究产物”的转变。
+
+容易扣分的回答：
+
+- 说“只是为了方便下载文件”。
+- 不提归档、回查和多轮复用。
+
+### Q29：这个项目目前最容易被面试官抓住的短板是什么？
+
+考察点：是否能主动承认边界。
+
+我期望候选人这样回答：
+
+> 第一，selective re-fanout 还没完全落地，现在补查仍偏重新 fan-out；第二，工具层还缺全局限速、重试和并发预算；第三，Writer citation repair 目前是引用审计和补 reference，还不是完整二次修复；第四，真实线上还要补认证、配额、任务队列和更强的报告版本管理。能讲清这些边界，反而比把项目吹成完整生产系统更可信。
+
+容易扣分的回答：
+
+- 说“没有什么短板，已经生产级了”。
+- 只说“模型效果还能优化”，不提工程边界。
+
+### Q30：如果只能选一个点继续优化，你会先做什么？
+
+考察点：优先级判断。
+
+我期望候选人这样回答：
+
+> 如果以工程能力展示为目标，我会先做 selective re-fanout，因为它直接连接 reflector 的 missing aspects 和下一轮 research 成本，能体现多 Agent 调度不是粗暴重跑。如果以线上稳定性为目标，我会先做工具层限速、重试和并发预算，因为外部搜索/MCP 是最容易抖动的依赖。回答时要先说明目标，再给优先级。
+
+容易扣分的回答：
+
+- 先说“换更强模型”。
+- 不区分作品集展示目标和真实线上目标。
+
+---
+
+## 25. 面试官评分标准
+
+面试官看 03 项目，不是在数你有几个 agent，而是在判断你是否理解“复杂 LLM 工作流如何工程化”。
+
+### 合格候选人
+
+应该能讲清：
+
+- 父图真实结构是 `planner -> supervisor -> research_subgraph -> reflector -> writer`。
+- `interrupt()` 和 `Command(resume=...)` 如何实现 HITL 计划确认。
+- `research_subgraph` 内部如何用 `Send` 并行调度多个 researcher。
+- `merge_evidence()` 为什么要去重和排序。
+- `ToolRegistry` 如何按 source type 管理 fallback chain。
+- Reflector 如何做覆盖判断和最大轮数收敛。
+- Writer 如何基于 evidence 写报告、生成引用并落盘。
+- SSE 为什么过滤结构节点、只推关键业务事件。
+
+### 优秀候选人
+
+除了能讲清现状，还会主动补充：
+
+- Supervisor 薄是刻意设计，复杂控制流放在 route function。
+- Researcher 的职责是收集 evidence，不应该过早写最终结论。
+- `Send` 粒度是 `sub_question x recommended_sources`，不是固定四个 agent。
+- Runtime skill 是 Markdown 行为契约加确定性 helper，不是普通 prompt 堆叠。
+- `safe_node` 是降级机制，但生产还要接入指标和告警。
+- `subgraphs=True` 是看见子图 researcher 事件的关键。
+- 当前仍缺 selective re-fanout、工具限速/重试、citation repair 二次修复。
+- 文档和代码有演进差异，讲项目时必须以当前代码和测试为准。
+
+### 明显扣分回答
+
+这些回答会让面试官怀疑你只是背了架构名词：
+
+- “这个项目就是多个 agent 互相聊天。”
+- “Supervisor 负责用 LLM 判断下一步。”
+- “Send fan-out 在 router 里。”
+- “Researcher 直接写报告。”
+- “Reducer 就是把 list 拼起来。”
+- “Reflector 会一直补查直到完整。”
+- “Runtime skill 就是普通 prompt。”
+- “SSE 会把所有节点 token 都推给前端。”
+- “MCP 不可用系统就不能启动。”
+- “后续主要换更强模型。”
 
 ---
 
@@ -1715,10 +2226,12 @@ A：M6 后我会优先补三件事：selective re-fanout、工具层限速/重�
 | 为什么 Supervisor 本身很薄 | `agents/supervisor.py` + `graph/router.py` | `tests/tutorial/test_03_supervisor_send_fanout.py` | 路由逻辑不在节点里，而在 `supervisor_route()` |
 | fan-out 的真实粒度 | `graph/research_subgraph.py` | `tests/tutorial/test_03_supervisor_send_fanout.py` | `sub_question × recommended_sources -> list[Send]` |
 | fallback chain 如何短路 | `agents/_researcher_base.py` | `tests/tutorial/test_02_registry_degradation.py` | `if results: return _to_evidence(...)` |
+| Runtime skills 如何加载 | `skills/*/SKILL.md` + `runtime_skills/loader.py` | `tests/test_runtime_skills.py` | frontmatter 被去掉，正文被拼入 system prompt |
+| Evidence quality 如何进入 Reflector | `runtime_skills/evidence_grounded_research.py` + `agents/reflector.py` | `tests/test_runtime_skills.py` | `build_default_quality()`、`support/confidence`、`format_coverage_guardrails()` |
 | 节点异常为什么不该中断主图 | `agents/_safe.py` | `tests/tutorial/test_04_safe_node_decorator.py` | 异常后返回最小合法状态而不是 `None` |
 | reducer 为什么不能只拼接 list | `graph/state.py` | `tests/tutorial/test_01_state_reducer.py` | URL 去重、高分覆盖、倒序排序 |
 | Reflector 为什么第 3 轮不再调模型 | `agents/reflector.py` | `tests/tutorial/test_06_reflector_hard_fallback.py` | `rc = old + 1` 后立即走硬兜底 |
-| Writer 为什么是“LLM + 后处理” | `agents/writer.py` | `tests/test_end_to_end_offline.py` | evidence 编号、citation 后端生成、缺章节自动补 |
+| Writer 为什么是“LLM + 后处理” | `agents/writer.py` | `tests/test_writer_citation_audit.py` + `tests/test_end_to_end_offline.py` | evidence 编号、citation 后端生成、缺章节自动补、`citation_audit_issues` |
 | report_path 为什么能支持回查 | `app/report_store.py` | `tests/test_end_to_end_offline.py` | 文件名里包含 `timestamp + slug + thread_id` |
 | 多轮追问为什么不是重开线程 | `app/api.py` + `app/turn_init.py` | `tests/test_end_to_end_offline.py` | `reset_per_turn()` 只打 patch，不清空历史资产 |
 | M6 生产化如何防回归 | `Dockerfile` + `docker-compose.yml` + `Makefile` | `tests/test_m6_production.py` | 20 题数据集、Docker 入口、API env fallback、LangSmith agent tag |
@@ -1734,7 +2247,7 @@ A：M6 后我会优先补三件事：selective re-fanout、工具层限速/重�
 
 ---
 
-## 24. 最适合你的精读顺序
+## 26. 最适合你的精读顺序
 
 如果你准备自己二刷这个项目，我建议按下面顺序：
 
@@ -1769,7 +2282,7 @@ A：M6 后我会优先补三件事：selective re-fanout、工具层限速/重�
 
 ---
 
-## 25. 你可以直接照着说的一段项目总结
+## 27. 你可以直接照着说的一段项目总结
 
 > 我做了一个基于 LangGraph 的多 Agent 深度研究系统，主流程是 Planner 先把研究问题拆成结构化 plan，并通过 interrupt 进入人工确认；用户确认后，Supervisor 把调研阶段路由到 research_subgraph，子图内部再通过 Send 把子问题按 source_type 并行派发给多个 Researcher；Researcher 通过 ToolRegistry 统一接不同 provider，并走 fallback chain 收集证据；并行 evidence 通过 reducer 做去重和排序；Reflector 评估证据覆盖度并控制补查轮数；Writer 最后基于 evidence 生成带引用的 Markdown 报告并落盘。系统还提供 SSE + Streamlit UI、SQLite checkpoint 多轮恢复、LangSmith 节点级 trace、20 题 LLM-as-judge 评测和 Docker Compose 一键部署。
 
@@ -1783,7 +2296,7 @@ A：M6 后我会优先补三件事：selective re-fanout、工具层限速/重�
 
 ---
 
-## 26. 当前项目的真实验证结论
+## 28. 当前项目的真实验证结论
 
 基于当前仓库真实代码，可以确认：
 
@@ -1796,7 +2309,8 @@ A：M6 后我会优先补三件事：selective re-fanout、工具层限速/重�
 - reflector 强制收敛有 tutorial test 保护
 - 端到端离线闭环测试可以跑通到 writer
 - M6 production test 覆盖 20 题数据集、Docker 入口、Streamlit API env fallback、LangSmith agent tag
-- 当前离线测试基线是 59 passed
+- M7 runtime skills 测试覆盖 Markdown skill 加载、evidence quality、coverage guardrails、citation audit
+- 当前离线测试基线是 70 passed
 
 因此你在学习和面试里，应该优先讲：
 
@@ -1808,7 +2322,7 @@ A：M6 后我会优先补三件事：selective re-fanout、工具层限速/重�
 
 ---
 
-## 27. 一句话收束
+## 29. 一句话收束
 
 这个项目最值得你学的，不是“怎么堆多几个 agent”，而是：
 

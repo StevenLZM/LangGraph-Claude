@@ -73,6 +73,7 @@ class ResearchState(TypedDict, total=False):
 
     final_report: str
     citations: list[Citation]
+    citation_audit_issues: list[str]
     report_path: str
 
     messages: Annotated[list[BaseMessage], add_messages]

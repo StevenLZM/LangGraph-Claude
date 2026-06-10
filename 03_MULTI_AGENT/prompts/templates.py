@@ -6,6 +6,10 @@
 """
 from __future__ import annotations
 
+from runtime_skills.citation_report_writing import CITATION_REPORT_WRITING_SKILL
+from runtime_skills.compose import compose_system_prompt
+from runtime_skills.evidence_grounded_research import EVIDENCE_GROUNDED_RESEARCH_SKILL
+
 PLANNER_SYSTEM = """你是资深 AI 行业研究方法论专家。
 任务：把用户的研究问题拆解为 3-6 个可独立调研的子问题。
 
@@ -34,10 +38,10 @@ JSON 结构：
 }
 """
 
-REFLECTOR_SYSTEM = """你是研究质量审查员。基于已收集到的 evidence 列表，对每个子问题做覆盖度评分。
+_REFLECTOR_BASE = """你是研究质量审查员。基于已收集到的 evidence 列表和 runtime 已计算的质量元数据，对每个子问题做覆盖度评分。
 
 输出要求（严格遵守 schema）：
-1. coverage_by_subq: 每个子问题 id 的覆盖度（0-100），考虑证据数量、来源多样性、与子问题的相关度
+1. coverage_by_subq: 每个子问题 id 的覆盖度（0-100），考虑证据数量、来源多样性、与子问题的相关度，以及已提供的 support/confidence/coverage guardrails
 2. missing_aspects: 列出未被覆盖到的关键方面，最多 5 条；如果整体已充分则留空
 3. next_action: 三选一
    - "sufficient": 总体覆盖度 ≥ 70 且无关键缺失 → 进入写作
@@ -55,7 +59,9 @@ JSON 结构：
 }
 """
 
-WRITER_SYSTEM = """你是顶级行业分析师。基于给定的 evidence 列表撰写一份高质量 Markdown 研究报告。
+REFLECTOR_SYSTEM = compose_system_prompt(_REFLECTOR_BASE, EVIDENCE_GROUNDED_RESEARCH_SKILL)
+
+_WRITER_BASE = """你是顶级行业分析师。基于给定的 evidence 列表撰写一份高质量 Markdown 研究报告。
 
 要求：
 1. 标题层级清晰（# 标题 → ## 章节 → ### 小节）
@@ -66,6 +72,8 @@ WRITER_SYSTEM = """你是顶级行业分析师。基于给定的 evidence 列表
 6. 客观中立，引用必须真实指向已有 evidence，不要编造
 7. 使用中文输出（除非用户问题本身是英文）
 """
+
+WRITER_SYSTEM = compose_system_prompt(_WRITER_BASE, CITATION_REPORT_WRITING_SKILL)
 
 WEB_RESEARCHER_SYSTEM = """你是网络信息提炼专家。基于给定的搜索结果，针对子问题提炼 3-6 个要点。
 要点应紧扣子问题，每个要点 1-3 句话，附 source_url。"""
@@ -88,7 +96,12 @@ def planner_user(query: str, audience: str) -> str:
 请输出 ResearchPlan。"""
 
 
-def reflector_user(plan_summary: str, evidence_summary: str, revision: int) -> str:
+def reflector_user(
+    plan_summary: str,
+    evidence_summary: str,
+    revision: int,
+    coverage_guardrails: str = "",
+) -> str:
     return f"""当前迭代轮次：{revision}（最大 3 轮，第 3 轮请考虑 force_complete）
 
 研究计划（子问题列表）：
@@ -96,6 +109,9 @@ def reflector_user(plan_summary: str, evidence_summary: str, revision: int) -> s
 
 已收集证据（按子问题分组）：
 {evidence_summary}
+
+确定性覆盖度参考（由 runtime skill helper 生成；请结合上方 evidence 摘要中的 support/confidence 使用，作为保护栏，不要从零重算证据质量）：
+{coverage_guardrails or "(无)"}
 
 请输出 ReflectionResult。"""
 

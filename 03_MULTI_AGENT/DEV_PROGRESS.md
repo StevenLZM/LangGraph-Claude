@@ -2,8 +2,8 @@
 
 > 本文档是 Claude 跨会话的工程记忆 —— 读完本文即可掌握完整开发脉络、已做决策、当前状态、未竟事项。
 >
-> 最后更新：2026-05-05
-> 当前阶段：**M6 完成**（20 题评测集 + Docker Compose + LangSmith 节点级 tags）
+> 最后更新：2026-06-10
+> 当前阶段：**M7 Runtime LLM Skills 完成**（证据质量标注 + 引用审计；离线测试 70 例全绿）
 
 ---
 
@@ -82,14 +82,14 @@ PYTHONPATH=. python -m scripts.run_local "研究问题"
   - 命中 `interrupt` 时弹出 `st.expander` + `st.data_editor` 让用户改 sub_questions
   - 报告完成后底部启用追问输入框，复用 thread_id 走 `turn_stream`
   - 用 `httpx-sse.connect_sse` 同步消费，每 12 个 token 刷一次 placeholder（避免 Streamlit rerun 风暴）
-- 测试：`tests/test_sse_stream.py` 8 用例（事件映射规则 + ASGITransport 端点冒烟），全量 49 用例绿
+- 测试：`tests/test_sse_stream.py` 8 用例（事件映射规则 + ASGITransport 端点冒烟），M5 当时全量 49 用例绿
 
 ### 已完成的配套
 - **Python 3.11 升级**：conda env `langgraph-cc-multiagent`；langgraph 1.1.6、mcp 1.27.0、langchain 1.2.15 等
 - **requirements.txt** 对齐 3.11 生态
 - **DashScope 内置搜索兜底**（`tools/dashscope_search_tool.py`）：直调 DashScope 原生端点 `/api/v1/.../generation`，读 `output.search_info.search_results`；用作国内可达的 web 兜底
 - **01_RAG 复用**：`tools/kb_retriever.py` 用 surgical sys.path/sys.modules 隔离加载
-- **49 单测全绿**（M5 加 8 条 SSE 用例、tutorial 子目录 +N 条）
+- **当前离线测试基线**：M7 后 `pytest tests -q` -> 70 passed
 
 ### M6 生产化（已完成，2026-05-05）
 - **LangSmith 自动追踪**（`app/bootstrap.py:_setup_langsmith`）：检测到 `langchain_tracing_v2=true` + key 时把 `LANGCHAIN_*` 同步到 `os.environ`，LangChain 全局 callback 自动上报；不改任何节点代码
@@ -110,6 +110,15 @@ PYTHONPATH=. python -m scripts.run_local "研究问题"
 - **Docker Compose**（`Dockerfile` + `docker-compose.yml`）：`api:8080` + `ui:8501` 两服务，`./data` 挂载为持久化目录；按 M6 范围仅打包 `03_MULTI_AGENT`，容器内 KB 缺失时自动返空
 - **Makefile**：`make test` / `make eval-smoke` / `make eval` / `make docker-config`
 - **测试**：新增 M6 production 回归，覆盖 20 题数据集、Docker 入口、Streamlit API env fallback、节点级 tracing helper
+
+### M7 Runtime LLM Skills（已完成，2026-06-09）
+- `skills/evidence-grounded-research/SKILL.md`：定义 evidence-grounded-research Markdown skill，说明 Reflector 如何消费 runtime 已提供的 quality metadata / coverage guardrails；`runtime_skills/evidence_grounded_research.py` 负责加载正文并提供 helper
+- `agents/schemas.py`：新增 `EvidenceQuality` 契约；Researcher 将工具结果转 `Evidence` 时按 `relevance_score` 写入保守默认 `support_level/confidence`
+- `agents/reflector.py`：传给 Reflector LLM 的 evidence 摘要包含 `support=... confidence=...`，让覆盖度评分能利用质量标注，而不是从零重算证据质量
+- `skills/citation-report-writing/SKILL.md`：定义 citation-report-writing Markdown skill；`runtime_skills/citation_report_writing.py` 负责加载正文并提供本地引用审计 helper（未知编号检测、缺失引用条目补全）
+- `agents/writer.py`：Writer prompt 注入引用写作 skill；报告生成后检测未知 `[^N]`，并补齐已有 `## 引用` 章节中缺失的后端 citation 条目
+- **运行结果处理优化**：Reflector user prompt 增加 deterministic `coverage_guardrails`；Writer state 返回结构化 `citation_audit_issues`
+- **测试**：新增 `tests/test_runtime_skills.py` 与 `tests/test_writer_citation_audit.py`；当前离线基线 `pytest tests -q` -> 70 passed
 
 ### 后续优化
 - 多并发时的工具限速（semaphore）
@@ -225,7 +234,7 @@ PYTHONPATH=. python -m scripts.run_local "研究问题"
 │   ├── run_local.py                 # CLI 端到端跑（自动接受 plan）
 │   └── test_brave_mcp.py            # Brave smoke 脚本
 │
-├── tests/                           # 58 单测全绿
+├── tests/                           # M7 后 70 条离线测试
 │   ├── test_graph_skeleton.py
 │   ├── test_evidence_reducer.py
 │   ├── test_registry.py
@@ -345,8 +354,8 @@ thread_id=f538bf53
 Planner: 5 子问题（含 web/academic/code/kb 多源）
 ArXiv: 每路命中 5 条
 Tavily: 每路命中 5 条
-Writer: qwen-max 输出 3800+ 字 Markdown，[^1]-[^13] 引用
+Writer: DeepSeek max 档输出 3800+ 字 Markdown，[^1]-[^13] 引用
 归档: data/reports/20260418-180845_*.md
 ```
 
-当前离线测试基线：58 单测全绿。
+当前离线测试基线：`pytest tests -q` -> 70 passed。

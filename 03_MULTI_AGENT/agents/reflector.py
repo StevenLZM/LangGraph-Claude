@@ -12,6 +12,7 @@ from config.llm import get_llm
 from config.tracing import with_tags
 from graph.state import ResearchState
 from prompts.templates import REFLECTOR_SYSTEM, reflector_user
+from runtime_skills.evidence_grounded_research import format_coverage_guardrails
 
 logger = logging.getLogger(__name__)
 MAX_REVISION = 3
@@ -39,22 +40,15 @@ async def reflector_node(state: ResearchState) -> dict[str, Any]:
         f"- {sq.id}: {sq.question} (sources={sq.recommended_sources})" for sq in plan
     ) or "(无)"
 
-    by_sq: dict[str, list[str]] = {}
-    for ev in evidence:
-        by_sq.setdefault(ev.sub_question_id, []).append(
-            f"  · [{ev.source_type}] {ev.snippet[:200]} ({ev.source_url})"
-        )
-    evidence_summary = (
-        "\n".join(f"[{sid}] (共 {len(items)} 条)\n" + "\n".join(items[:5]) for sid, items in by_sq.items())
-        or "(暂无 evidence)"
-    )
+    evidence_summary = _format_evidence_summary(evidence)
+    coverage_guardrails = format_coverage_guardrails([sq.id for sq in plan], evidence)
 
     llm = get_llm("max", temperature=0.0)
     structured = llm.with_structured_output(ReflectionResult, method="json_mode")
     result: ReflectionResult = await structured.ainvoke(
         [
             SystemMessage(content=REFLECTOR_SYSTEM),
-            HumanMessage(content=reflector_user(plan_summary, evidence_summary, rc)),
+            HumanMessage(content=reflector_user(plan_summary, evidence_summary, rc, coverage_guardrails)),
         ]
     )
     logger.info("[reflector] rc=%d action=%s coverage=%s", rc, result.next_action, result.coverage_by_subq)
@@ -71,3 +65,23 @@ async def reflector_node(state: ResearchState) -> dict[str, Any]:
             )
         ],
     }
+
+
+def _format_evidence_summary(evidence: list[Any]) -> str:
+    by_sq: dict[str, list[str]] = {}
+    for ev in evidence:
+        quality = getattr(ev, "quality", None)
+        if quality is None:
+            quality_summary = "support=unclassified confidence=0.00"
+        else:
+            quality_summary = (
+                f"support={quality.support_level} "
+                f"confidence={float(quality.confidence or 0.0):.2f}"
+            )
+        by_sq.setdefault(ev.sub_question_id, []).append(
+            f"  · [{ev.source_type}; {quality_summary}] {ev.snippet[:200]} ({ev.source_url})"
+        )
+    return (
+        "\n".join(f"[{sid}] (共 {len(items)} 条)\n" + "\n".join(items[:5]) for sid, items in by_sq.items())
+        or "(暂无 evidence)"
+    )

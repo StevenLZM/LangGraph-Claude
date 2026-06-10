@@ -8,12 +8,12 @@
 
 **定位**：生产级 AI 行业深度研究多 Agent 系统，面试作品集。
 
-**一句话介绍**：用户输入研究问题 → Planner LLM 拆解为 5 个子问题 → 人工确认计划（HITL）→ Supervisor 进入 `research_subgraph` → 子图内部 4 个 Researcher 并行检索（web/academic/code/kb）→ Reflector 评估证据覆盖度决定是否补查 → Writer 输出带引用的 Markdown 报告。
+**一句话介绍**：用户输入研究问题 → Planner LLM 拆解为 5 个子问题 → 人工确认计划（HITL）→ Supervisor 进入 `research_subgraph` → 子图内部 4 个 Researcher 并行检索（web/academic/code/kb）并打上 evidence quality → Reflector 消费 runtime 已提供的 support/confidence 与 coverage guardrails 评估证据覆盖度 → Writer 输出带引用审计的 Markdown 报告。
 
 **三大亮点**（面试可讲）：
 1. **Supervisor + Research Subgraph** 的分层调度架构（LangGraph StateGraph + 子图内 Send API fan-out）
 2. **Human-in-the-Loop**：`interrupt()` + `Command(resume=...)` 支持用户编辑研究计划
-3. **MCP 双向集成**：作为 client 调外部 Brave Search，作为 server 暴露 5 个工具给 Claude Desktop
+3. **MCP 双向集成 + Runtime LLM Skills**：外部/内部工具统一接入，同时用 `skills/*/SKILL.md` 把证据质量和引用规范变成可维护、可测试的运行时契约
 
 ---
 
@@ -58,7 +58,7 @@ async def start_research(req: StartReq):
 # agents/planner.py
 async def planner_node(state):
     llm = get_llm("max", temperature=0.3)
-    structured = llm.with_structured_output(ResearchPlan, method="function_calling")
+    structured = llm.with_structured_output(ResearchPlan, method="json_mode")
     plan = await structured.ainvoke([SystemMessage(...), HumanMessage(...)])
     decision = interrupt({"phase": "plan_review", "plan": plan.model_dump()})  # ← 暂停
     confirmed = _coerce_plan(decision, fallback=plan)
@@ -123,6 +123,14 @@ async def web_researcher_node(payload):
 ```
 *关键点*：4 个节点返回的 `evidence` 在 fan-in 时自动走 `merge_evidence` reducer —— 按 URL 去重 + 按 score 倒序。
 
+M7 后 `_to_evidence()` 还会给每条证据补一个保守的质量标注：
+
+```python
+quality=build_default_quality(snippet, relevance_score)
+```
+
+这个 `quality` 字段不是让工具替代 LLM 判断，而是给 Reflector 一个更稳的下限参考：`direct / indirect / background / irrelevant`。
+
 **Step 7 — Reflector 打分 + 决定补查/收敛**
 ```python
 # agents/reflector.py
@@ -130,15 +138,14 @@ async def reflector_node(state):
     rc = state.get("revision_count", 0) + 1
     if rc >= MAX_REVISION:                                       # 硬兜底：不调 LLM
         return {"next_action": "force_complete", "revision_count": rc, ...}
-    # 按 sub_question_id 分组 + 截断前 5 条，控制 LLM 输入 token
-    by_sq = {}
-    for ev in state["evidence"]:
-        by_sq.setdefault(ev.sub_question_id, []).append(...)
-    result = await llm.with_structured_output(ReflectionResult, method="function_calling") \
-                    .ainvoke([SystemMessage(...), HumanMessage(...)])
+    evidence_summary = _format_evidence_summary(evidence)       # 带 support/confidence
+    coverage_guardrails = format_coverage_guardrails([sq.id for sq in plan], evidence)
+    result = await llm.with_structured_output(ReflectionResult, method="json_mode") \
+                    .ainvoke([SystemMessage(REFLECTOR_SYSTEM), HumanMessage(...)])
     return {"next_action": result.next_action, "coverage_by_subq": ...,
             "revision_count": rc, ...}
 ```
+*关键点*：`REFLECTOR_SYSTEM` 不是纯手写 prompt，它由 `_REFLECTOR_BASE + skills/evidence-grounded-research/SKILL.md` 拼出来；`coverage_guardrails` 是 runtime helper 的确定性参考。Reflector 不是通过 skill 名称自行选择调用，也不是从零重算原始证据质量。
 
 **Step 8 — reflector_route 决定走向**
 ```python
@@ -160,9 +167,14 @@ resp = await llm.ainvoke([SystemMessage(WRITER_SYSTEM), HumanMessage(...)])  # �
 report_md = resp.content.strip()
 if not _has_citation_section(report_md):                         # LLM 漏写就自动补
     report_md += "\n\n## 引用\n" + "\n".join(f"[^{c.idx}]: {c.source_url}" for c in citations)
+else:
+    missing = build_missing_reference_entries(report_md, citations)
+    if missing:
+        report_md += "\n" + "\n".join(missing)
+citation_issues = validate_citation_ids(report_md, len(citations))
 path = report_store.save(query, thread_id, report_md)            # 归档到 data/reports/
 ```
-*关键点*：**编号由后端生成**，LLM 只负责在正文用 `[^1] [^2]`；即使 LLM 漏写引用章节，后端也会兜底补上。
+*关键点*：**编号由后端生成**，LLM 只负责在正文用 `[^1] [^2]`；即使 LLM 漏写引用章节或漏掉某个引用条目，后端也会兜底补上。若 LLM 写了不存在的 `[^99]`，问题会进入 `citation_audit_issues`，供测试、UI 或未来 repair 节点使用。
 
 ### 追问（Turn 2，同 thread_id）
 
@@ -196,9 +208,9 @@ def reset_per_turn(state, new_query):
 | 层 | 选型 | 原因 |
 |---|---|---|
 | Agent 框架 | LangGraph 1.1 | StateGraph/Send/interrupt 原生支持多 Agent |
-| LLM | qwen-max / qwen-plus (DashScope) | 国内可达，中文强 |
-| LLM SDK | `langchain-openai.ChatOpenAI` | DashScope 兼容 OpenAI 协议 |
-| 结构化输出 | `with_structured_output(..., method="function_calling")` | DashScope compat 端点不支持 json_object |
+| LLM | DeepSeek V4 pro / flash | pro 用于 Planner/Reflector/Writer，flash 用于轻量节点 |
+| LLM SDK | `langchain-openai.ChatOpenAI` | DeepSeek 走 OpenAI 兼容协议，保留供应商切换空间 |
+| 结构化输出 | `with_structured_output(..., method="json_mode")` | 当前 DeepSeek 原生 JSON mode 稳定；DashScope function_calling 是历史坑 |
 | HITL | `interrupt()` + `Command(resume=...)` | LangGraph 原生 |
 | 持久化 | `AsyncSqliteSaver` + `aiosqlite` | 跨会话；async 契合 FastAPI |
 | Web API | FastAPI + lifespan | async 全栈 |
@@ -343,7 +355,7 @@ async def planner_node(state):
     query = state.get("research_query", "")
     audience = state.get("audience", "intermediate")
     llm = get_llm("max", temperature=0.3)
-    structured = llm.with_structured_output(ResearchPlan, method="function_calling")
+    structured = llm.with_structured_output(ResearchPlan, method="json_mode")
     plan = await structured.ainvoke(
         [SystemMessage(content=PLANNER_SYSTEM), HumanMessage(content=planner_user(query, audience))]
     )
@@ -368,7 +380,7 @@ def _coerce_plan(decision, *, fallback):
 - 节点执行到 `interrupt()` 会**挂起**，首次运行到此终止；resume 时 LangGraph **重新跑整个节点**，但 `interrupt()` 直接返回 `Command(resume=...)` 里的值。所以 `_coerce_plan` 必须能认多种形态。
 - `plan_confirmed=True` 是 resume 后才设的 —— 不需要在节点开头检查"已确认就跳过"，因为 LangGraph 保证一个 interrupt 点只会对应一次 resume。
 
-**踩坑**：`method="function_calling"` 必须显式传。DashScope compat 端点的默认 `json_object` 模式要求 prompt 含 "json" 字样，否则报 `'messages' must contain 'json'`。
+**历史踩坑**：DashScope compat 端点曾经需要显式 `method="function_calling"`，否则默认 `json_object` 模式会要求 prompt 含 "json" 字样。当前实现已经切到 DeepSeek，Planner / Reflector / Judge 使用 `method="json_mode"`。
 
 ### 5. safe_node 装饰器 —— `agents/_safe.py`（真实版本）
 
@@ -409,12 +421,12 @@ async def run_research_chain(registry, source_type, query, timeout=45):
 MAX_REVISION = 3
 
 async def reflector_node(state, config=None):
-    rc = state.get("revision_count", 0)
+    rc = state.get("revision_count", 0) + 1
     if rc >= MAX_REVISION:                    # 硬兜底：不调 LLM
         return {"next_action": "force_complete", ...}
-    llm = get_llm("plus").with_structured_output(ReflectionResult, method="function_calling")
+    llm = get_llm("max").with_structured_output(ReflectionResult, method="json_mode")
     result = await llm.ainvoke([...])
-    return {"next_action": result.next_action, "revision_count": rc+1}
+    return {"next_action": result.next_action, "revision_count": rc}
 ```
 
 **为什么硬兜底？** 避免 LLM 判断不稳定导致死循环；3 轮后强制收敛到 writer（即使证据不够也要出报告，让用户看到"为什么不够"比卡死强）。
@@ -605,9 +617,9 @@ class SearchTool(Protocol):
 
 "thread_id 隔离会话；checkpointer 负责每轮后持久化。追问时调 `/turn`，`reset_per_turn` 有选择地重置：保留 evidence/plan/messages，重置 revision_count/next_action/current_node；同时把 plan_confirmed 设 False 让图重新走 planner。Planner 会看到历史 messages 决定是否复用旧 plan 或重新拆解。"
 
-### Q6：为什么 DashScope 必须用 function_calling？
+### Q6：结构化输出为什么现在用 `json_mode`？
 
-"DashScope 的 OpenAI 兼容端点对 structured output 有特殊行为 —— 默认 `json_object` 模式要求 prompt 里包含 'json' 字样，否则返回 `'messages' must contain 'json'` 错误。而 `function_calling` 模式用的是 tool_use 协议，不依赖 prompt 关键字。所以 `with_structured_output(Model, method='function_calling')` 必须显式指定。"
+"当前 LLM 通道已经切到 DeepSeek，它原生支持 JSON mode，所以 Planner / Reflector / Judge 都用 `with_structured_output(Model, method='json_mode')`。DashScope 时代的坑是 compat 端点默认 `json_object` 会要求 prompt 里包含 'json' 字样，当时才需要 `function_calling`。现在 DashScope 主要保留在搜索兜底链里，不再是主 LLM 通道。"
 
 ### Q7：MCP 双向集成怎么做的？
 
@@ -619,7 +631,11 @@ class SearchTool(Protocol):
 
 ### Q9：Writer 的引用编号怎么保证不乱？
 
-"契约是'后端发号，LLM 只回填'。Writer 先遍历 `evidence` 数组，按顺序给每条分配编号 `i=1,2,...`，同时构建 `Citation(idx=i, source_url=...)` 列表。喂给 LLM 的 prompt 里 evidence 已带编号 `[1] [2] ...`，系统提示要求正文用 `[^N]` 引用。即使 LLM 漏写引用章节，后端用正则 `^##\s*(引用|参考|references?)` 检测，没找到就自动从 `citations` 生成 `## 引用\n[^1]: url\n[^2]: url\n...`。编号 ↔ URL 的一致性由后端保证，LLM 只负责语义层引用。"
+"契约是'后端发号，LLM 只回填'。Writer 先遍历 `evidence` 数组，按顺序给每条分配编号 `i=1,2,...`，同时构建 `Citation(idx=i, source_url=...)` 列表。喂给 LLM 的 prompt 里 evidence 已带编号 `[1] [2] ...`，系统提示要求正文用 `[^N]` 引用。M7 后引用规则来自 `skills/citation-report-writing/SKILL.md`，后端还会做两层审计：缺引用条目就用 `build_missing_reference_entries()` 补，引用了不存在的 `[^N]` 就写入 `citation_audit_issues`。编号 ↔ URL 的一致性由后端保证，LLM 只负责语义层引用。"
+
+### Q9.5：Runtime skill 和普通 prompt 有什么区别？
+
+"普通 prompt 通常直接写在 `prompts/templates.py`，越写越长，也不容易测试。Runtime skill 把规则放在 `skills/<name>/SKILL.md`，运行时用 `load_skill_prompt()` 读取并去掉 frontmatter，再通过 `compose_system_prompt()` 拼进 Reflector / Writer 的 system prompt。真正关键的是它还有 Python helper：evidence skill 产出 `EvidenceQuality` 和 coverage guardrails，citation skill 做引用编号审计。所以它不是'多一段提示词'，而是'Markdown skill + 运行时加载 + 确定性校验'。"
 
 ### Q10：MCP Brave 的 stdio 子进程怎么管？
 
@@ -1015,7 +1031,136 @@ docker compose down
 
 ---
 
-## 十、快速参考卡
+## 十、M7 Runtime LLM Skills：把 prompt 规则变成可维护契约
+
+M7 不是再加一个 Agent，而是把两个容易失控的 LLM 行为做成可维护的 runtime skills：
+
+1. 研究阶段：Reflector 如何消费已标注的 evidence quality 和 coverage guardrails
+2. 写作阶段：报告里的 `[^N]` 是否真的对应已有 evidence
+
+### 10.1 文件结构
+
+```text
+skills/
+  evidence-grounded-research/
+    SKILL.md
+  citation-report-writing/
+    SKILL.md
+
+runtime_skills/
+  loader.py
+  compose.py
+  evidence_grounded_research.py
+  citation_report_writing.py
+```
+
+这里要区分两层：
+
+- `skills/*/SKILL.md` 是人维护的 Markdown skill 正文，有 frontmatter 和规则说明
+- `runtime_skills/*.py` 是运行时代码，负责加载 Markdown skill，并提供可测试 helper / validator
+
+这比直接把规则塞进 `prompts/templates.py` 更清楚：skill 规则独立维护，prompt 只负责组合。
+
+### 10.2 加载流程
+
+```python
+# runtime_skills/loader.py
+def load_skill_prompt(skill_name: str) -> str:
+    path = _SKILLS_ROOT / skill_name / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    return _strip_frontmatter(text).strip()
+```
+
+加载器会去掉 YAML frontmatter，只把正文注入 LLM。它用了 `lru_cache`，所以修改 `SKILL.md` 后需要重启 API 进程才能生效。
+
+### 10.3 Prompt 注入
+
+```python
+# prompts/templates.py
+REFLECTOR_SYSTEM = compose_system_prompt(_REFLECTOR_BASE, EVIDENCE_GROUNDED_RESEARCH_SKILL)
+WRITER_SYSTEM = compose_system_prompt(_WRITER_BASE, CITATION_REPORT_WRITING_SKILL)
+```
+
+`compose_system_prompt()` 没有复杂逻辑，只是把 base prompt 和 skill 正文拼起来。这样 Reflector / Writer 的调用方式不用改，但它们收到的 system prompt 已经带上 runtime skill 规则。`name/description` 只是 frontmatter 元数据，当前运行时不是让 LLM 按名称自选 skill。
+
+### 10.4 Evidence Quality 怎么进入链路
+
+`agents/schemas.py` 新增：
+
+```python
+class EvidenceQuality(BaseModel):
+    support_level: Literal["direct", "indirect", "background", "irrelevant"]
+    source_authority: Literal["primary", "secondary", "unknown"]
+    extracted_claim: str
+    limitations: list[str]
+    confidence: float
+```
+
+Researcher 把工具结果转成 `Evidence` 时调用：
+
+```python
+quality = build_default_quality(snippet, relevance_score)
+```
+
+这一步是 deterministic fallback，不是最终覆盖裁决。它的作用是避免 Reflector 面对一堆“未分类 evidence”，只能靠自然语言猜覆盖度；后续 LLM 消费这些质量信号，不从零重算原始证据质量。
+
+### 10.5 Coverage Guardrails 怎么给 Reflector
+
+Reflector 现在会把两个信息一起给 LLM：
+
+```python
+evidence_summary = _format_evidence_summary(evidence)       # support/confidence
+coverage_guardrails = format_coverage_guardrails([...], evidence)
+```
+
+`coverage_guardrails` 是确定性估算，比如：
+
+```text
+- sq1: estimated_coverage=50
+- sq2: estimated_coverage=80
+```
+
+教学重点：这不是替代 Reflector，而是给 Reflector 一个保护栏。LLM 仍然可以综合判断，但它消费的是 runtime 已提供的 support/confidence 与 guardrails，不应该把只有 background evidence 的子问题轻易打成充分覆盖。
+
+### 10.6 Citation Audit 怎么保护 Writer
+
+Writer 仍然先做“后端发号”：
+
+```python
+for i, ev in enumerate(evidence, 1):
+    numbered.append(...)
+    citations.append(Citation(idx=i, source_url=ev.source_url, title=title))
+```
+
+M7 后增加两类后处理：
+
+```python
+missing = build_missing_reference_entries(report_md, citations)
+citation_issues = validate_citation_ids(report_md, len(citations))
+```
+
+- `missing` 处理正文用了 `[^2]`，但 `## 引用` 章节漏了 `[^2]: url`
+- `citation_issues` 处理正文写了 `[^99]`，但 evidence 数量不够
+- `citation_audit_issues` 会写回 state，后续 UI、测试或 repair 节点都可以使用
+
+### 10.7 对应测试
+
+- `tests/test_runtime_skills.py`
+  - Markdown skill 文件存在
+  - skill prompt 从 `SKILL.md` 加载
+  - evidence quality 默认标注生效
+  - coverage guardrails 输出稳定
+- `tests/test_writer_citation_audit.py`
+  - Writer 会补缺失引用条目
+  - Writer 会返回结构化 `citation_audit_issues`
+
+### 10.8 本轮未提交改动的提交前提醒
+
+当前 git 未提交状态不只包含代码和教学文档，还包含本地配置类文件，例如 `.codex/config.toml`、`03_MULTI_AGENT/.env`、`05_PRODUCT_AGENT/.env`。教学文档只记录“存在本地配置变更需要审核”，不要写入任何密钥或 `.env` 具体值。提交前应单独决定这些配置文件是否应该提交或排除。
+
+---
+
+## 十一、快速参考卡
 
 **启动 3 行**：
 ```bash
@@ -1032,8 +1177,10 @@ PYTHONPATH=. python -m scripts.run_local "研究问题"
 - HITL + resume 兼容：`agents/planner.py` `_coerce_plan` L44-58
 - 安全装饰器：`agents/_safe.py` `safe_node`（默认返回空 evidence）
 - 降级链：`agents/_researcher_base.py` `run_research_chain` L19-52
+- Runtime skills：`skills/*/SKILL.md` + `runtime_skills/loader.py`
+- Evidence quality：`runtime_skills/evidence_grounded_research.py` `build_default_quality` + `format_coverage_guardrails`
 - 双重硬兜底：`agents/reflector.py` `MAX_REVISION=3` + `reflector_route` 的 rc 检查
-- Writer 引用回填：`agents/writer.py` `_has_citation_section` + 兜底补引用
+- Writer 引用审计：`agents/writer.py` `_has_citation_section` + `citation_audit_issues`
 - 生命周期：`app/bootstrap.py` `AsyncExitStack.enter_async_context`
 - FastAPI：`app/api.py` `_extract_interrupt` + `Command(resume=...)`
 - MCP stdio 会话：`tools/mcp_brave_tool.py` `_ensure_session`

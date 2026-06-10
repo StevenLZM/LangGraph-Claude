@@ -198,6 +198,7 @@ evidence: Annotated[list[Evidence], merge_evidence]
 
 - 并行节点各自 `return {"evidence": [...]}`，LangGraph 自动调用 `merge_evidence` 合并
 - `merge_evidence` 按 `source_url` 去重，同 URL 保留 `relevance_score` 最高的一条，再按分数倒序
+- Researcher 将工具结果转成 `Evidence` 时写入 `quality` 默认标注；Reflector 摘要会带上 `support_level/confidence`
 - 不允许任何节点用"覆写"方式写 `evidence`，否则会丢失并行结果
 
 ### 4.3 失败容错
@@ -258,15 +259,15 @@ NodeFn = Callable[[ResearchState], Awaitable[dict[str, Any]]]
 
 | Agent | 输入字段 | 输出字段 | 工具 | 模型档位 |
 |---|---|---|---|---|
-| `planner_node` | `research_query`, `audience` | `plan`, `messages` | — | qwen-max |
+| `planner_node` | `research_query`, `audience` | `plan`, `messages` | — | DeepSeek max tier |
 | `supervisor_node` | `plan_confirmed`, `evidence`, `revision_count` | `current_node`, `iteration` | — | — |
 | `research_dispatcher_node` | `plan`, `research_query` | — | — | — |
 | `web_researcher_node` | `sub_question` | `evidence` | Tavily / Brave | qwen-turbo |
 | `academic_researcher_node` | `sub_question` | `evidence` | ArXiv | qwen-turbo |
 | `code_researcher_node` | `sub_question` | `evidence` | GitHub | qwen-turbo |
 | `kb_researcher_node` | `sub_question` | `evidence` | KB Retriever | qwen-turbo |
-| `reflector_node` | `evidence`, `plan` | `coverage_by_subq`, `missing_aspects`, `next_action`, `revision_count` | — | qwen-max |
-| `writer_node` | `evidence`, `plan`, `research_query` | `final_report`, `citations`, `messages` | — | qwen-max |
+| `reflector_node` | `evidence`, `plan` | `coverage_by_subq`, `missing_aspects`, `next_action`, `revision_count` | — | DeepSeek max tier |
+| `writer_node` | `evidence`, `plan`, `research_query` | `final_report`, `citations`, `citation_audit_issues`, `messages` | — | DeepSeek max tier |
 
 ### 6.2 结构化输出模型（签名）
 
@@ -282,6 +283,13 @@ class ResearchPlan(BaseModel):
     sub_questions: list[SubQuestion]
     estimated_depth: Literal["quick","standard","deep"]
 
+class EvidenceQuality(BaseModel):
+    support_level: Literal["direct","indirect","background","irrelevant"]
+    source_authority: Literal["primary","secondary","unknown"]
+    extracted_claim: str
+    limitations: list[str]
+    confidence: float
+
 class Evidence(BaseModel):
     sub_question_id: str
     source_type: Literal["web","academic","code","kb"]
@@ -289,6 +297,7 @@ class Evidence(BaseModel):
     snippet: str
     relevance_score: float
     fetched_at: str
+    quality: EvidenceQuality | None = None
 
 class ReflectionResult(BaseModel):
     coverage_by_subq: dict[str, int]      # 0-100
@@ -319,6 +328,21 @@ async def planner_node(state):
 - `next_action == "force_complete"` → writer
 - `revision_count >= 3` → writer（硬兜底，优先级最高）
 - 否则 → supervisor 触发新一轮 `research_subgraph` fan-out
+
+### 6.5 Runtime LLM Skills
+
+`skills/*/SKILL.md` 存放运行时 LLM 可复用的 Markdown skill 正文；`runtime_skills/` 只负责加载 skill 文本和提供可测试的本地 helper / validator。当前两类：
+
+- `evidence-grounded-research`：约束 Reflector 消费 runtime 已提供的 `Evidence.quality` 与 `coverage_guardrails`，而不是让 LLM 从零重算原始证据质量。工具结果转成 `Evidence` 时，`build_default_quality()` 已按 `relevance_score` 给出保守默认 `direct / indirect / background / irrelevant` 标注，确保 Reflector 不把未分类或背景结果当充分覆盖。
+- `citation-report-writing`：约束 Writer 只能引用已有 evidence 编号，关键判断必须带 `[^N]`。`writer_node` 生成报告后会用本地 validator 检查未知编号，并在已有 `## 引用` 章节缺条目时用后端 `Citation` 列表补齐。
+
+组合方式：`runtime_skills.loader.load_skill_prompt()` 读取 `skills/<name>/SKILL.md` 并去掉 YAML frontmatter；`prompts/templates.py` 再用 `compose_system_prompt(base, skill)` 把 Markdown 正文追加到对应 agent 的 system prompt。`name/description` 是维护和发现元数据，当前运行时不是让 LLM 按名称自选 skill。可确定的引用/覆盖约束用离线单测锁住，避免完全依赖 prompt 自觉。
+
+运行结果处理：
+
+- 约束型结果：skill 正文直接并入对应 system prompt。
+- 转换型结果：Researcher 写入 `Evidence.quality`，Reflector user prompt 额外接收 deterministic `coverage_guardrails`。
+- 审计型结果：Writer 后处理返回 `citation_audit_issues`，同时保留自动补齐后的 `final_report`。
 
 ---
 
@@ -623,7 +647,7 @@ flowchart LR
 | Agent | `agent:<name>` | `agent:planner` |
 | 会话 | `thread:<tid>` | `thread:a3f1c2` |
 | 轮次 | `turn:<n>` | `turn:2` |
-| 模型档位 | `model:<tier>` | `model:qwen-max` |
+| 模型档位 | `model:<tier>` | `model:max` |
 
 `config/tracing.py::with_tags(node_fn, name)` 装饰器统一注入。
 

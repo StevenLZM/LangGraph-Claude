@@ -20,6 +20,10 @@ from app import report_store
 from config.llm import get_llm
 from graph.state import ResearchState
 from prompts.templates import WRITER_SYSTEM, writer_user
+from runtime_skills.citation_report_writing import (
+    build_missing_reference_entries,
+    validate_citation_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +55,14 @@ async def writer_node(state: ResearchState, config: Optional[RunnableConfig] = N
 
     if not _has_citation_section(report_md) and citations:
         report_md += "\n\n## 引用\n" + "\n".join(f"[^{c.idx}]: {c.source_url}" for c in citations)
+    else:
+        missing_reference_entries = build_missing_reference_entries(report_md, citations)
+        if missing_reference_entries:
+            report_md += "\n" + "\n".join(missing_reference_entries)
+
+    citation_issues = validate_citation_ids(report_md, len(citations))
+    if citation_issues:
+        logger.warning("[writer] citation audit issues: %s", citation_issues)
 
     thread_id = (config or {}).get("configurable", {}).get("thread_id", "unknown")
     try:
@@ -63,9 +75,16 @@ async def writer_node(state: ResearchState, config: Optional[RunnableConfig] = N
     return {
         "final_report": report_md,
         "citations": citations,
+        "citation_audit_issues": citation_issues,
         "report_path": path,
         "current_node": "writer",
-        "messages": [AIMessage(content=f"报告已生成（{len(report_md)} 字, {len(citations)} 引用）")],
+        "messages": [
+            AIMessage(
+                content=f"报告已生成（{len(report_md)} 字, {len(citations)} 引用"
+                + (f", citation_warnings={len(citation_issues)}" if citation_issues else "")
+                + "）"
+            )
+        ],
     }
 
 
