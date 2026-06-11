@@ -1,7 +1,7 @@
 PYTHON ?= python
 INSIGHTLOOP_API ?= http://localhost:8080
 
-.PHONY: test eval eval-smoke api ui docker-up docker-down docker-config
+.PHONY: test eval eval-smoke eval-prod-smoke eval-prod api ui docker-up docker-down docker-config
 
 test:
 	PYTHONPATH=. pytest tests -q
@@ -11,6 +11,12 @@ eval:
 
 eval-smoke:
 	PYTHONPATH=. $(PYTHON) -m evals.run --limit 1
+
+eval-prod-smoke:
+	PYTHONPATH=. $(PYTHON) -m evals.production --limit 1
+
+eval-prod:
+	PYTHONPATH=. $(PYTHON) -m evals.production --limit 0
 
 api:
 	PYTHONPATH=. uvicorn app.api:app --host 0.0.0.0 --port 8080

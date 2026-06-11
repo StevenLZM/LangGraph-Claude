@@ -22,8 +22,18 @@ from typing import Any
 from langgraph.types import Command
 
 from app import bootstrap
+from evals.diagnostics import (
+    build_component_quality,
+    build_process_quality,
+    build_retrieval_metrics,
+    build_runtime_health,
+    build_sampling_decision,
+)
+from evals.frameworks import build_framework_coverage
 from evals.judge import JudgeInput, judge_one
+from evals.manual_review import build_review_queue, write_review_queue
 from evals.report import render_markdown
+from evals.trace_metrics import EvalTraceCollector
 
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parent
@@ -83,6 +93,7 @@ def _plan_brief(plan: list[Any]) -> list[dict]:
 async def _run_one(case: dict, run_id: str) -> dict:
     g = bootstrap.app_state.graph
     tid = f"eval-{run_id}-{case['id']}"
+    trace_collector = EvalTraceCollector(case_id=case["id"])
     cfg = {
         "configurable": {"thread_id": tid},
         "metadata": {
@@ -94,9 +105,13 @@ async def _run_one(case: dict, run_id: str) -> dict:
             "app": "insightloop-eval",
         },
         "tags": ["eval", f"run:{run_id}", f"case:{case['id']}"],
+        "callbacks": [trace_collector],
     }
     started = time.time()
     record: dict[str, Any] = {"case": case, "thread_id": tid, "error": None}
+    plan: list[Any] = []
+    evidence: list[Any] = []
+    final_state: dict[str, Any] = {}
     try:
         r1 = await g.ainvoke(
             {
@@ -114,6 +129,7 @@ async def _run_one(case: dict, run_id: str) -> dict:
         plan_payload = proposed.get("plan") or {}
 
         r2 = await g.ainvoke(Command(resume={"plan": plan_payload}), config=cfg)
+        final_state = r2
         plan = r2.get("plan") or []
         evidence = r2.get("evidence") or []
         report_md = r2.get("final_report", "") or ""
@@ -123,6 +139,11 @@ async def _run_one(case: dict, run_id: str) -> dict:
             "evidence_count": len(evidence),
             "plan_size": len(plan),
         })
+        record["process_quality"] = build_process_quality(
+            plan=plan,
+            evidence=evidence,
+            state=final_state,
+        )
 
         score = await judge_one(JudgeInput(
             query=case["query"],
@@ -136,6 +157,28 @@ async def _run_one(case: dict, run_id: str) -> dict:
         record["error"] = f"{type(e).__name__}: {e}"
     finally:
         record["elapsed_sec"] = round(time.time() - started, 1)
+        record.setdefault(
+            "process_quality",
+            build_process_quality(plan=plan, evidence=evidence, state=final_state),
+        )
+        record["retrieval_metrics"] = build_retrieval_metrics(plan=plan, evidence=evidence)
+        record["runtime_health"] = build_runtime_health(
+            error=record.get("error"),
+            elapsed_sec=record["elapsed_sec"],
+        )
+        record["component_quality"] = build_component_quality(
+            process_quality=record["process_quality"],
+            retrieval_metrics=record["retrieval_metrics"],
+            runtime_health=record["runtime_health"],
+            score=record.get("score"),
+        )
+        record["node_metrics"] = trace_collector.summary()
+        record["sampling"] = build_sampling_decision(
+            score=record.get("score"),
+            process_quality=record["process_quality"],
+            runtime_health=record["runtime_health"],
+        )
+        record["framework_coverage"] = build_framework_coverage(record)
     return record
 
 
@@ -154,17 +197,20 @@ async def main_async(args: argparse.Namespace) -> Path:
     results_path = out_dir / "results.jsonl"
 
     await bootstrap.startup()
+    records = []
     try:
         with results_path.open("w", encoding="utf-8") as f:
             for i, case in enumerate(cases, 1):
                 logger.info("[eval] (%d/%d) running case %s", i, len(cases), case["id"])
                 rec = await _run_one(case, run_id)
+                records.append(rec)
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 f.flush()
     finally:
         await bootstrap.shutdown()
 
     report_path = render_markdown(results_path, out_dir / "REPORT.md", run_id=run_id)
+    write_review_queue(build_review_queue(records), out_dir / "manual_review_queue.jsonl")
     logger.info("[eval] 完成 run_id=%s → %s", run_id, report_path)
     return out_dir
 

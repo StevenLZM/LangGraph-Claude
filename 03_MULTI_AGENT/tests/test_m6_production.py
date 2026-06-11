@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -111,3 +112,41 @@ def test_workflow_wraps_all_business_nodes_with_langsmith_tags(monkeypatch):
         "reflector",
         "writer",
     ]
+
+
+def test_langsmith_api_key_alias_is_loaded_from_environment(monkeypatch):
+    from config.settings import Settings
+
+    monkeypatch.delenv("LANGCHAIN_API_KEY", raising=False)
+    monkeypatch.setenv("LANGSMITH_API_KEY", "ls-test")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "insightloop-test")
+
+    cfg = Settings(_env_file=None)
+
+    assert cfg.langchain_api_key == "ls-test"
+    assert cfg.langchain_project == "insightloop-test"
+
+
+def test_langsmith_setup_exports_langchain_and_langsmith_env_vars(monkeypatch):
+    from app import bootstrap
+
+    monkeypatch.setattr(bootstrap.settings, "langchain_tracing_v2", True)
+    monkeypatch.setattr(bootstrap.settings, "langchain_api_key", "ls-test")
+    monkeypatch.setattr(bootstrap.settings, "langchain_project", "insightloop-test")
+    monkeypatch.setattr(bootstrap.settings, "langchain_endpoint", "https://api.smith.langchain.com")
+    for key in (
+        "LANGCHAIN_API_KEY",
+        "LANGSMITH_API_KEY",
+        "LANGCHAIN_PROJECT",
+        "LANGSMITH_PROJECT",
+        "LANGCHAIN_ENDPOINT",
+        "LANGSMITH_ENDPOINT",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    bootstrap._setup_langsmith()
+
+    assert os.environ["LANGCHAIN_API_KEY"] == "ls-test"
+    assert os.environ["LANGSMITH_API_KEY"] == "ls-test"
+    assert os.environ["LANGCHAIN_PROJECT"] == "insightloop-test"
+    assert os.environ["LANGSMITH_PROJECT"] == "insightloop-test"

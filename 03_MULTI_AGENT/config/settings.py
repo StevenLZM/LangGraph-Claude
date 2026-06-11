@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -37,8 +38,14 @@ class Settings(BaseSettings):
     # LangSmith
     langchain_tracing_v2: bool = False
     langchain_endpoint: str = "https://api.smith.langchain.com"
-    langchain_api_key: str = ""
-    langchain_project: str = "insightloop-multi-agent"
+    langchain_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("LANGCHAIN_API_KEY", "LANGSMITH_API_KEY"),
+    )
+    langchain_project: str = Field(
+        default="insightloop-multi-agent",
+        validation_alias=AliasChoices("LANGCHAIN_PROJECT", "LANGSMITH_PROJECT"),
+    )
 
     # 路径
     documents_dir: str = str(ROOT / "data" / "documents")

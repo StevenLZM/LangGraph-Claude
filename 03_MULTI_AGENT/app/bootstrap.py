@@ -37,13 +37,16 @@ def _setup_langsmith() -> None:
     评测/API 处再通过 RunnableConfig.metadata 给 trace 打 thread_id / case_id 等业务标签。
     """
     if not settings.langchain_tracing_v2 or not settings.langchain_api_key:
-        logger.info("[bootstrap] LangSmith 未启用（LANGCHAIN_TRACING_V2 或 API_KEY 为空）")
+        logger.info("[bootstrap] LangSmith 未启用（LANGCHAIN_TRACING_V2 或 LANGSMITH_API_KEY 为空）")
         return
     os.environ["LANGCHAIN_TRACING_V2"] = "true"
     os.environ["LANGCHAIN_API_KEY"] = settings.langchain_api_key
+    os.environ["LANGSMITH_API_KEY"] = settings.langchain_api_key
     os.environ["LANGCHAIN_PROJECT"] = settings.langchain_project
+    os.environ["LANGSMITH_PROJECT"] = settings.langchain_project
     if settings.langchain_endpoint:
         os.environ["LANGCHAIN_ENDPOINT"] = settings.langchain_endpoint
+        os.environ["LANGSMITH_ENDPOINT"] = settings.langchain_endpoint
     logger.info(
         "[bootstrap] LangSmith 已启用，project=%s endpoint=%s",
         settings.langchain_project, settings.langchain_endpoint,

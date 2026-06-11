@@ -37,6 +37,14 @@ def _load_run(run_id: str) -> pd.DataFrame:
             rec = json.loads(line)
             case = rec.get("case", {})
             score = rec.get("score") or {}
+            process = rec.get("process_quality") or {}
+            runtime = rec.get("runtime_health") or {}
+            retrieval = rec.get("retrieval_metrics") or {}
+            components = rec.get("component_quality") or {}
+            trace = rec.get("node_metrics") or {}
+            sampling = rec.get("sampling") or {}
+            missing_subquestions = process.get("missing_subquestions") or []
+            sampling_reasons = sampling.get("reasons") or []
             rows.append({
                 "case_id": case.get("id"),
                 "category": case.get("category"),
@@ -44,6 +52,29 @@ def _load_run(run_id: str) -> pd.DataFrame:
                 "audience": case.get("audience"),
                 "elapsed_sec": rec.get("elapsed_sec"),
                 "evidence_count": rec.get("evidence_count"),
+                "plan_size": process.get("plan_size", rec.get("plan_size")),
+                "process_evidence_count": process.get("evidence_count", rec.get("evidence_count")),
+                "source_diversity": process.get("source_diversity"),
+                "missing_subquestions": ", ".join(missing_subquestions),
+                "forced_completion": process.get("forced_completion"),
+                "citation_audit_issue_count": process.get("citation_audit_issue_count"),
+                "runtime_status": runtime.get("status", "error" if rec.get("error") else "ok"),
+                "slow_case": runtime.get("slow_case"),
+                "subquestion_recall": retrieval.get("subquestion_recall"),
+                "source_type_recall": retrieval.get("source_type_recall"),
+                "evidence_density": retrieval.get("evidence_density"),
+                "planner_score": (components.get("planner") or {}).get("score"),
+                "research_score": (components.get("research") or {}).get("score"),
+                "reflector_score": (components.get("reflector") or {}).get("score"),
+                "writer_score": (components.get("writer") or {}).get("score"),
+                "runtime_score": (components.get("runtime") or {}).get("score"),
+                "llm_calls": trace.get("llm_calls"),
+                "tool_calls": trace.get("tool_calls"),
+                "tool_errors": trace.get("tool_errors"),
+                "total_tokens": trace.get("total_tokens"),
+                "risk_level": sampling.get("risk_level"),
+                "review_action": sampling.get("review_action"),
+                "sampling_reasons": ", ".join(sampling_reasons),
                 "report_path": rec.get("report_path"),
                 "report_md": rec.get("report_md", ""),
                 "error": rec.get("error"),
@@ -92,7 +123,9 @@ def main():
         st.markdown("### 用例明细")
         st.dataframe(
             df[["case_id", "category", "coverage", "accuracy", "citation", "overall",
-                "elapsed_sec", "evidence_count", "error"]],
+                "elapsed_sec", "plan_size", "process_evidence_count", "source_diversity",
+                "subquestion_recall", "writer_score", "llm_calls", "tool_errors",
+                "total_tokens", "risk_level", "review_action", "error"]],
             use_container_width=True, hide_index=True,
         )
 
@@ -111,6 +144,27 @@ def main():
                     st.markdown(
                         f"- 覆盖: {row['coverage']} / 准确: {row['accuracy']} / 引用: {row['citation']} "
                         f"/ **综合: {row['overall']}**"
+                    )
+                    st.markdown(
+                        f"- 过程: plan={row['plan_size']} / evidence={row['process_evidence_count']} "
+                        f"/ sources={row['source_diversity']} / forced={row['forced_completion']}"
+                    )
+                    st.markdown(
+                        f"- 检索: subq_recall={row['subquestion_recall']} "
+                        f"/ source_recall={row['source_type_recall']} / density={row['evidence_density']}"
+                    )
+                    st.markdown(
+                        f"- 组件: planner={row['planner_score']} / research={row['research_score']} "
+                        f"/ reflector={row['reflector_score']} / writer={row['writer_score']} "
+                        f"/ runtime={row['runtime_score']}"
+                    )
+                    st.markdown(
+                        f"- Trace: llm_calls={row['llm_calls']} / tool_calls={row['tool_calls']} "
+                        f"/ tool_errors={row['tool_errors']} / tokens={row['total_tokens']}"
+                    )
+                    st.markdown(
+                        f"- 抽检: {row['risk_level']} / {row['review_action']} "
+                        f"/ {row['sampling_reasons'] or '-'}"
                     )
                     st.markdown(f"**Rationale**: {row['rationale']}")
                     if row.get("report_path"):

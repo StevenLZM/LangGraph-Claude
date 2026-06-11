@@ -130,9 +130,13 @@ docker compose up --build
 ```bash
 make eval-smoke  # 1 题冒烟
 make eval        # 20 题完整评测
+make eval-prod-smoke  # 真实 graph/LLM/工具链生产门禁烟测
+make eval-prod        # 全量生产门禁
 ```
 
-结果写入 `evals/results/{run_id}/results.jsonl` 与 `REPORT.md`。完整 M6 验收目标是平均分 `>= 80`。
+结果写入 `evals/results/{run_id}/results.jsonl`、`REPORT.md` 与 `manual_review_queue.jsonl`。完整 M6 验收目标是平均分 `>= 80`。
+
+当前评测按教学目的覆盖三层：结果质量（LLM-as-judge）、过程链路质量（Planner / Research / Reflector / Writer 组件诊断、RAG/Retrieval proxy）和运行稳定性（error / elapsed / slow case / callback trace）。`REPORT.md` 还会输出无反馈抽检建议、人工复核队列与“教学评估框架覆盖矩阵”。生产级 runner `python -m evals.production` 会调用真实 graph、真实 LLM、真实工具链，采集 `node_metrics`，并生成带 release gate 的 `PRODUCTION_REPORT.md`，详见 `evals/README.md`。
 
 ## 架构亮点
 
