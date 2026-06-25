@@ -31,6 +31,15 @@ async def planner_node(state: ResearchState) -> dict[str, Any]:
     # plan = Plan(name="数据分析", steps=["采集", "清洗", "建模"])
     # result = plan.model_dump()
     # {'name': '数据分析', 'steps': ['采集', '清洗', '建模'], 'priority': 1}
+    #
+    # ResearchPlan.model_dump() = {
+    #    "sub_questions": [
+    #        {"id": "sq1", "question": "...", "recommended_sources": ["web"], "status": "pending"},
+    #        ...
+    #    ],
+    #    "estimated_depth": "standard"
+    # }
+    # 人修改的就是这个字典，修改后再转换回 ResearchPlan 实例。
     decision = interrupt({"phase": "plan_review", "plan": plan.model_dump()})
     print(f"用户的输入:{decision}")
 
