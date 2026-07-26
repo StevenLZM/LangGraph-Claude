@@ -9,11 +9,6 @@ import sys
 import os
 from pathlib import Path
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - non-POSIX fallback
-    fcntl = None
-
 # 确保项目根目录在 sys.path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -28,7 +23,7 @@ st.set_page_config(
 )
 
 # ── 延迟导入（避免启动时崩溃） ───────────────────────────────────
-from config import llm_config, rag_config, path_config, milvus_config
+from config import elasticsearch_config, llm_config, path_config, rag_config
 from mcp_local.filesystem_client import get_filesystem_client
 from rag.loader import load_pdf, get_doc_metadata
 from rag.chunker import chunk_documents
@@ -152,8 +147,8 @@ def get_or_build_chain():
             return None, None
         except Exception as e:
             st.error(
-                "❌ RAG Chain 初始化失败。请确认没有其他 01_RAG 进程占用 "
-                f"Milvus Lite，并检查向量库配置。详情：{e}"
+                "❌ RAG Chain 初始化失败。请确认 Elasticsearch 已启动："
+                f"{elasticsearch_config.URL}。详情：{e}"
             )
             return None, None
     return st.session_state.chain, st.session_state.chain_get_history
@@ -172,9 +167,8 @@ def refresh_indexed_docs():
 
 
 def _safe_collection_stats() -> dict:
-    """Return vectorstore stats without letting startup errors crash the UI."""
+    """Return ES/Parent stats without letting startup errors crash the UI."""
     vs = st.session_state.get("vectorstore")
-    lock_error = _detect_milvus_lock() if vs is None else ""
     try:
         if vs is not None:
             return get_collection_stats(vs)
@@ -185,52 +179,21 @@ def _safe_collection_stats() -> dict:
             "total_children": 0,
             "total_parents": parent_count,
             "total_chunks": 0,
-            "backend": "milvus-lite",
+            "backend": "elasticsearch",
         }
-        if lock_error:
-            stats["error"] = lock_error
         return stats
     except Exception as exc:
         return {
             "total_children": 0,
             "total_parents": 0,
             "total_chunks": 0,
-            "backend": "milvus-lite",
+            "backend": "elasticsearch",
             "error": str(exc),
         }
 
 
-def _detect_milvus_lock() -> str:
-    """Detect a held Milvus Lite lock without starting the Milvus server."""
-    if fcntl is None:
-        return ""
-
-    uri = getattr(milvus_config, "URI", "")
-    if not uri or "://" in uri:
-        return ""
-
-    lock_path = Path(uri) / "LOCK"
-    if not lock_path.exists():
-        return ""
-
-    try:
-        with lock_path.open("r") as lock_file:
-            try:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return f"Milvus Lite 数据库被其他进程占用：{uri}"
-            finally:
-                try:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                except OSError:
-                    pass
-    except OSError:
-        return ""
-    return ""
-
-
 def _list_documents_from_docstore() -> list[dict]:
-    """List indexed documents without opening Milvus during initial UI render."""
+    """List indexed documents without connecting to ES during initial UI render."""
     docstore = get_parent_docstore()
     docs = []
     for doc in docstore.list_documents():
@@ -336,7 +299,7 @@ def render_sidebar():
         )
         if stats.get("error"):
             st.warning(
-                "向量库暂不可用。请关闭其他 01_RAG Streamlit 实例后重试；"
+                f"Elasticsearch 暂不可用，请检查 {elasticsearch_config.URL}；"
                 f"详情：{stats['error']}",
                 icon="⚠️",
             )
@@ -371,8 +334,11 @@ def _handle_document_upload(uploaded_files):
         progress.progress((i / total) * 0.5 + 0.3, text=f"分块 {uploaded_file.name}...")
         chunks = chunk_documents(pages)
 
-        # 4. 向量化并存入 Milvus Lite
-        progress.progress((i / total) * 0.9 + 0.1, text=f"向量化 {uploaded_file.name}...")
+        # 4. 向量化并写入 Elasticsearch
+        progress.progress(
+            (i / total) * 0.9 + 0.1,
+            text=f"向量化并写入 Elasticsearch：{uploaded_file.name}...",
+        )
         doc_id = pages[0].metadata["doc_id"] if pages else uploaded_file.name
         added = add_documents(chunks, doc_id, vs)
 

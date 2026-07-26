@@ -1,6 +1,6 @@
 # 🧠 智能知识库问答系统 (RAG)
 
-> **项目编号 01** | LangChain + Milvus Lite + Streamlit | 混合检索 · 多轮对话 · 来源可追溯
+> **项目编号 01** | LangChain + Elasticsearch 8 + Streamlit | 混合检索 · 多轮对话 · 来源可追溯
 
 ---
 
@@ -8,12 +8,12 @@
 
 | 特性 | 技术实现 |
 |------|---------|
-| **混合检索（Hybrid RAG）** | 语义检索（Dense）+ BM25（Sparse）+ RRF 融合，准确率提升 15-20% |
+| **混合检索（Hybrid RAG）** | Elasticsearch Dense + BM25，共享 Filter，应用层 Weighted RRF |
 | **问题改写（Query Rewriting）** | 多轮对话中消解代词，用小模型省成本 |
 | **来源可追溯** | 每条答案标注原始文档名 + 页码 |
-| **增量索引** | 新增/删除文档无需重建全量索引 |
+| **版本化索引** | staging 写入、原子激活和失败补偿，不覆盖旧的 active 版本 |
 | **MCP 集成** | 通过 MCP Filesystem Server 管理文档 |
-| **生产级架构** | 配置中心 · 单例向量库 · 会话隔离 · 完整测试套件 |
+| **生产级架构** | ES Child 索引 · SQLite Parent Store · 会话隔离 · 完整测试套件 |
 
 ---
 
@@ -33,8 +33,11 @@
 │   ├── loader.py             # PDF 解析（PyMuPDF + 备用 pypdf）
 │   ├── chunker.py            # 文本分块（Recursive + 语义感知）
 │   ├── embedder.py           # Embedding 封装（OpenAI + HuggingFace 兜底）
-│   ├── vectorstore.py        # Milvus Lite 管理（增删改查）
-│   ├── retriever.py          # 混合检索器（语义 + BM25 + RRF）
+│   ├── elasticsearch_store.py       # ES Mapping、Filter 和版本化 Child 生命周期
+│   ├── elasticsearch_retrievers.py  # ES BM25、Dense 和 Weighted RRF
+│   ├── vectorstore.py        # Child/Parent 摄取兼容 Facade
+│   ├── docstore.py           # SQLite Parent Store
+│   ├── retriever.py          # Child 混合召回与 Parent Hydration
 │   └── chain.py              # LCEL RAG Chain（问题改写 → 检索 → 生成）
 ├── memory/
 │   └── session.py            # 会话记忆管理（多会话隔离 + 自动裁剪）
@@ -42,7 +45,7 @@
 │   └── filesystem_client.py  # MCP Filesystem Client 适配层
 ├── data/
 │   ├── documents/            # PDF 存储目录
-│   └── vectorstore/          # Milvus Lite 本地数据目录
+│   └── docstore/             # SQLite Parent Chunk 数据
 └── tests/
     └── test_rag_pipeline.py  # 完整测试套件（无 API 单元测试 + 集成测试）
 ```
@@ -85,14 +88,29 @@ OPENAI_API_KEY=sk-xxxx          # Embedding 仍需要 OpenAI
 OPENAI_API_KEY=sk-xxxx          # 同时用于 Embedding 和对话
 ```
 
-### 第三步：生成示例 PDF（可选）
+### 第三步：启动本机 Elasticsearch
+
+```bash
+cd ~/Downloads/elasticsearch-8
+./bin/elasticsearch
+```
+
+另开终端确认版本和服务状态：
+
+```bash
+curl http://127.0.0.1:9200
+```
+
+项目按 Elasticsearch 8.19 和 Basic License 设计，不依赖 Docker 或 Enterprise 原生 RRF。
+
+### 第四步：生成示例 PDF（可选）
 
 ```bash
 python generate_sample_pdfs.py
 # 生成两份示例文档到 data/documents/
 ```
 
-### 第四步：启动应用
+### 第五步：启动应用
 
 ```bash
 streamlit run app.py
@@ -113,15 +131,15 @@ streamlit run app.py
 多轮对话中消解代词 → 独立完整问题
     │
     ▼ (2) Hybrid Retrieval
-┌──────────────┬──────────────┐
-│  语义检索    │   BM25检索   │
-│  Top-K=6    │   Top-K=6    │
+┌──────────────────┬──────────────────┐
+│ ES Dense kNN     │ ES BM25          │
+│ Top-K=50         │ Top-K=50         │
 └──────┬───────┴──────┬───────┘
        └──────┬────────┘
-              ▼ RRF 融合排序 → Top-4
+              ▼ Weighted RRF（child_id）→ Top-80
     │
-    ▼ (3) 相似度阈值过滤
-去除低质量检索结果（默认 threshold=0.3）
+    ▼ (3) Parent Hydration + Cross-Encoder
+SQLite 回填 Parent，最终按配置截断
     │
     ▼ (4) LLM 生成
 System Prompt + Context + History + Question
@@ -133,8 +151,8 @@ System Prompt + Context + History + Question
 ### 混合检索（Hybrid Retrieval）
 
 ```
-Dense Retrieval          Sparse Retrieval (BM25)
-(向量相似度)              (关键词匹配)
+ES Dense Retrieval       ES Sparse Retrieval
+(kNN/HNSW)               (BM25/CJK analyzer)
      │                         │
      │     RRF Fusion          │
      └─────────┬───────────────┘
@@ -154,18 +172,23 @@ Dense Retrieval          Sparse Retrieval (BM25)
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding 模型 |
 | `CHUNK_SIZE` | `500` | 每块字符数 |
 | `CHUNK_OVERLAP` | `50` | 块间重叠字符数 |
-| `SEMANTIC_TOP_K` | `6` | 语义检索召回数 |
-| `BM25_TOP_K` | `6` | BM25 检索召回数 |
+| `SEMANTIC_TOP_K` | `50` | ES Dense 召回数 |
+| `BM25_TOP_K` | `50` | ES BM25 召回数 |
+| `RRF_TOP_K` | `80` | Weighted RRF 后保留的 Child 数 |
+| `RRF_K` | `60` | RRF 排名常数 |
 | `FINAL_TOP_K` | `4` | 最终使用的文档块数 |
 | `SEMANTIC_WEIGHT` | `0.6` | 语义检索权重（BM25=0.4） |
 | `SIMILARITY_THRESHOLD` | `0.3` | 相似度过滤阈值 |
-| `RAG_MILVUS_URI` | `data/vectorstore/milvus.db` | Milvus Lite 本地数据文件；旧 `MILVUS_URI` 仍兼容但不推荐 |
+| `ES_URL` | `http://127.0.0.1:9200` | Elasticsearch 地址 |
+| `ES_PHYSICAL_INDEX` | `rag-child-chunks-v1` | 版本化物理 Child 索引 |
+| `ES_INDEX_READ_ALIAS` | `rag-child-chunks-read` | 线上查询别名 |
+| `ES_INDEX_WRITE_ALIAS` | `rag-child-chunks-write` | 摄取写别名 |
+| `ES_DENSE_NUM_CANDIDATES` | `300` | kNN ANN 候选窗口 |
 | `RERANK_ENABLED` | `true` | 是否启用 Cross-Encoder rerank；Streamlit 应用默认开启，baseline 评测可显式关闭 |
 | `RERANK_MODEL` | `BAAI/bge-reranker-base` | Cross-Encoder rerank 模型 |
 | `RERANK_TOP_N` | `4` | rerank 后保留的候选数 |
 
-> 从旧 ChromaDB 数据切换到 Milvus Lite 后，需要重新上传或重新索引文档；项目不会自动迁移 `data/vectorstore/chroma.sqlite3`。
-> Milvus Lite 本地文件同一时间只能由一个进程持锁；如提示向量库暂不可用，请关闭其他 `streamlit run app.py` 实例后重试。
+> 旧 Chroma/Milvus Lite 数据不会自动导入 ES。请通过现有上传流程重新摄取；Child 写入 ES，Parent 保存在 SQLite。
 
 ---
 
@@ -177,6 +200,9 @@ pytest tests/ -v -k "not slow"
 
 # 运行需要真实 API 的集成测试（需配置 .env）
 pytest tests/ -v -m slow
+
+# 运行隔离的真实 ES 8.19 测试（只操作随机 rag-test-* 索引）
+RUN_ES_INTEGRATION=1 pytest tests/test_elasticsearch_integration.py -q
 
 # 查看测试覆盖率
 pytest tests/ --cov=rag --cov=memory --cov=mcp --cov-report=term-missing
@@ -191,8 +217,8 @@ python -m evals.run --dry-run
 # 真实评估：RAGAS 评估生成链路，传统 IR 指标评估检索排序
 python -m evals.run
 
-# 对比 Milvus baseline 与 Cross-Encoder rerank
-python -m evals.run --rerank-disabled --run-id baseline-milvus
+# 对比 ES hybrid baseline 与 Cross-Encoder rerank
+python -m evals.run --rerank-disabled --run-id baseline-es-hybrid
 python -m evals.run --rerank-enabled --run-id cross-encoder-rerank
 ```
 
@@ -212,7 +238,7 @@ python -m evals.run --rerank-enabled --run-id cross-encoder-rerank
 1. **混合检索而非单一向量检索**：语义 + BM25 + RRF，这是大厂实际生产中的标准做法
 2. **Query Rewriting**：多轮对话的关键技术，用小模型消解代词节省成本
 3. **相似度阈值过滤**：防止低质量检索结果污染 LLM 输入，有效降低幻觉
-4. **幂等索引**：文档重新上传时先删旧版本再插入，保证数据一致性
+4. **幂等索引**：版本化 `storage_id`，先写 staging、再激活新版本、最后下线旧版本
 5. **MCP 集成**：体现对 Claude Agent 技术栈的理解
 6. **离线评估体系**：用传统 IR 指标评估检索排序，用 RAGAS 评价上下文质量、语义相关性、忠实度和端到端答案正确性
 7. **测试驱动**：核心模块均有单元测试，无需 API Key 即可验证

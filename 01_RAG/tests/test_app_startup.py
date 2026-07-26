@@ -9,7 +9,7 @@ def test_safe_collection_stats_returns_error_state_instead_of_raising(monkeypatc
     import app
 
     def fail_stats():
-        raise RuntimeError("Open local milvus failed")
+        raise RuntimeError("Elasticsearch unavailable")
 
     app.st.session_state.vectorstore = object()
     monkeypatch.setattr(app, "get_collection_stats", lambda _vs: fail_stats())
@@ -18,7 +18,8 @@ def test_safe_collection_stats_returns_error_state_instead_of_raising(monkeypatc
 
     assert stats["total_children"] == 0
     assert stats["total_parents"] == 0
-    assert "Open local milvus failed" in stats["error"]
+    assert stats["backend"] == "elasticsearch"
+    assert "Elasticsearch unavailable" in stats["error"]
 
 
 def test_refresh_indexed_docs_uses_docstore_without_opening_vectorstore(monkeypatch):
@@ -34,7 +35,7 @@ def test_refresh_indexed_docs_uses_docstore_without_opening_vectorstore(monkeypa
             }]
 
     def fail_vectorstore():
-        raise AssertionError("startup should not open Milvus")
+        raise AssertionError("startup should not open Elasticsearch")
 
     app.st.session_state.vectorstore = None
     monkeypatch.setattr(app, "get_vectorstore", fail_vectorstore)
@@ -53,7 +54,7 @@ def test_refresh_indexed_docs_uses_docstore_without_opening_vectorstore(monkeypa
     }]
 
 
-def test_safe_collection_stats_reports_lock_without_opening_vectorstore(monkeypatch):
+def test_safe_collection_stats_uses_docstore_without_opening_elasticsearch(monkeypatch):
     import app
 
     class FakeDocStore:
@@ -61,30 +62,33 @@ def test_safe_collection_stats_reports_lock_without_opening_vectorstore(monkeypa
             return 2
 
     def fail_stats(_vs):
-        raise AssertionError("startup should not open Milvus")
+        raise AssertionError("startup should not open Elasticsearch")
 
     app.st.session_state.vectorstore = None
     monkeypatch.setattr(app, "get_collection_stats", fail_stats)
     monkeypatch.setattr(app, "get_parent_docstore", lambda: FakeDocStore())
-    monkeypatch.setattr(app, "_detect_milvus_lock", lambda: "Milvus Lite 数据库被其他进程占用")
 
     stats = app._safe_collection_stats()
 
     assert stats["total_parents"] == 2
     assert stats["total_children"] == 0
-    assert "Milvus Lite" in stats["error"]
+    assert stats["backend"] == "elasticsearch"
+    assert "error" not in stats
 
 
 def test_get_or_build_chain_handles_vectorstore_startup_failure(monkeypatch):
     import app
 
     def fail_chain():
-        raise RuntimeError("Open local milvus failed")
+        raise RuntimeError("Elasticsearch unavailable")
 
+    errors = []
     app.st.session_state.chain = None
     monkeypatch.setattr(app, "create_chain_with_history", fail_chain)
+    monkeypatch.setattr(app.st, "error", errors.append)
 
     chain, get_history = app.get_or_build_chain()
 
     assert chain is None
     assert get_history is None
+    assert "http://127.0.0.1:9200" in errors[0]
