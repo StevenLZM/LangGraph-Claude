@@ -12,4 +12,4 @@
 
 `answer` Case 必须至少有一个 Grade 不低于 2 的 qrel。`abstain` Case 可以没有 qrel。`deny` Case 可记录受限证据 qrel，用于检测权限泄漏，但不计入普通 Recall/NDCG。
 
-根目录旧 `evals/dataset.jsonl` 的五条内容只属于待复核种子，保存在 `legacy_seed_cases.jsonl`；未经上述流程不得进入 Dev 或 Test。
+旧版单文件评测集的五条内容只属于待复核种子，保存在 `legacy_seed_cases.jsonl`；未经上述流程不得进入 Dev 或 Test。

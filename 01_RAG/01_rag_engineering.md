@@ -419,17 +419,16 @@ assert all(r.metadata["score"] > 0.3 for r in results)
 检索和生成效果不能只靠人工观察答案，应使用 `evals/` 固定评测集做可复跑的 RAGAS 评估：
 
 ```bash
-# 验证 RAGAS 数据格式和报告管道，不访问向量库或 LLM
-python -m evals.run --dry-run
-
-# 真实评估：调用当前 RAG 链路，并由 RAGAS 统一评分
-python -m evals.run
+# 真实 Dev 评测：调用七阶段检索、生成模型和 RAGAS Judge
+python -m evals.run --split dev --run-id candidate-v1
 ```
 
-评测输出：
+完成运行的评测输出：
 
-- `ragas_results.jsonl`：每条样本的 RAGAS 输入、检索上下文、回答和指标分
-- `summary.json`：RAGAS 指标平均分和分类聚合
+- `case_results.jsonl`：每条样本的一次生产执行结果
+- `stage_metrics.jsonl`：七阶段 Recall/NDCG/MRR/Hit
+- `ragas_results.jsonl`：answer Case 的真实 RAGAS 指标
+- `summary.json`：分维度聚合、95% CI 和发布门禁
 - `REPORT.md`：面向人工复盘的 Markdown 报告
 
 RAGAS 指标分层：
@@ -440,9 +439,9 @@ RAGAS 指标分层：
 
 工程边界：
 
-- `evals/run.py` 只负责串联数据集、检索、生成、RAGAS 和报告，不实现自定义评分。
+- `evals/run.py` 只负责预检、单次生产执行、分阶段计算、RAGAS 和 checkpoint。
 - `evals/ragas_adapter.py` 只负责 RAGAS schema 适配、指标加载、真实 `ragas.evaluate()` 调用和输出列名归一化。
-- `evals/report.py` 只聚合 RAGAS 指标，不再计算 Recall、MRR、Parent Hit 或关键词规则分。
-- `--dry-run` 使用固定 fixture 验证管道，不代表真实质量分。
+- `evals/report.py` 只发布完整运行，聚合七阶段指标、RAGAS、安全和延迟，不计算总分。
+- Fake 只用于公式级单元测试，不能生成生产评测报告。
 
 完整评估设计见 `05_rag_ragas_evaluation_design.md`。

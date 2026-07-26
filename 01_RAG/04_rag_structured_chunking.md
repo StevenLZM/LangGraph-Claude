@@ -234,8 +234,7 @@ res = chunk_documents(docs)
 结构化切分上线后还需要跑离线评测，避免只验证"表格没被切坏"，却忽略检索排序质量：
 
 ```bash
-python -m evals.run --dry-run
-python -m evals.run
+python -m evals.run --split dev --run-id structured-chunking-v1
 ```
 
 重点观察：
@@ -243,7 +242,7 @@ python -m evals.run
 - `context_recall`：命中的上下文是否覆盖 reference 所需事实
 - `context_precision`：表格/代码 section 是否引入过多无关上下文
 - `answer_correctness`：结构化切分后最终回答是否比 baseline 更正确
-- 表格/代码类样本应单独放入 `evals/dataset.jsonl`，避免被普通文本样本掩盖
+- 表格/代码类样本应以独立 `category` 放入人工复核的 Dev，避免被普通文本样本掩盖
 
 完整 RAGAS 评估设计见 `05_rag_ragas_evaluation_design.md`。结构化切分只负责提高上下文质量，最终是否收益要由 RAGAS 离线评估确认。
 

@@ -75,8 +75,8 @@
 | 响应时间 | 单次问答 ≤ 8 秒 |
 | 文档解析 | 100 页 PDF ≤ 30 秒完成向量化 |
 | 准确率 | 答案来源可追溯，不凭空捏造 |
-| RAGAS 评价 | 离线评估报告可复跑，dry-run 不依赖 LLM API，真实评估依赖评估模型和 Embedding |
-| 回归门槛 | `context_precision`、`context_recall`、`faithfulness`、`answer_correctness` 可量化对比 |
+| RAG 评价 | 七阶段真实检索与 RAGAS 报告可复跑，不输出模拟质量分 |
+| 回归门槛 | 最终 Recall/NDCG、Faithfulness、Answer Correctness、安全和 P95 延迟可量化对比 |
 
 ---
 
@@ -165,11 +165,11 @@ sources = [(doc.metadata["source"], doc.metadata["page"]) for doc in docs]
 - [ ] 提问超出文档范围时，系统拒绝回答而非编造
 - [ ] 多轮对话连续 5 轮，上下文理解正确
 - [ ] 删除文档后，相关问题不再从该文档中检索
-- [ ] `python -m evals.run --dry-run` 可生成评测报告
-- [ ] `python -m evals.run` 可输出 RAGAS 检索、语义和端到端指标
-- [ ] 发布前对比 `summary.json` 中 RAGAS 指标，确认候选策略不低于 baseline
+- [ ] `python -m evals.run --split dev --run-id candidate-v1` 可完成真实七阶段评测
+- [ ] 冻结 Test 至少有 200 条人工复核 Case，且 Train/Dev/Test 无问题泄漏
+- [ ] 发布前以同一 Test 和语料对比 Baseline，通过质量、安全和延迟门禁
 
-RAGAS 评估的详细设计见 `05_rag_ragas_evaluation_design.md`。当前 PRD 只定义评估目标和验收门槛，具体的数据字段、指标映射、dry-run/real-run 区别、生产落地方式均以该设计文档为准。
+详细设计见 `05_rag_ragas_evaluation_design.md`。当前 PRD 只定义评估目标和验收门槛，具体的数据字段、阶段指标与生产落地方式均以该设计文档为准。
 
 ---
 
@@ -181,7 +181,7 @@ RAGAS 评估的详细设计见 `05_rag_ragas_evaluation_design.md`。当前 PRD 
 4. `rag/chain.py` — RAG 链构建
 5. `evals/run.py` — RAGAS 离线评估入口
 6. `evals/ragas_adapter.py` — RAGAS 数据转换、指标选择和 evaluate 调用
-7. `evals/dataset.jsonl` — 初始人工 reference 样本
+7. `evals/datasets/` — 物理隔离并人工复核的 Train/Dev/Test
 8. `05_rag_ragas_evaluation_design.md` — RAGAS 评估体系设计
 9. `README.md` — 部署说明与使用截图
 10. `.env.example` — 环境变量模板

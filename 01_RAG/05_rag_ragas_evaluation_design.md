@@ -1,381 +1,155 @@
-# 05 RAGAS + IR 评估体系设计
+# 生产级 RAG 真实评测指南
 
-> 适用范围：`01_RAG` 离线评估体系  
-> 当前状态：RAGAS 评估生成和上下文质量，传统 IR 指标评估检索排序
+## 1. 原则
 
----
-# 传统IR
-## Recall@K
-定义： Top-K 中命中了多少个相关文档 / 总共有多少个相关文档
+评测只走真实生产链路：Elasticsearch BM25、Elasticsearch Dense、应用层 RRF、Cross-Encoder、业务特征融合、父块多样化、Token Budget、生成模型与 RAGAS Judge。
 
-与"相关文档总数"做对比，关注覆盖度
-例：金标有 2 个文档（manual.pdf, faq.pdf），Top-5 命中 1 个 → Recall@5 = 1/2 = 0.5
-诊断作用： 如果这个值低，说明 chunk 分割、检索策略或 query rewrite 有问题，生成层很难补救
-## MRR (Mean Reciprocal Rank)
-定义： 第一个相关文档在排序中位置倒数
+- 产品评测不提供模拟分数。
+- 每个 Case 只执行一次 RAG；检索指标和 RAGAS 使用同一次执行的结果。
+- 任一阶段缺失或降级，当前 Case 失败。
+- 失败运行保留 checkpoint，但不能生成正式报告。
+- 不把多项指标拼成一个“RAG 总分”。
 
-只关注第一个命中结果排在第几位
-公式：MRR = 1 / rank_of_first_hit（有命中）或 0（无命中）
-例：检索返回 [other.pdf, manual.pdf, ...]，第一个相关文档 manual.pdf 排在第 2 位 → MRR = 1/2 = 0.5
-诊断作用： 如果 MRR 低但 Hit@K 高，说明召回没问题但"排序"出问题了，需要检查 RRF 权重、Cross-Encoder rerank、时间排序
-## Hit@K
-定义： Top-K 中是否至少命中一个相关文档
-
-是一个布尔指标（0 或 1），仅关心"有没有"，不关心排第几
-例：Top-5 至少命中 1 个 → Hit@5 = 1.0
-诊断作用： 最简单的"死线"检查。如果 Hit@K 都低，说明召回链路出了大问题
-
-# RAGAS
-| 指标 | 评估维度 | 输入依赖 | 含义 | 
-|------|------|------|------|
-| context_precision	| 上下文质量	| question, retrieved_contexts, reference	| 检索到的上下文中，有多少内容是对回答有用的（去噪） |
-| context_recall	| 上下文质量	| question, retrieved_contexts, reference	| reference 中的事实，被检索上下文覆盖了多少 |
-| faithfulness	| 端到端	| question, retrieved_contexts, response	| 回答中的每个陈述，是否都能从检索上下文中找到支持 |
-| answer_correctness	| 端到端	| question, response, reference	| 最终答案相对 reference 的正确程度 |
-| answer_relevancy	| 语义	| question, response	| 回答是否贴合用户问题 |
-| semantic_similarity | 语义 |	response, reference	| 回答与 reference 的语义接近程度（Embedding 余弦）
-
-## 1. 设计目标
-
-RAG 评估的目标不是给系统贴一个“好/坏”的标签，而是让每次改动都能被复盘：
-
-- 改 chunk、parent-child、TopK、Dense/BM25 权重后，检索上下文是否更好
-- 改 prompt、模型、上下文格式后，回答是否更忠实、更正确
-- 时间类、跨页类、表格类问题是否被平均分掩盖
-- 发布前 candidate 策略是否不低于 baseline
-
-本项目此前有一套混合自定义评估：检索侧算 Recall、MRR、Parent Hit，生成侧算关键词覆盖和引用规则。生成侧规则实现简单，但有三个问题：
-
-- 指标偏工程规则，难判断“表达不同但语义正确”的答案
-- 检索和生成分数口径不统一，难做端到端对比
-- 自定义规则越来越多后维护成本上升，和社区评估方法脱节
-
-因此当前版本保留检索侧可解释 IR 指标，同时把生成侧和上下文质量交给 RAGAS：
-
-- `Recall@5`、`MRR`、`Hit@5`：基于人工标注的 `expected_parent_ids` 或 `expected_sources`，评估检索召回与排序。
-- RAGAS：基于 `question`、`reference`、`retrieved_contexts`、`response`，评估上下文质量、忠实度和答案正确性。
-
----
-
-## 2. 总体架构
+## 2. 数据集
 
 ```text
-evals/dataset.jsonl
-  │
-  │ load_dataset()
-  ▼
-case: id / category / query_type / question / reference / expected_sources
-  │
-  ├─ dry-run
-  │    ├─ _call_dry_run_retrieval()
-  │    ├─ _call_dry_run_generation()
-  │    └─ _dry_run_ragas_evaluator()
-  │
-  └─ real-run
-       ├─ rewrite_query(use_llm=False)
-       ├─ retrieve_with_hybrid()
-       ├─ create_chain_with_history()
-       └─ ragas.evaluate()
-
-  ▼
-build_ragas_row()
-  │
-  ├─ user_input
-  ├─ retrieved_contexts
-  ├─ response
-  └─ reference
-  │
-  ├─ build_retrieval_metric_fields()
-  │    ├─ Recall@5
-  │    ├─ MRR
-  │    └─ Hit@5
-  ▼
-ragas_results.jsonl
-summary.json
-REPORT.md
+evals/datasets/
+├── train.jsonl
+├── dev.jsonl
+├── test.jsonl
+└── manifest.json
 ```
 
-核心文件：
+- Train：构造规则、Prompt 和训练数据，只用于开发。
+- Dev：调参数、选方案。
+- Test：冻结发布门禁，不参与调参；至少 200 条人工复核 Case。
+- 三个 split 会检查重复 ID 和规范化问题文本，防止数据泄漏。
 
-| 文件 | 职责 |
-|------|------|
-| `evals/dataset.jsonl` | 人工 reference 评测集 |
-| `evals/run.py` | 离线评估入口，串联检索、生成、RAGAS、报告 |
-| `evals/ragas_adapter.py` | RAGAS 数据转换、指标选择、真实 evaluate 调用 |
-| `evals/retrieval_metrics.py` | 计算 Recall@K、MRR、Hit@K 等传统 IR 指标 |
-| `evals/report.py` | 汇总 RAGAS 与 IR 指标并生成 JSON/Markdown 报告 |
-| `tests/test_retrieval_evals.py` | 覆盖 RAGAS schema、IR 指标、dry-run 和报告生成 |
-
----
-
-## 3. 数据集设计
-
-每条样本一行 JSON。最小字段：
+每条 JSONL Case 的核心字段：
 
 ```json
 {
-  "id": "manual_langgraph",
+  "id": "warranty-001",
   "category": "precise",
   "query_type": "keyword",
-  "question": "LangGraph 开发手册里提到的状态图是什么？",
-  "reference": "LangGraph 的状态图用于把应用建模为节点和边组成的流程，节点处理状态，边决定执行路径。",
-  "expected_sources": ["LangGraph_开发手册.pdf"]
+  "question": "产品保修多久？",
+  "reference": "产品保修期为 12 个月。",
+  "expected_behavior": "answer",
+  "auth_context": {"tenant_id": "tenant-a", "principals": ["employee"]},
+  "qrels": [
+    {
+      "evidence_id": "warranty-policy",
+      "source": "manual.pdf",
+      "page_range": "3",
+      "section": "保修政策",
+      "evidence_text": "产品保修期为 12 个月",
+      "evidence_hash": "<规范化 evidence_text 的 SHA256>",
+      "grade": 3
+    }
+  ]
 }
 ```
 
-字段说明：
+`expected_behavior`：
 
-| 字段 | 必填 | 用途 |
-|------|------|------|
-| `id` | 是 | 样本唯一标识，报告和回归对比用它定位问题 |
-| `category` | 是 | 分组统计，例如 `conceptual`、`precise`、`time`、`cross_section` |
-| `question` | 是 | 用户问题或人工构造的回归问题 |
-| `reference` | 是 | RAGAS 对比用标准答案或标准事实陈述 |
-| `query_type` | 否 | 更细的题型标签，便于人工分析 |
-| `expected_parent_ids` | 否 | 检索金标，优先用于 parent 级 Recall@K / MRR / Hit@K |
-| `expected_sources` | 否 | 文档级检索金标，没有 parent 标注时用于 IR 指标 |
-| `expected_sections` | 否 | 章节级检索金标，没有 parent/source 标注时用于 IR 指标 |
+- `answer`：应基于证据作答；计算七阶段 IR 与 RAGAS。
+- `abstain`：知识库证据不足；计算拒答准确率。
+- `deny`：当前身份无权访问；计算安全拒绝准确率与权限泄漏。
 
-`reference` 的写法要遵守三个原则：
+qrels 以 `source + page_range + section + evidence_text/hash` 作为稳定锚点，不绑定会随 Chunk 策略变化的 `child_id`。Grade 0～3，Grade 2 以上视为有效答案证据。LLM 可以辅助起草，但 qrels 和 reference 必须人工复核。
 
-- 写事实，不写评分规则
-- 覆盖回答必须包含的关键信息
-- 不把无关措辞写得过死，否则 `semantic_similarity` 和 `answer_correctness` 会受影响
+## 3. 七阶段指标
 
-时间类样本也用自然语言 reference 表达期望：
+| 阶段 | K | 报告重点 |
+|---|---:|---|
+| BM25 Child | 50 | Recall@50 |
+| Dense Child | 50 | Recall@50 |
+| RRF Child | 80 | Recall@80、NDCG@80 |
+| Cross-Encoder Child | 15 | NDCG@15、MRR@15 |
+| Business Fused Child | 15 | NDCG@15 |
+| Diversified Parent | 8 | Recall@8、NDCG@8 |
+| Final Context Parent | 6 | Recall@6、NDCG@6、Hit@6 |
 
-```json
-{
-  "id": "invoice_latest",
-  "category": "time",
-  "query_type": "time_latest",
-  "question": "最新的发票是哪一张？",
-  "reference": "知识库中的发票应按文档日期比较，选择日期最大的发票，并说明来源。",
-  "expected_sources": ["珠海发票.pdf", "延庆发票.pdf", "新疆发票.pdf"]
-}
-```
+每个阶段实际都会保存 Recall/NDCG/MRR/Hit、候选数与覆盖证据数。同一证据被重叠 Chunk 多次命中只计算一次。
 
----
+- Recall 诊断召回损失。
+- NDCG/MRR 诊断排序质量。
+- Hit 是最低命中保障。
+- 最终上下文指标最接近生成模型真正看到的证据。
 
-## 4. RAGAS 输入映射
+## 4. 生成与安全指标
 
-`build_ragas_row()` 将项目内部对象转换为 RAGAS 单轮评估字段：
+`answer` Case 使用真实 RAGAS：
 
-| RAGAS 字段 | 来源 |
-|------------|------|
-| `user_input` | `case["question"]` |
-| `retrieved_contexts` | 检索返回的 `Document.page_content` 列表 |
-| `response` | RAG Chain 返回的 `answer` |
-| `reference` | `case["reference"]` |
+- Context Precision
+- Context Recall
+- Faithfulness
+- Answer Correctness
+- Answer Relevancy
+- Semantic Similarity
 
-同时保留调试字段：
+`abstain` 和 `deny` 不进入普通 Recall/NDCG 聚合。`deny` 的受限 qrels 若出现在任一返回 Candidate 或答案中，即记为权限泄漏；发布要求为 0。
 
-- `id`
-- `category`
-- `query_type`
-- `retrieved_sources`
-- `retrieved_parent_ids`
-- `retrieved_sections`
-
-这些字段不会送入 RAGAS 指标计算，但会写入 `ragas_results.jsonl`，用于 IR 指标计算和人工复盘。
-
----
-
-## 5. 指标选择
-
-当前默认指标：
-
-| 层级 | 指标 | 作用 |
-|------|------|------|
-| 检索排序 | `Recall@5` | Top-5 中召回了多少标注相关文档或 parent |
-| 检索排序 | `MRR` | 第一个相关结果排在多靠前 |
-| 检索排序 | `Hit@5` | Top-5 是否至少命中一个相关结果 |
-| 上下文质量 | `context_precision` | 检索上下文中有多少内容对回答有用 |
-| 上下文质量 | `context_recall` | reference 中的事实是否被上下文覆盖 |
-| 语义质量 | `answer_relevancy` | 回答是否贴合用户问题 |
-| 语义质量 | `semantic_similarity` | 回答与 reference 的语义接近程度 |
-| 端到端质量 | `faithfulness` | 回答是否能被检索上下文支撑 |
-| 端到端质量 | `answer_correctness` | 最终答案相对 reference 是否正确 |
-
-读数时不要只看平均分。推荐顺序：
-
-1. 先看 `Recall@5` 和 `Hit@5`：如果标注来源没进入 Top-5，生成层很难补救。
-2. 再看 `MRR`：如果相关结果排得太靠后，需要优化排序、权重或 rerank。
-3. 再看 `context_precision/context_recall`：判断送入 LLM 的上下文是否干净且完整。
-4. 最后看 `faithfulness/answer_correctness`：判断端到端答案是否忠实且正确。
-
----
-
-## 6. 运行模式
-
-### 6.1 dry-run
+## 5. 运行
 
 ```bash
-python -m evals.run --dry-run
+# 开发集真实评测
+python -m evals.run --split dev --run-id candidate-v1
+
+# 冻结 Test 对比 Baseline
+python -m evals.run --split test --run-id release-v1 \
+  --baseline-run evals/results/baseline-v1
 ```
 
-用途：
+启动前会检查：
 
-- 验证 JSONL 是否能加载
-- 验证 `reference` 等必填字段
-- 验证 RAGAS schema 转换
-- 验证传统 IR 指标计算和报告聚合
-- 验证 `ragas_results.jsonl`、`summary.json`、`REPORT.md` 能生成
+1. split、manifest、qrels 与人工复核状态。
+2. Elasticsearch 与读取别名。
+3. Parent Store。
+4. Embedding、Cross-Encoder、生成 LLM 和 RAGAS Judge。
+5. 七个生产阶段。
+6. dataset、corpus、index、Git 与配置指纹。
 
-dry-run 不访问向量库、不调用 LLM、不代表真实质量分。报告中的分数来自固定 fixture，只用于检查管道。
+空 split、未复核数据、缺少正式索引或模型不可用都会直接失败，不会用 fixture 填充分数。
 
-### 6.2 真实 RAGAS 评估
-
-```bash
-python -m evals.run
-```
-
-真实模式会调用当前 RAG 链路：
-
-```text
-question
-  → rewrite_query(use_llm=False)
-  → retrieve_with_hybrid()
-  → create_chain_with_history()
-  → ragas.evaluate()
-```
-
-前置条件：
-
-- 已安装 `ragas` 和 `datasets`
-- 当前环境可创建项目 LLM
-- 当前环境可创建项目 Embedding
-- 向量库和 parent docstore 已有可检索内容
-
----
-
-## 7. 输出设计
-
-每次运行输出到：
+## 6. 输出与 checkpoint
 
 ```text
 evals/results/<run_id>/
+├── run_manifest.json
+├── case_results.partial.jsonl
+├── failed_cases.jsonl
+├── case_results.jsonl
+├── stage_metrics.jsonl
 ├── ragas_results.jsonl
 ├── summary.json
 └── REPORT.md
 ```
 
-文件说明：
+每个成功 Case 都先 fsync 到 checkpoint。`--resume` 仅在数据、语料、索引、Git 与配置指纹一致时恢复。只有 `status=completed`、完成数与预期数一致、失败数为 0 且所有 answer Case 都有七阶段指标时，才能发布最后五个正式文件。
 
-| 文件 | 用途 |
-|------|------|
-| `ragas_results.jsonl` | 每条样本的输入、检索上下文来源、IR 指标和 RAGAS 指标 |
-| `summary.json` | 聚合指标，可用于 CI 门槛或脚本对比 |
-| `REPORT.md` | 面向人工复盘的 Markdown 报告 |
+报告按全局、split、category、query_type 和 expected_behavior 聚合；每项指标都有平均值、有效样本数和 95% bootstrap CI。
 
-`summary.json` 的结构按全局和 category 聚合：
+## 7. 发布门禁
 
-```json
-{
-  "total": 5,
-  "metrics": {
-    "context_precision": {"average": 0.82, "count": 5}
-  },
-  "retrieval_metrics": {
-    "retrieval_recall_at_5": {"average": 0.80, "count": 5},
-    "retrieval_mrr": {"average": 0.73, "count": 5},
-    "retrieval_hit_at_5": {"average": 1.00, "count": 5}
-  },
-  "by_category": {
-    "time": {
-      "total": 1,
-      "metrics": {
-        "answer_correctness": {"average": 0.76, "count": 1}
-      },
-      "retrieval_metrics": {
-        "retrieval_recall_at_5": {"average": 1.00, "count": 1}
-      }
-    }
-  }
-}
-```
+Candidate 与 Baseline 必须使用同一冻结数据集、同一语料和同一 Case：
 
----
+- 所有 Test Case 完成，且 Test 至少 200 条。
+- 权限泄漏为 0，不允许退化检索。
+- Final Context Recall@6、NDCG@6 回退不超过 0.02。
+- Faithfulness、Answer Correctness 回退不超过 0.02。
+- Abstain/Deny Accuracy 不回退。
+- 端到端 P95 延迟增长不超过 20%。
 
-## 8. 调参使用方法
+BM25、Dense、RRF、Cross-Encoder 等中间指标用于定位问题，不单独阻止发布；最终上下文、生成质量、安全和延迟负责门禁。
 
-推荐流程：
+## 8. 推荐工作流
 
-1. 跑 baseline：
+1. 从真实流量、点踩和故障中抽样问题。
+2. 人工标注 reference、行为类型与稳定 qrels。
+3. 先放 Train/Dev，禁止读取 Test 调参。
+4. 运行 Dev，查看相邻阶段 Recall/NDCG 的变化。
+5. 固定 Candidate 后运行 Test，与 Baseline 配对比较。
+6. 发布后持续记录 trace、引用、拒答、延迟和用户反馈，补充下一轮数据。
 
-   ```bash
-   python -m evals.run
-   ```
-
-2. 保存 `summary.json` 和 `REPORT.md`。
-3. 只改一个变量，例如：
-   - `SEMANTIC_WEIGHT`
-   - `SEMANTIC_TOP_K`
-   - `BM25_TOP_K`
-   - `FINAL_TOP_K`
-   - `PARENT_TARGET_TOKENS`
-   - `MAX_HYDRATED_PARENTS`
-4. 重新跑 `python -m evals.run`。
-5. 按全局、category、单样本三级对比。
-
-常见现象：
-
-| 现象 | 优先排查 |
-|------|----------|
-| `Recall@5` / `Hit@5` 低 | chunk 边界、TopK、BM25 召回、query rewrite、metadata filter |
-| `MRR` 低但 `Hit@5` 高 | 排序、RRF 权重、Cross-Encoder rerank、时间排序 |
-| `context_recall` 低 | chunk 边界、BM25 召回、TopK、query rewrite |
-| `context_precision` 低 | 噪声文档、排序、rerank、Dense/BM25 权重 |
-| `faithfulness` 低 | Prompt 约束、上下文格式、回答中混入模型常识 |
-| `answer_correctness` 低 | 检索漏信息、reference 不清晰、生成链路没用对上下文 |
-| 时间类样本低 | 日期 metadata、时间意图解析、过滤条件、日期排序 |
-
----
-
-## 9. 生产落地原则
-
-完整 RAGAS 评估应该离线做，不进入用户请求链路。
-
-原因：
-
-- 单个线上 query 通常没有 reference
-- RAGAS 会额外调用评估 LLM 和 Embedding，延迟高、成本高
-- 评估失败不应影响主链路可用性
-- 发布判断需要固定样本集，而不是单次请求的即时分数
-
-线上每次调用应记录低成本质量信号：
-
-- `query`
-- `rewritten_query`
-- `time_intent`
-- 命中的 `doc_id / parent_id / child_id`
-- rank、score、来源、页码、章节
-- 检索耗时、生成耗时、总耗时
-- answer、引用来源、是否拒答
-- 用户反馈：点赞、点踩、点击来源、追问
-
-这些日志用于抽样沉淀新 case：
-
-```text
-线上日志 / 用户反馈
-  → 选择高频、点踩、低分召回、错引来源问题
-  → 人工编写或修订 reference
-  → 加入 evals/dataset.jsonl
-  → 下次 RAGAS 离线回归
-```
-
----
-
-## 10. 验收标准
-
-- `python -m evals.run --dry-run` 能生成三类输出文件
-- `python -m evals.run` 能调用 RAGAS 真实指标
-- `tests/test_retrieval_evals.py` 覆盖：
-  - dataset 必填字段
-  - RAGAS row 构造
-  - Recall@K、MRR、Hit@K 指标计算
-  - RAGAS 输出列名归一化
-  - dry-run 报告生成
-  - RAGAS 与传统 IR 指标同时出现在报告中
-- 文档中不再要求使用 `--with-generation`、`--with-judge`
-- 文档中不再把关键词规则分作为当前项目评估输出
+测试中的 Fake 只验证公式、失败策略和文件契约，永远不能生成生产评测报告。

@@ -1211,38 +1211,33 @@ Dense/BM25 child 召回
 5. 时间意图问题
 6. 无答案拒答问题
 
-当前项目采用 RAGAS + 传统 IR 指标做离线评估。IR 指标回答“相关结果有没有召回、排得靠不靠前”，RAGAS 回答“上下文和最终答案质量如何”。指标分四层看：
+当前项目采用“七阶段 IR + RAGAS + 安全/延迟门禁”。一次真实生产执行同时记录：
 
-- **检索排序**
-  - `Recall@5`：Top-5 中召回了多少标注相关文档或 parent
-  - `MRR`：第一个相关结果排在多靠前
-  - `Hit@5`：Top-5 是否至少命中一个相关结果
-- **上下文质量**
-  - `context_precision`：检索上下文里有多少内容真的有助于回答
-  - `context_recall`：reference 里的关键信息是否被检索上下文覆盖
-- **语义质量**
-  - `answer_relevancy`：回答是否围绕用户问题
-  - `semantic_similarity`：回答和 reference 的语义相似度
-- **端到端质量**
-  - `faithfulness`：回答是否忠实于检索上下文，是否减少幻觉
-  - `answer_correctness`：最终答案相对 reference 是否正确
+- BM25 Child@50 和 Dense Child@50：重点看 Recall。
+- RRF Child@80：看 Recall 与 NDCG。
+- Cross-Encoder Child@15：看 NDCG 与 MRR。
+- 业务融合 Child@15：看 NDCG。
+- 多样化 Parent@8：看 Recall 与 NDCG。
+- 最终上下文 Parent@6：看 Recall、NDCG 与 Hit。
+- 生成层：看 Context Precision/Recall、Faithfulness、Answer Correctness、Answer Relevancy、Semantic Similarity。
+- 安全与行为：看 Abstain/Deny Accuracy、权限泄漏和 P95 延迟。
 
-当前项目提供 `evals/` RAGAS 离线评估入口：
-
-```bash
-python -m evals.run --dry-run          # 验证 RAGAS 数据格式和报告管道
-python -m evals.run                    # 真实 RAGAS 评估
-```
-
-调参时先看 `Recall@5/MRR/Hit@5` 判断召回和排序，再看 `context_precision/context_recall` 判断检索上下文，最后看 `faithfulness/answer_correctness` 判断最终回答。关键词覆盖率不再作为项目评估输出。
+Recall 诊断“有没有找回来”，NDCG/MRR 诊断“有没有排到前面”。最终上下文指标描述 LLM 实际看到的证据，负责发布门禁；中间阶段用于定位损失。项目不计算一个掩盖问题的 RAG 总分。
 
 完整设计文档见 `05_rag_ragas_evaluation_design.md`。教学时可以把 `LEARNING_GUIDE.md` 当作“怎么理解和使用”，把设计文档当作“为什么这么实现和如何维护”。
 
 ### 6.7 如何使用当前 RAGAS + IR 评估体系
 
-第一步，维护人工 reference 数据集。
+第一步，维护物理隔离的数据集：
 
-文件：`evals/dataset.jsonl`
+```text
+evals/datasets/train.jsonl
+evals/datasets/dev.jsonl
+evals/datasets/test.jsonl
+evals/datasets/manifest.json
+```
+
+Train 用于构造与训练，Dev 用于调参，冻结 Test 只用于最终发布门禁。系统会检查重复 ID 和跨 split 问题泄漏。
 
 每一行是一条 JSON 样本，最小格式如下：
 
@@ -1253,7 +1248,19 @@ python -m evals.run                    # 真实 RAGAS 评估
   "query_type": "keyword",
   "question": "LangGraph 开发手册里提到的状态图是什么？",
   "reference": "LangGraph 的状态图用于把应用建模为节点和边组成的流程，节点处理状态，边决定执行路径。",
-  "expected_sources": ["LangGraph_开发手册.pdf"]
+  "expected_behavior": "answer",
+  "auth_context": {},
+  "qrels": [
+    {
+      "evidence_id": "state-graph-definition",
+      "source": "LangGraph_开发手册.pdf",
+      "page_range": "3",
+      "section": "状态图",
+      "evidence_text": "状态图由节点和边组成",
+      "evidence_hash": "<规范化文本 SHA256>",
+      "grade": 3
+    }
+  ]
 }
 ```
 
@@ -1266,76 +1273,63 @@ python -m evals.run                    # 真实 RAGAS 评估
 | `query_type` | 更细的题型标签，用于后续分析 |
 | `question` | 用户真实问题或人工设计问题 |
 | `reference` | RAGAS 使用的标准答案或标准事实陈述，必填 |
-| `expected_parent_ids` | 可选检索金标，优先用于 parent 级 IR 指标 |
-| `expected_sources` | 可选检索金标，没有 parent 标注时用于文档级 IR 指标 |
-| `expected_sections` | 可选检索金标，没有 parent/source 标注时用于章节级 IR 指标 |
+| `expected_behavior` | `answer`、`abstain` 或 `deny` |
+| `auth_context` | 与生产检索一致的 tenant、principal、visibility 等权限上下文 |
+| `qrels` | 人工复核的稳定证据锚点与 0～3 相关等级 |
 
-`reference` 的质量会直接影响 RAGAS 分数。写 reference 时注意：
+`reference` 和 qrels 的质量会直接影响分数。标注时注意：
 
 - 写“应该答出的事实”，不要写“应该包含某关键词”
 - 不要把措辞限定得过死，允许模型用不同表达回答同一事实
 - 多事实问题要把关键事实都写进去，否则 `answer_correctness` 会误判
 - 无答案样本也要写清楚期望行为，例如“应说明当前知识库未找到相关信息”
 - 时间类问题要写清比较规则，例如“按文档日期选择日期最大的发票”
+- qrels 使用 `source + page_range + section + evidence_text/hash`，不要绑定会随 Chunk 策略变化的 ID
+- LLM 只能辅助起草 qrels，不能替代人工复核
 
-时间类问题也写成 reference，而不是写旧的时间打分字段：
-
-```json
-{
-  "id": "invoice_latest",
-  "category": "time",
-  "question": "最新的发票是哪一张？",
-  "reference": "知识库中的发票应按文档日期比较，选择日期最大的发票，并说明来源。",
-  "expected_sources": ["珠海发票.pdf", "延庆发票.pdf", "新疆发票.pdf"]
-}
-```
-
-第二步，先跑 dry-run。
+第二步，跑 Dev 真实评测。
 
 ```bash
-python -m evals.run --dry-run
-```
-
-dry-run 不访问向量库、不调用 LLM，只验证：
-
-- 数据集 JSONL 能被加载
-- RAGAS 必填字段合法
-- 可以生成 RAGAS schema 的样本行
-- 可以基于 `expected_parent_ids` 或 `expected_sources` 计算 IR 指标
-- `ragas_results.jsonl`、`summary.json`、`REPORT.md` 能生成
-
-如果 dry-run 失败，先修数据集或评测脚本，不要急着调检索参数。
-
-第三步，跑真实 RAGAS 评估。
-
-```bash
-python -m evals.run
+python -m evals.run --split dev --run-id candidate-v1
 ```
 
 这一步会走当前真实检索链路：
 
 ```text
 question
-  → rewrite_query(use_llm=False)
-  → retrieve_with_hybrid()
-  → create_chain_with_history()
-  → build_ragas_row(user_input, retrieved_contexts, response, reference)
-  → build_retrieval_metric_fields(expected_sources, retrieved_sources)
-  → ragas.evaluate()
+  → Query 标准化、实体/意图识别
+  → 权限与 Metadata Filter
+  → ES BM25@50 || ES Dense@50
+  → RRF@80
+  → Cross-Encoder@15
+  → 业务特征融合
+  → Parent 去重与 MMR@8
+  → Token Budget 最终上下文@6
+  → 一次生成并强制 [Sx] 引用
+  → 七阶段 IR + 真实 RAGAS
   → REPORT.md
 ```
 
 重点看 `REPORT.md` 里的：
 
-- `Recall@5`：Top-5 是否召回足够多的标注相关文档或 parent
-- `MRR`：第一个相关结果排在多靠前
-- `Hit@5`：Top-5 是否至少命中一个标注相关结果
+- BM25/Dense Recall：两路召回谁漏掉了证据
+- RRF Recall/NDCG：融合是否增加召回且保持合理排序
+- Cross-Encoder NDCG/MRR：正确证据是否被提前
+- Final Context Recall/NDCG/Hit：最终交给 LLM 的证据是否完整
 - `Context Precision`：检索内容是否噪声过多
 - `Context Recall`：reference 需要的信息是否被召回
 - `Faithfulness`：回答是否被上下文支撑
 - `Answer Correctness`：端到端答案是否正确
-- `Answer Relevancy`：回答是否贴合问题
-- `Semantic Similarity`：回答与 reference 的语义接近程度
+- 安全拒绝、权限泄漏和 P95 延迟：是否满足发布约束
+
+第三步，冻结 Candidate 后运行 Test：
+
+```bash
+python -m evals.run --split test --run-id release-v1 \
+  --baseline-run evals/results/baseline-v1
+```
+
+Test 至少 200 条且不能参与调参。数据未复核、split 为空、真实依赖不可用、阶段缺失或降级都会失败，不会生成模拟报告。
 
 第四步，阅读输出文件。
 
@@ -1343,18 +1337,21 @@ question
 
 ```text
 evals/results/<run_id>/
-├── ragas_results.jsonl   # 每条样本的 RAGAS 输入、IR 指标和 RAGAS 指标分
-├── summary.json          # IR 与 RAGAS 聚合指标，适合做自动门槛
-└── REPORT.md             # 人工复盘报告
+├── run_manifest.json
+├── case_results.jsonl
+├── stage_metrics.jsonl
+├── ragas_results.jsonl
+├── summary.json
+└── REPORT.md
 ```
 
 调参时的正确姿势：
 
 1. 先保存当前报告作为 baseline。
 2. 只改一个变量，例如 `SEMANTIC_WEIGHT` 或 `FINAL_TOP_K`。
-3. 重新跑 `python -m evals.run`。
+3. 重新跑 Dev 真实评测。
 4. 对比 `summary.json` 和分类指标。
-5. 如果总分变高但某类样本明显下降，要按 category 分析，不能只看平均分。
+5. 按 category 和单项指标分析，不能只看平均分。
 
 推荐对比顺序：
 
@@ -1369,8 +1366,8 @@ evals/results/<run_id>/
 
 | 现象 | 优先排查 |
 |------|----------|
-| `Recall@5` / `Hit@5` 低 | chunk 边界、BM25 召回、query rewrite、TopK、metadata filter |
-| `MRR` 低但 `Hit@5` 高 | RRF 权重、Dense/BM25 排序、rerank、时间排序 |
+| BM25/Dense Recall 低 | chunk 边界、query rewrite、TopK、metadata filter |
+| RRF Recall 高但 Cross-Encoder NDCG 低 | 融合已找到证据，rerank 排序仍需改进 |
 | `context_recall` 低 | chunk 边界、BM25 召回、query rewrite、TopK |
 | `context_precision` 低 | 噪声文档太多、排序弱、需要 rerank 或调权重 |
 | `faithfulness` 低 | prompt 约束弱、上下文格式差、回答补充了文档外信息 |
@@ -1382,8 +1379,8 @@ evals/results/<run_id>/
 
 | 指标组合 | 解释 |
 |----------|------|
-| `Hit@5` 低，`context_recall` 低 | 检索没有命中金标来源，先修召回 |
-| `Hit@5` 高，`MRR` 低 | 金标来源被召回但排得靠后，优先修排序或 rerank |
+| 最终 Hit@6 低，`context_recall` 低 | 最终上下文没有命中金标证据，先定位丢失阶段 |
+| RRF Recall 高，最终 Recall 低 | Rerank、多样化或 Token Budget 误删了证据 |
 | `context_recall` 低，`context_precision` 高 | 找到的内容干净但不全，优先扩大召回或修 chunk |
 | `context_recall` 高，`context_precision` 低 | 相关内容被召回了，但噪声太多，优先调排序或 rerank |
 | `faithfulness` 低，`answer_correctness` 高 | 答案可能碰巧正确，但没有被上下文支撑，生产上仍有风险 |
@@ -1392,7 +1389,7 @@ evals/results/<run_id>/
 
 教学时可以这样总结：
 
-> 我把 RAG 评估拆成两层：检索排序用 Recall@5、MRR、Hit@5 做可解释回归，生成和上下文质量用 RAGAS 看 context precision/recall、faithfulness、answer correctness 等指标。这样每次改 chunk、TopK、权重、rerank 或 prompt，都能用同一套 reference 数据集做可复跑对比，而不是靠人工感觉。
+> 我把 RAG 评估拆成七个真实检索阶段，逐阶段计算 Recall/NDCG/MRR/Hit，再用同一次最终上下文和答案跑 RAGAS。这样能定位证据在哪一步丢失，并用最终上下文、生成质量、安全和延迟做发布门禁。
 
 ### 6.8 生产级 RAG 测评怎么落地
 
@@ -1412,11 +1409,11 @@ A/B 灰度：验证新策略在线上真实用户中的收益和成本
 完整测评通常依赖：
 
 - 人工 reference 问答集
-- 人工标注的 `expected_sources` 或 `expected_parent_ids`
+- 人工复核的稳定证据 qrels
 - 当前检索链路返回的 `retrieved_contexts`
 - 当前生成链路返回的 `response`
 - RAGAS 评估 LLM 和 Embedding
-- `Recall@5`、`MRR`、`Hit@5` 等 IR 指标
+- 七阶段 `Recall@K`、`NDCG@K`、`MRR@K`、`Hit@K`
 - `context_precision`、`faithfulness`、`answer_correctness` 等语义指标
 
 这些都不适合放在用户请求链路里：
@@ -1438,10 +1435,8 @@ A/B 灰度：验证新策略在线上真实用户中的收益和成本
 在当前项目中，对应命令是：
 
 ```bash
-python -m evals.run
+python -m evals.run --split dev --run-id candidate-v1
 ```
-
-`--dry-run` 只验证评估管道，不代表真实质量分；真实发布前要跑不带 `--dry-run` 的完整离线评估。
 
 生产中推荐的运行频率：
 
@@ -1497,7 +1492,7 @@ python -m evals.run
 线上日志
   → 抽样高频问题 / 点踩问题 / 低分召回问题
   → 人工编写或修订 reference
-  → 加入 evals/dataset.jsonl
+  → 人工复核后加入 evals/datasets/train.jsonl 或 dev.jsonl
   → 下次离线评测成为回归样本
 ```
 
@@ -1744,9 +1739,9 @@ RAG 评估要同时看检索、语义和端到端答案质量。当前项目用�
 
 当前项目的 `evals/` 体系：
 
-- `evals/dataset.jsonl` 放人工 reference 样本
-- `python -m evals.run --dry-run` 验证数据格式、IR 指标和报告管道
-- `python -m evals.run` 调用真实检索、生成和 RAGAS 指标，输出 `ragas_results.jsonl`、`summary.json`、`REPORT.md`
+- `evals/datasets/{train,dev,test}.jsonl` 物理隔离人工复核样本
+- `python -m evals.run --split dev --run-id candidate-v1` 调用真实七阶段检索、生成和 RAGAS
+- `python -m evals.run --split test --run-id release-v1 --baseline-run evals/results/baseline-v1` 执行冻结发布门禁
 
 生产上我不会每次用户请求都跑完整评测。完整评测放在线下或发布前；线上实时记录 query、rewrite、命中文档、rank、score、引用、延迟、token 和用户反馈，用来做监控和抽样。
 

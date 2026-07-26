@@ -118,20 +118,21 @@
 - `list_documents()` 暴露 `parent_count` / `child_count`
 - `ParentChildHybridRetriever` 能聚合 child 并回填 parent
 - `format_docs_for_context()` 按 parent 文档展示 `page_range`
-- `tests/test_retrieval_evals.py` 覆盖 RAGAS 数据转换、dry-run 报告生成和旧自定义指标移除
+- `tests/test_stage_metrics.py` 覆盖七阶段 Recall/NDCG/MRR/Hit 公式
+- `tests/test_real_eval_runner.py` 覆盖真实单次执行和失败不发布
 - 原有 `tests/test_rag_pipeline.py` 全量非慢测试保持通过
 
 当前验收基线：
 
 - `pytest tests/ -q -m 'not slow'`
-- `python -m evals.run --dry-run`
-- 真实调参对比使用 `python -m evals.run`，并按 `05_rag_ragas_evaluation_design.md` 中的 RAGAS 指标解读结果
+- `python -m evals.run --split dev --run-id chunking-v2`
+- 按 `05_rag_ragas_evaluation_design.md` 对比各阶段和最终上下文指标
 
 ## 6. 后续建议
 
 下一阶段优先事项：
 
 1. 为 `section` 切分引入更强的标题层级识别
-2. 扩展 `evals/dataset.jsonl` 到 80-120 条，并按概念题、术语题、跨页题、时间题分组看 RAGAS 指标
+2. 人工扩展 Dev，并按概念题、术语题、跨页题、时间题分组看七阶段 IR 与 RAGAS
 3. 增加增量重建与内容哈希变更检测
 4. 视文档质量决定是否补充 OCR / 表格专项处理

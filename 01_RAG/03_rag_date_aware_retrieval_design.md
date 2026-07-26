@@ -231,8 +231,7 @@ HARD_FILTER_K_MULTIPLIER: int = 2
 推荐命令：
 
 ```bash
-python -m evals.run --dry-run
-python -m evals.run
+python -m evals.run --split dev --run-id date-aware-v1
 ```
 
 日期检索上线门槛建议：

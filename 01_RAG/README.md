@@ -211,25 +211,19 @@ pytest tests/ --cov=rag --cov=memory --cov=mcp --cov-report=term-missing
 ### 离线评估
 
 ```bash
-# 验证评估数据格式、报告生成和 dry-run 管道，不访问向量库或 LLM
-python -m evals.run --dry-run
+# 开发集：真实 ES、Embedding、Reranker、生成模型和 RAGAS Judge
+python -m evals.run --split dev --run-id candidate-v1
 
-# 真实评估：RAGAS 评估生成链路，传统 IR 指标评估检索排序
-python -m evals.run
-
-# 对比 ES hybrid baseline 与 Cross-Encoder rerank
-python -m evals.run --rerank-disabled --run-id baseline-es-hybrid
-python -m evals.run --rerank-enabled --run-id cross-encoder-rerank
+# 冻结测试集发布门禁（Test 至少 200 条人工复核 Case）
+python -m evals.run --split test --run-id release-v1 \
+  --baseline-run evals/results/baseline-v1
 ```
 
-评估结果写入 `evals/results/<run_id>/`，包含 `ragas_results.jsonl`、`summary.json` 和 `REPORT.md`。当前评估体系分两层：
+产品评测没有模拟分数入口。数据集未复核、split 为空、ES 索引未就绪、模型不可用、任一检索阶段缺失或发生降级时，命令会失败且不生成正式报告。
 
-- 检索排序：`Recall@5`、`MRR`、`Hit@5`，基于 `expected_parent_ids` 或 `expected_sources` 与实际召回结果计算
-- 检索上下文质量：`context_precision`、`context_recall`
-- 语义质量：`answer_relevancy`、`semantic_similarity`
-- 端到端质量：`faithfulness`、`answer_correctness`
+评估结果写入 `evals/results/<run_id>/`。同一次生产链路执行记录 BM25@50、Dense@50、RRF@80、Cross-Encoder@15、业务融合@15、父块多样化@8、最终上下文@6，并在各阶段计算 Recall/NDCG/MRR/Hit；最终证据与答案再进行真实 RAGAS 评测。报告包含 95% bootstrap CI、权限泄漏、拒答/拒绝准确率和 P95 延迟门禁，不计算“RAG 总分”。
 
-完整设计见 `05_rag_ragas_evaluation_design.md`，教学讲解见 `LEARNING_GUIDE.md` 的“如何使用当前 RAGAS + IR 评估体系”和“生产级 RAG 测评怎么落地”。
+数据位于 `evals/datasets/{train,dev,test}.jsonl`，三者物理隔离；qrels 必须人工复核。完整说明见 `05_rag_ragas_evaluation_design.md`。
 
 ---
 
