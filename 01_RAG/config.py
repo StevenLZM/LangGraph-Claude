@@ -112,8 +112,10 @@ class RAGConfig:
     CHUNK_OVERLAP: int = CHILD_OVERLAP_TOKENS
 
     # 检索参数
-    SEMANTIC_TOP_K: int = int(os.getenv("SEMANTIC_TOP_K", "6"))
-    BM25_TOP_K: int = int(os.getenv("BM25_TOP_K", "6"))
+    SEMANTIC_TOP_K: int = int(os.getenv("SEMANTIC_TOP_K", "50"))
+    BM25_TOP_K: int = int(os.getenv("BM25_TOP_K", "50"))
+    RRF_TOP_K: int = int(os.getenv("RRF_TOP_K", "80"))
+    RRF_K: int = int(os.getenv("RRF_K", "60"))
     FINAL_TOP_K: int = int(os.getenv("FINAL_TOP_K", "4"))
     SEMANTIC_WEIGHT: float = float(os.getenv("SEMANTIC_WEIGHT", "0.7"))
     SIMILARITY_THRESHOLD: float = float(os.getenv("SIMILARITY_THRESHOLD", "0.3"))
@@ -209,6 +211,36 @@ class MilvusConfig:
     }
 
 
+class ElasticsearchConfig:
+    URL: str = os.getenv("ES_URL", "http://127.0.0.1:9200")
+    PHYSICAL_INDEX: str = os.getenv(
+        "ES_PHYSICAL_INDEX",
+        "rag-child-chunks-v1",
+    )
+    READ_ALIAS: str = os.getenv(
+        "ES_INDEX_READ_ALIAS",
+        "rag-child-chunks-read",
+    )
+    WRITE_ALIAS: str = os.getenv(
+        "ES_INDEX_WRITE_ALIAS",
+        "rag-child-chunks-write",
+    )
+    NUMBER_OF_SHARDS: int = int(os.getenv("ES_NUMBER_OF_SHARDS", "1"))
+    NUMBER_OF_REPLICAS: int = int(os.getenv("ES_NUMBER_OF_REPLICAS", "0"))
+    VERIFY_CERTS: bool = os.getenv("ES_VERIFY_CERTS", "false").lower() == "true"
+    USERNAME: str = os.getenv("ES_USERNAME", "")
+    PASSWORD: str = os.getenv("ES_PASSWORD", "")
+    API_KEY: str = os.getenv("ES_API_KEY", "")
+    CA_CERTS: str = os.getenv("ES_CA_CERTS", "")
+    REQUEST_TIMEOUT: int = int(os.getenv("ES_REQUEST_TIMEOUT", "30"))
+    MAX_RETRIES: int = int(os.getenv("ES_MAX_RETRIES", "3"))
+    BULK_CHUNK_SIZE: int = int(os.getenv("ES_BULK_CHUNK_SIZE", "500"))
+    EMBEDDING_DIMS: int = int(os.getenv("ES_EMBEDDING_DIMS", "0"))
+    DENSE_NUM_CANDIDATES: int = int(
+        os.getenv("ES_DENSE_NUM_CANDIDATES", "300")
+    )
+
+
 class DocStoreConfig:
     DB_PATH: Path = PathConfig.DOCSTORE_DIR / f"parents_{RAGConfig.ACTIVE_INDEX_VERSION}.sqlite"
 
@@ -219,6 +251,7 @@ rag_config = RAGConfig()
 rerank_config = RerankConfig()
 path_config = PathConfig()
 milvus_config = MilvusConfig()
+elasticsearch_config = ElasticsearchConfig()
 docstore_config = DocStoreConfig()
 
 # 确保目录存在

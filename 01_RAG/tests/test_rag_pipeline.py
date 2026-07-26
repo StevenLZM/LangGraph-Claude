@@ -415,6 +415,10 @@ class TestConfig:
         assert RAGConfig.CHUNK_SIZE > 0
         assert RAGConfig.CHUNK_OVERLAP >= 0
         assert RAGConfig.CHUNK_OVERLAP < RAGConfig.CHUNK_SIZE
+        assert RAGConfig.SEMANTIC_TOP_K == 50
+        assert RAGConfig.BM25_TOP_K == 50
+        assert RAGConfig.RRF_TOP_K == 80
+        assert RAGConfig.RRF_K == 60
         assert 0 < RAGConfig.SEMANTIC_WEIGHT < 1
         assert 0 <= RAGConfig.SIMILARITY_THRESHOLD <= 1
 
@@ -427,63 +431,24 @@ class TestConfig:
         assert (tmp_path / "docs").exists()
         assert (tmp_path / "vs").exists()
 
-    def test_milvus_config_defaults_to_local_lite_file(self):
-        """Milvus 默认使用本地 Lite 文件"""
-        from config import MilvusConfig
+    def test_elasticsearch_config_matches_local_es_8_defaults(self):
+        from config import ElasticsearchConfig
 
-        assert MilvusConfig.COLLECTION_NAME == "rag_knowledge_base_v2_children"
-        assert MilvusConfig.URI.endswith("data/vectorstore/milvus.db")
+        assert ElasticsearchConfig.URL == "http://127.0.0.1:9200"
+        assert ElasticsearchConfig.PHYSICAL_INDEX == "rag-child-chunks-v1"
+        assert ElasticsearchConfig.READ_ALIAS == "rag-child-chunks-read"
+        assert ElasticsearchConfig.WRITE_ALIAS == "rag-child-chunks-write"
+        assert ElasticsearchConfig.NUMBER_OF_SHARDS == 1
+        assert ElasticsearchConfig.NUMBER_OF_REPLICAS == 0
+        assert ElasticsearchConfig.VERIFY_CERTS is False
 
-    def test_milvus_config_uses_existing_vectorstore_env_for_backwards_compat(self, monkeypatch):
-        """未设置 MILVUS_URI 时沿用 VECTORSTORE_DIR 作为 Milvus Lite 文件目录"""
-        import importlib
-        import config as cfg
+    def test_elasticsearch_config_has_production_auth_fields(self):
+        from config import ElasticsearchConfig
 
-        monkeypatch.delenv("RAG_MILVUS_URI", raising=False)
-        monkeypatch.setenv("VECTORSTORE_DIR", "data/custom_vectors")
-        monkeypatch.delenv("MILVUS_URI", raising=False)
-        reloaded = importlib.reload(cfg)
-
-        try:
-            assert reloaded.MilvusConfig.URI.endswith("data/custom_vectors/milvus.db")
-        finally:
-            monkeypatch.delenv("VECTORSTORE_DIR", raising=False)
-            importlib.reload(cfg)
-
-    def test_milvus_config_resolves_relative_uri_against_project_dir(self, monkeypatch):
-        """相对 RAG_MILVUS_URI 应固定解析到 01_RAG 项目目录下"""
-        import importlib
-        import config as cfg
-
-        monkeypatch.setenv("RAG_MILVUS_URI", "./data/custom_milvus.db")
-        monkeypatch.delenv("MILVUS_URI", raising=False)
-        reloaded = importlib.reload(cfg)
-
-        try:
-            assert reloaded.MilvusConfig.URI == str(
-                reloaded.BASE_DIR / "data/custom_milvus.db"
-            )
-        finally:
-            monkeypatch.delenv("RAG_MILVUS_URI", raising=False)
-            importlib.reload(cfg)
-
-    def test_legacy_milvus_uri_is_consumed_and_removed_from_environment(self, monkeypatch):
-        """旧 MILVUS_URI 可兼容读取，但不能继续暴露给 pymilvus 自动解析。"""
-        import importlib
-        import config as cfg
-
-        monkeypatch.delenv("RAG_MILVUS_URI", raising=False)
-        monkeypatch.setenv("MILVUS_URI", "./data/vectorstore/milvus.db")
-        reloaded = importlib.reload(cfg)
-
-        try:
-            assert reloaded.MilvusConfig.URI == str(
-                reloaded.BASE_DIR / "data/vectorstore/milvus.db"
-            )
-            assert "MILVUS_URI" not in os.environ
-        finally:
-            monkeypatch.delenv("MILVUS_URI", raising=False)
-            importlib.reload(cfg)
+        assert hasattr(ElasticsearchConfig, "USERNAME")
+        assert hasattr(ElasticsearchConfig, "PASSWORD")
+        assert hasattr(ElasticsearchConfig, "API_KEY")
+        assert hasattr(ElasticsearchConfig, "CA_CERTS")
 
 
 # ════════════════════════════════════════════════════════════════
