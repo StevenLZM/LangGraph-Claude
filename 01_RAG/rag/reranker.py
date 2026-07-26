@@ -47,6 +47,7 @@ def rerank_documents(
     *,
     enabled: bool | None = None,
     top_n: int | None = None,
+    score_threshold: float | None = None,
     scorer: ScoreFunction | None = None,
 ) -> list[Document]:
     """
@@ -56,10 +57,15 @@ def rerank_documents(
     byte-for-byte predictable unless RERANK_ENABLED=true.
     """
     active = rerank_config.ENABLED if enabled is None else enabled
-    if not active or len(docs) <= 1:
+    if not active or not docs:
         return docs
 
     limit = top_n if top_n is not None else rerank_config.TOP_N
+    threshold = (
+        rerank_config.SCORE_THRESHOLD
+        if score_threshold is None
+        else float(score_threshold)
+    )
     score_fn = scorer or _score_with_cross_encoder
     scores = list(score_fn(query, docs))
     if len(scores) != len(docs):
@@ -67,9 +73,15 @@ def rerank_documents(
 
     scored_docs: list[tuple[float, int, Document]] = []
     for index, (doc, score) in enumerate(zip(docs, scores)):
-        metadata = {**(doc.metadata or {}), "rerank_score": round(float(score), 4)}
+        numeric_score = float(score)
+        if numeric_score < threshold:
+            continue
+        metadata = {
+            **(doc.metadata or {}),
+            "rerank_score": round(numeric_score, 6),
+        }
         scored_docs.append((
-            float(score),
+            numeric_score,
             index,
             Document(page_content=doc.page_content, metadata=metadata),
         ))

@@ -13,7 +13,8 @@ def test_rerank_config_enabled_by_default_for_streamlit_app(monkeypatch):
     from config import RerankConfig
 
     assert RerankConfig.ENABLED is True
-    assert RerankConfig.TOP_N == 4
+    assert RerankConfig.TOP_N == 15
+    assert RerankConfig.SCORE_THRESHOLD == 0.0
     assert RerankConfig.MODEL
 
 
@@ -72,3 +73,37 @@ def test_rerank_documents_enabled_sorts_by_score_and_preserves_metadata(monkeypa
     assert [doc.page_content for doc in result] == ["best", "middle"]
     assert result[0].metadata["source"] == "best.pdf"
     assert result[0].metadata["rerank_score"] == 0.95
+
+
+def test_rerank_documents_filters_scores_below_configured_threshold(monkeypatch):
+    from rag import reranker
+
+    docs = [
+        Document(page_content="keep", metadata={"child_id": "keep"}),
+        Document(page_content="drop", metadata={"child_id": "drop"}),
+    ]
+    monkeypatch.setattr(reranker.rerank_config, "ENABLED", True)
+
+    result = reranker.rerank_documents(
+        "query",
+        docs,
+        top_n=15,
+        score_threshold=0.2,
+        scorer=lambda query, input_docs: [0.8, 0.1],
+    )
+
+    assert [doc.metadata["child_id"] for doc in result] == ["keep"]
+    assert result[0].metadata["rerank_score"] == 0.8
+
+
+def test_rerank_single_candidate_still_gets_real_score(monkeypatch):
+    from rag import reranker
+
+    monkeypatch.setattr(reranker.rerank_config, "ENABLED", True)
+    result = reranker.rerank_documents(
+        "query",
+        [Document(page_content="only", metadata={"child_id": "only"})],
+        scorer=lambda query, input_docs: [0.7],
+    )
+
+    assert result[0].metadata["rerank_score"] == 0.7
