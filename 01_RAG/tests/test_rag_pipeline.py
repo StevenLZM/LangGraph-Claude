@@ -429,8 +429,22 @@ class TestConfig:
         assert RAGConfig.BM25_TOP_K == 50
         assert RAGConfig.RRF_TOP_K == 80
         assert RAGConfig.RRF_K == 60
+        assert RAGConfig.RERANK_TOP_K == 15
+        assert RAGConfig.BUSINESS_FUSION_TOP_K == 15
+        assert RAGConfig.DIVERSIFIED_PARENT_TOP_K == 8
+        assert RAGConfig.FINAL_PARENT_TOP_K == 6
+        assert RAGConfig.MAX_PARENTS_PER_DOCUMENT == 2
+        assert RAGConfig.SIMILARITY_DEDUP_THRESHOLD == 0.92
+        assert RAGConfig.MMR_LAMBDA == 0.70
+        assert RAGConfig.FINAL_CONTEXT_TOKEN_BUDGET == 6000
+        assert sum(RAGConfig.BUSINESS_SCORE_WEIGHTS.values()) == pytest.approx(1.0)
         assert 0 < RAGConfig.SEMANTIC_WEIGHT < 1
         assert 0 <= RAGConfig.SIMILARITY_THRESHOLD <= 1
+
+        from config import RerankConfig
+
+        assert RerankConfig.TOP_N == 15
+        assert RerankConfig.SCORE_THRESHOLD == 0.0
 
     def test_path_config_dirs_created(self, tmp_path, monkeypatch):
         """PathConfig 应确保目录存在"""

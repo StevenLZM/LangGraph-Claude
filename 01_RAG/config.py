@@ -100,7 +100,40 @@ class RAGConfig:
     BM25_TOP_K: int = int(os.getenv("BM25_TOP_K", "50"))
     RRF_TOP_K: int = int(os.getenv("RRF_TOP_K", "80"))
     RRF_K: int = int(os.getenv("RRF_K", "60"))
-    FINAL_TOP_K: int = int(os.getenv("FINAL_TOP_K", "4"))
+    RERANK_TOP_K: int = int(os.getenv("RERANK_TOP_K", "15"))
+    BUSINESS_FUSION_TOP_K: int = int(
+        os.getenv("BUSINESS_FUSION_TOP_K", "15")
+    )
+    DIVERSIFIED_PARENT_TOP_K: int = int(
+        os.getenv("DIVERSIFIED_PARENT_TOP_K", "8")
+    )
+    FINAL_PARENT_TOP_K: int = int(os.getenv("FINAL_PARENT_TOP_K", "6"))
+    FINAL_TOP_K: int = int(
+        os.getenv("FINAL_TOP_K", str(FINAL_PARENT_TOP_K))
+    )
+    MAX_PARENTS_PER_DOCUMENT: int = int(
+        os.getenv("MAX_PARENTS_PER_DOCUMENT", "2")
+    )
+    SIMILARITY_DEDUP_THRESHOLD: float = float(
+        os.getenv("SIMILARITY_DEDUP_THRESHOLD", "0.92")
+    )
+    MMR_LAMBDA: float = float(os.getenv("MMR_LAMBDA", "0.70"))
+    FINAL_CONTEXT_TOKEN_BUDGET: int = int(
+        os.getenv("FINAL_CONTEXT_TOKEN_BUDGET", "6000")
+    )
+    MULTI_EVIDENCE_BONUS_PER_CHILD: float = float(
+        os.getenv("MULTI_EVIDENCE_BONUS_PER_CHILD", "0.02")
+    )
+    MULTI_EVIDENCE_BONUS_CAP: float = float(
+        os.getenv("MULTI_EVIDENCE_BONUS_CAP", "0.05")
+    )
+    BUSINESS_SCORE_WEIGHTS: dict[str, float] = {
+        "rerank": float(os.getenv("BUSINESS_RERANK_WEIGHT", "0.70")),
+        "rrf": float(os.getenv("BUSINESS_RRF_WEIGHT", "0.15")),
+        "authority": float(os.getenv("BUSINESS_AUTHORITY_WEIGHT", "0.07")),
+        "freshness": float(os.getenv("BUSINESS_FRESHNESS_WEIGHT", "0.05")),
+        "version": float(os.getenv("BUSINESS_VERSION_WEIGHT", "0.03")),
+    }
     SEMANTIC_WEIGHT: float = float(os.getenv("SEMANTIC_WEIGHT", "0.7"))
     SIMILARITY_THRESHOLD: float = float(os.getenv("SIMILARITY_THRESHOLD", "0.3"))
 
@@ -118,7 +151,10 @@ class RAGConfig:
 class RerankConfig:
     ENABLED: bool = os.getenv("RERANK_ENABLED", "true").lower() == "true"
     MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-base")
-    TOP_N: int = int(os.getenv("RERANK_TOP_N", "4"))
+    TOP_N: int = int(os.getenv("RERANK_TOP_N", "15"))
+    SCORE_THRESHOLD: float = float(
+        os.getenv("RERANK_SCORE_THRESHOLD", "0.0")
+    )
     BATCH_SIZE: int = int(os.getenv("RERANK_BATCH_SIZE", "16"))
     DEVICE: str = os.getenv("RERANK_DEVICE", "")
 
