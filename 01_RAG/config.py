@@ -15,22 +15,6 @@ from dotenv import load_dotenv
 # 加载 .env 文件（优先级低于系统环境变量）
 load_dotenv()
 
-
-def _consume_legacy_milvus_uri() -> str:
-    """
-    Backwards-compatible read for the old MILVUS_URI setting.
-
-    pymilvus also reads MILVUS_URI during import and expects a remote HTTP(S)
-    address there. This project uses local Milvus Lite file paths, so remove the
-    legacy variable after reading it and keep the project-specific value in
-    config only.
-    """
-    legacy_uri = os.environ.pop("MILVUS_URI", "")
-    return os.getenv("RAG_MILVUS_URI", legacy_uri)
-
-
-_RAW_MILVUS_URI = _consume_legacy_milvus_uri()
-
 # ── 项目根目录 ────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
 
@@ -152,65 +136,6 @@ class PathConfig:
         cls.DOCSTORE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _resolve_milvus_uri() -> str:
-    raw_uri = _RAW_MILVUS_URI
-    if not raw_uri:
-        return str(PathConfig.VECTORSTORE_DIR / "milvus.db")
-
-    if "://" in raw_uri:
-        return raw_uri
-
-    path = Path(raw_uri).expanduser()
-    if not path.is_absolute():
-        path = BASE_DIR / path
-    return str(path)
-
-
-# ── Milvus Lite 配置 ─────────────────────────────────────────────
-class MilvusConfig:
-    COLLECTION_NAME: str = f"rag_knowledge_base_{RAGConfig.ACTIVE_INDEX_VERSION}_children"
-    URI: str = _resolve_milvus_uri()
-    CONSISTENCY_LEVEL: str = os.getenv("MILVUS_CONSISTENCY_LEVEL", "Strong")
-    PRIMARY_FIELD: str = os.getenv("MILVUS_PRIMARY_FIELD", "pk")
-    TEXT_FIELD: str = os.getenv("MILVUS_TEXT_FIELD", "text")
-    VECTOR_FIELD: str = os.getenv("MILVUS_VECTOR_FIELD", "vector")
-    METADATA_FIELDS: tuple[str, ...] = (
-        "doc_id",
-        "source",
-        "file_path",
-        "page",
-        "total_pages",
-        "doc_version",
-        "chunk_role",
-        "parent_id",
-        "child_id",
-        "parent_index",
-        "child_index",
-        "chunk_index",
-        "section_index",
-        "section_path",
-        "heading_level",
-        "is_atomic",
-        "token_count",
-        "page_range",
-        "page_start",
-        "page_end",
-        "upload_date",
-        "doc_date_min",
-        "doc_date_max",
-        "has_doc_date",
-    )
-    INDEX_PARAMS: dict = {
-        "metric_type": "COSINE",
-        "index_type": "FLAT",
-        "params": {},
-    }
-    SEARCH_PARAMS: dict = {
-        "metric_type": "COSINE",
-        "params": {},
-    }
-
-
 class ElasticsearchConfig:
     URL: str = os.getenv("ES_URL", "http://127.0.0.1:9200")
     PHYSICAL_INDEX: str = os.getenv(
@@ -250,7 +175,6 @@ llm_config = LLMConfig()
 rag_config = RAGConfig()
 rerank_config = RerankConfig()
 path_config = PathConfig()
-milvus_config = MilvusConfig()
 elasticsearch_config = ElasticsearchConfig()
 docstore_config = DocStoreConfig()
 

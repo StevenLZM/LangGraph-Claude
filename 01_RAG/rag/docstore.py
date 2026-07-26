@@ -77,6 +77,32 @@ class ParentDocStore:
             cursor = conn.execute("DELETE FROM parent_chunks WHERE doc_id = ?", (doc_id,))
             return cursor.rowcount
 
+    def delete_document_version(self, doc_id: str, doc_version: str) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM parent_chunks
+                WHERE doc_id = ? AND doc_version = ?
+                """,
+                (doc_id, doc_version),
+            )
+            return cursor.rowcount
+
+    def delete_versions_except(
+        self,
+        doc_id: str,
+        active_doc_version: str,
+    ) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM parent_chunks
+                WHERE doc_id = ? AND doc_version != ?
+                """,
+                (doc_id, active_doc_version),
+            )
+            return cursor.rowcount
+
     def get_parents(self, parent_ids: Iterable[str]) -> Dict[str, Document]:
         parent_ids = list(dict.fromkeys(parent_ids))
         if not parent_ids:

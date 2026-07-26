@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 
+import pytest
 from langchain_core.documents import Document
 
 
@@ -37,6 +38,220 @@ def test_chunk_documents_returns_hierarchical_result():
     assert result.stats["total_children"] == len(result.children)
     assert all("parent_id" in child.metadata for child in result.children)
     assert all("doc_version" in parent.metadata for parent in result.parents)
+
+
+def test_parent_docstore_deletes_only_requested_document_version(tmp_path):
+    from rag.docstore import ParentDocStore
+
+    store = ParentDocStore(tmp_path / "parents.sqlite")
+    store.upsert_parents(
+        [
+            Document(
+                page_content="v1 parent",
+                metadata={
+                    "parent_id": "parent-v1",
+                    "doc_id": "doc-1",
+                    "doc_version": "v1",
+                    "source": "manual.pdf",
+                },
+            ),
+            Document(
+                page_content="v2 parent",
+                metadata={
+                    "parent_id": "parent-v2",
+                    "doc_id": "doc-1",
+                    "doc_version": "v2",
+                    "source": "manual.pdf",
+                },
+            ),
+        ]
+    )
+
+    assert store.delete_document_version("doc-1", "v2") == 1
+    assert set(store.get_parents(["parent-v1", "parent-v2"])) == {"parent-v1"}
+
+
+def test_parent_docstore_deletes_versions_except_active(tmp_path):
+    from rag.docstore import ParentDocStore
+
+    store = ParentDocStore(tmp_path / "parents.sqlite")
+    store.upsert_parents(
+        [
+            Document(
+                page_content=version,
+                metadata={
+                    "parent_id": f"parent-{version}",
+                    "doc_id": "doc-1",
+                    "doc_version": version,
+                },
+            )
+            for version in ("v1", "v2")
+        ]
+    )
+
+    assert store.delete_versions_except("doc-1", "v2") == 1
+    assert set(store.get_parents(["parent-v1", "parent-v2"])) == {"parent-v2"}
+
+
+def test_add_documents_activates_new_version_before_removing_old_parents(monkeypatch):
+    from rag.chunker import ChunkingResult
+    from rag.vectorstore import add_documents
+
+    calls = []
+
+    class FakeStore:
+        def bulk_stage_children(self, documents, vectors, ingest_run_id):
+            calls.append("bulk staging children")
+            assert len(documents) == len(vectors) == 1
+            return 1
+
+        def activate_version(self, doc_id, doc_version, ingest_run_id):
+            calls.append("activate new version")
+
+        def deactivate_other_versions(self, doc_id, active_doc_version):
+            calls.append("deactivate old versions")
+
+        def delete_ingest_run(self, ingest_run_id):
+            calls.append("cleanup staging")
+
+    class FakeDocStore:
+        def upsert_parents(self, parents):
+            calls.append("upsert parents")
+
+        def delete_versions_except(self, doc_id, active_doc_version):
+            calls.append("delete old parent versions")
+
+        def delete_document_version(self, doc_id, doc_version):
+            calls.append("delete new parent version")
+
+    class FakeEmbeddings:
+        pass
+
+    monkeypatch.setattr(
+        "rag.vectorstore.get_embeddings",
+        lambda: FakeEmbeddings(),
+    )
+    monkeypatch.setattr(
+        "rag.vectorstore.embed_with_retry",
+        lambda embeddings, texts: [[0.1, 0.2, 0.3] for _ in texts],
+    )
+    chunks = ChunkingResult(
+        parents=[
+            Document(
+                page_content="parent",
+                metadata={
+                    "doc_id": "doc-1",
+                    "doc_version": "v2",
+                    "parent_id": "parent-1",
+                },
+            )
+        ],
+        children=[
+            Document(
+                page_content="child",
+                metadata={
+                    "doc_id": "doc-1",
+                    "doc_version": "v2",
+                    "parent_id": "parent-1",
+                    "child_id": "child-1",
+                },
+            )
+        ],
+        stats={},
+    )
+
+    assert add_documents(
+        chunks,
+        "doc-1",
+        vectorstore=FakeStore(),
+        parent_docstore=FakeDocStore(),
+        ingest_run_id="run-1",
+    ) == 1
+    assert calls == [
+        "upsert parents",
+        "bulk staging children",
+        "activate new version",
+        "deactivate old versions",
+        "delete old parent versions",
+    ]
+
+
+def test_add_documents_cleans_only_new_version_when_bulk_fails(monkeypatch):
+    from rag.chunker import ChunkingResult
+    from rag.vectorstore import add_documents
+
+    calls = []
+
+    class FakeStore:
+        def bulk_stage_children(self, documents, vectors, ingest_run_id):
+            raise RuntimeError("bulk failed")
+
+        def activate_version(self, *args):
+            calls.append("activated")
+
+        def deactivate_other_versions(self, *args):
+            calls.append("deactivated old")
+
+        def delete_ingest_run(self, ingest_run_id):
+            calls.append(("cleanup staging", ingest_run_id))
+
+    class FakeDocStore:
+        def upsert_parents(self, parents):
+            calls.append("upsert parents")
+
+        def delete_document_version(self, doc_id, doc_version):
+            calls.append(("delete new parent version", doc_id, doc_version))
+
+        def delete_versions_except(self, *args):
+            calls.append("deleted old parents")
+
+    monkeypatch.setattr(
+        "rag.vectorstore.get_embeddings",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "rag.vectorstore.embed_with_retry",
+        lambda embeddings, texts: [[0.1, 0.2, 0.3]],
+    )
+    chunks = ChunkingResult(
+        parents=[
+            Document(
+                page_content="parent",
+                metadata={
+                    "doc_id": "doc-1",
+                    "doc_version": "v2",
+                    "parent_id": "parent-1",
+                },
+            )
+        ],
+        children=[
+            Document(
+                page_content="child",
+                metadata={
+                    "doc_id": "doc-1",
+                    "doc_version": "v2",
+                    "parent_id": "parent-1",
+                    "child_id": "child-1",
+                },
+            )
+        ],
+        stats={},
+    )
+
+    with pytest.raises(RuntimeError, match="bulk failed"):
+        add_documents(
+            chunks,
+            "doc-1",
+            vectorstore=FakeStore(),
+            parent_docstore=FakeDocStore(),
+            ingest_run_id="run-failed",
+        )
+
+    assert calls == [
+        "upsert parents",
+        ("cleanup staging", "run-failed"),
+        ("delete new parent version", "doc-1", "v2"),
+    ]
 
 
 def test_list_documents_includes_parent_and_child_counts():

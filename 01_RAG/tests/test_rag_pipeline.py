@@ -215,7 +215,7 @@ class TestVectorStore:
         import rag.vectorstore as vectorstore
 
         def fail_get_vectorstore():
-            raise RuntimeError("Open local milvus failed")
+            raise RuntimeError("Elasticsearch unavailable")
 
         monkeypatch.setattr(vectorstore, "get_vectorstore", fail_get_vectorstore)
 
@@ -223,44 +223,54 @@ class TestVectorStore:
 
         assert stats["total_children"] == 0
         assert stats["total_parents"] == 0
-        assert stats["backend"] == "milvus-lite"
-        assert "Open local milvus failed" in stats["error"]
+        assert stats["backend"] == "elasticsearch"
+        assert "Elasticsearch unavailable" in stats["error"]
 
-    def test_get_vectorstore_initializes_milvus_with_lite_uri(self, monkeypatch):
-        """get_vectorstore 应使用 Milvus Lite URI 初始化 LangChain Milvus"""
+    def test_get_vectorstore_initializes_elasticsearch_child_store(self, monkeypatch):
+        """get_vectorstore 应初始化 Elasticsearch Child Store"""
         import rag.vectorstore as vectorstore
 
-        captured = {}
-
-        class FakeMilvus:
-            def __init__(self, **kwargs):
-                captured.update(kwargs)
-
-        monkeypatch.setattr(vectorstore, "Milvus", FakeMilvus)
-        monkeypatch.setattr(vectorstore, "get_embeddings", lambda: "embeddings")
+        sentinel = object()
+        monkeypatch.setattr(
+            vectorstore,
+            "ElasticsearchChildStore",
+            lambda: sentinel,
+        )
         vectorstore._vectorstore_instance = None
 
-        vectorstore.get_vectorstore(reset=True)
+        assert vectorstore.get_vectorstore(reset=True) is sentinel
 
-        assert captured["embedding_function"] == "embeddings"
-        assert captured["collection_name"] == vectorstore.milvus_config.COLLECTION_NAME
-        assert captured["connection_args"] == {"uri": vectorstore.milvus_config.URI}
+    def test_delete_document_removes_es_children_before_parents(self):
+        from rag.vectorstore import delete_document
 
-    def test_milvus_filter_translation_supports_date_and_and_filters(self):
-        """Chroma 形态 metadata filter 应转换为 Milvus boolean expression"""
-        from rag.vectorstore import _to_milvus_filter
+        calls = []
 
-        assert _to_milvus_filter({"doc_id": "abc"}) == 'doc_id == "abc"'
-        assert _to_milvus_filter({"upload_date": {"$gte": 20240101, "$lte": 20241231}}) == (
-            "upload_date >= 20240101 and upload_date <= 20241231"
-        )
-        assert _to_milvus_filter({
-            "$and": [
-                {"has_doc_date": True},
-                {"doc_date_min": {"$lte": 20241231}},
-                {"doc_date_max": {"$gte": 20240101}},
-            ]
-        }) == "has_doc_date == true and doc_date_min <= 20241231 and doc_date_max >= 20240101"
+        class FakeStore:
+            def delete_document(self, doc_id):
+                calls.append(("children", doc_id))
+                return 3
+
+        class FakeParentStore:
+            def delete_document(self, doc_id):
+                calls.append(("parents", doc_id))
+                return 1
+
+        assert delete_document("doc-1", FakeStore(), FakeParentStore()) == 3
+        assert calls == [("children", "doc-1"), ("parents", "doc-1")]
+
+    def test_delete_document_keeps_parents_when_es_delete_fails(self):
+        from rag.vectorstore import delete_document
+
+        class FakeStore:
+            def delete_document(self, doc_id):
+                raise RuntimeError("ES delete failed")
+
+        class FakeParentStore:
+            def delete_document(self, doc_id):
+                raise AssertionError("parent delete must not run")
+
+        with pytest.raises(RuntimeError, match="ES delete failed"):
+            delete_document("doc-1", FakeStore(), FakeParentStore())
 
 
 class TestRerankIntegration:

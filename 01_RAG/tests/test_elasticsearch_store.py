@@ -212,3 +212,75 @@ def test_document_conversion_preserves_stable_identity_and_score():
     assert restored.metadata["child_id"] == "child-1"
     assert restored.metadata["retrieval_source"] == "bm25"
     assert restored.metadata["es_score"] == 4.2
+
+
+def test_storage_id_includes_document_version():
+    from rag.elasticsearch_store import build_storage_id
+
+    assert build_storage_id(
+        doc_id="doc-1",
+        doc_version="v2",
+        child_id="child-9",
+    ) == "doc-1:v2:child-9"
+    assert build_storage_id(
+        doc_id="doc-1",
+        doc_version="v3",
+        child_id="child-9",
+    ) != build_storage_id(
+        doc_id="doc-1",
+        doc_version="v2",
+        child_id="child-9",
+    )
+
+
+def test_bulk_stage_children_rejects_partial_bulk_failure():
+    from rag.elasticsearch_store import ElasticsearchChildStore
+
+    class FakeIndices:
+        def exists(self, *, index):
+            return True
+
+        def get_mapping(self, *, index):
+            return {
+                index: {
+                    "mappings": {
+                        "properties": {
+                            "embedding": {"type": "dense_vector", "dims": 3}
+                        }
+                    }
+                }
+            }
+
+        def update_aliases(self, *, body):
+            return {"acknowledged": True}
+
+    class FakeClient:
+        indices = FakeIndices()
+
+        def bulk(self, **kwargs):
+            return {
+                "errors": True,
+                "items": [
+                    {
+                        "index": {
+                            "_id": "doc-1:v1:child-1",
+                            "status": 400,
+                            "error": {"reason": "mapping rejected"},
+                        }
+                    }
+                ],
+            }
+
+    child = Document(
+        page_content="child",
+        metadata={
+            "doc_id": "doc-1",
+            "doc_version": "v1",
+            "parent_id": "parent-1",
+            "child_id": "child-1",
+        },
+    )
+    store = ElasticsearchChildStore(client=FakeClient(), config=_config())
+
+    with pytest.raises(RuntimeError, match="mapping rejected"):
+        store.bulk_stage_children([child], [[0.1, 0.2, 0.3]], "run-1")

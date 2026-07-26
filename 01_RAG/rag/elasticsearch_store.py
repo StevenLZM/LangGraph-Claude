@@ -175,6 +175,246 @@ class ElasticsearchChildStore:
                 f"configured={configured}, actual={vector_dims}"
             )
 
+    def bulk_stage_children(
+        self,
+        documents: Sequence[Document],
+        vectors: Sequence[Sequence[float]],
+        ingest_run_id: str,
+    ) -> int:
+        if len(documents) != len(vectors):
+            raise ValueError("Child 数量与向量数量不一致")
+        if not documents:
+            return 0
+        vector_dims = len(vectors[0])
+        if any(len(vector) != vector_dims for vector in vectors):
+            raise ValueError("同一批次的向量维度不一致")
+        self.ensure_index(vector_dims)
+
+        operations: list[dict[str, Any]] = []
+        for document, vector in zip(documents, vectors):
+            metadata = document.metadata or {}
+            storage_id = build_storage_id(
+                doc_id=metadata.get("doc_id"),
+                doc_version=metadata.get("doc_version"),
+                child_id=metadata.get("child_id"),
+            )
+            source = document_to_source(
+                document,
+                vector,
+                storage_id=storage_id,
+                status="staging",
+                ingest_run_id=ingest_run_id,
+            )
+            operations.extend(
+                [
+                    {
+                        "index": {
+                            "_index": self.config.WRITE_ALIAS,
+                            "_id": storage_id,
+                        }
+                    },
+                    source,
+                ]
+            )
+
+        response = self.client.bulk(
+            operations=operations,
+            refresh="wait_for",
+        )
+        if response.get("errors"):
+            errors = []
+            for item in response.get("items", []):
+                operation = next(iter(item.values()), {})
+                if operation.get("error"):
+                    reason = operation["error"].get(
+                        "reason",
+                        str(operation["error"]),
+                    )
+                    errors.append(
+                        f"{operation.get('_id', 'unknown')}: {reason}"
+                    )
+            raise RuntimeError(
+                "Elasticsearch Bulk 存在失败项: " + "; ".join(errors)
+            )
+        return len(documents)
+
+    def activate_version(
+        self,
+        doc_id: str,
+        doc_version: str,
+        ingest_run_id: str,
+    ) -> int:
+        response = self.client.update_by_query(
+            index=self.config.PHYSICAL_INDEX,
+            query={
+                "bool": {
+                    "filter": [
+                        {"term": {"doc_id": doc_id}},
+                        {"term": {"doc_version": doc_version}},
+                        {"term": {"ingest_run_id": ingest_run_id}},
+                        {"term": {"status": "staging"}},
+                    ]
+                }
+            },
+            script={"source": "ctx._source.status = 'active'"},
+            refresh=True,
+            conflicts="proceed",
+        )
+        return int(response.get("updated", 0))
+
+    def deactivate_other_versions(
+        self,
+        doc_id: str,
+        active_doc_version: str,
+    ) -> int:
+        response = self.client.update_by_query(
+            index=self.config.PHYSICAL_INDEX,
+            query={
+                "bool": {
+                    "filter": [
+                        {"term": {"doc_id": doc_id}},
+                        {"term": {"status": "active"}},
+                    ],
+                    "must_not": [
+                        {"term": {"doc_version": active_doc_version}},
+                    ],
+                }
+            },
+            script={"source": "ctx._source.status = 'inactive'"},
+            refresh=True,
+            conflicts="proceed",
+        )
+        return int(response.get("updated", 0))
+
+    def delete_ingest_run(self, ingest_run_id: str) -> int:
+        response = self.client.delete_by_query(
+            index=self.config.PHYSICAL_INDEX,
+            query={
+                "bool": {
+                    "filter": [
+                        {"term": {"ingest_run_id": ingest_run_id}},
+                        {"term": {"status": "staging"}},
+                    ]
+                }
+            },
+            refresh=True,
+            conflicts="proceed",
+        )
+        return int(response.get("deleted", 0))
+
+    def delete_document(self, doc_id: str) -> int:
+        response = self.client.delete_by_query(
+            index=self.config.PHYSICAL_INDEX,
+            query={"term": {"doc_id": doc_id}},
+            refresh=True,
+            conflicts="proceed",
+        )
+        return int(response.get("deleted", 0))
+
+    def delete_document_version(self, doc_id: str, doc_version: str) -> int:
+        response = self.client.delete_by_query(
+            index=self.config.PHYSICAL_INDEX,
+            query={
+                "bool": {
+                    "filter": [
+                        {"term": {"doc_id": doc_id}},
+                        {"term": {"doc_version": doc_version}},
+                    ]
+                }
+            },
+            refresh=True,
+            conflicts="proceed",
+        )
+        return int(response.get("deleted", 0))
+
+    def reactivate_other_versions(
+        self,
+        doc_id: str,
+        excluded_doc_version: str,
+    ) -> int:
+        response = self.client.update_by_query(
+            index=self.config.PHYSICAL_INDEX,
+            query={
+                "bool": {
+                    "filter": [
+                        {"term": {"doc_id": doc_id}},
+                        {"term": {"status": "inactive"}},
+                    ],
+                    "must_not": [
+                        {"term": {"doc_version": excluded_doc_version}},
+                    ],
+                }
+            },
+            script={"source": "ctx._source.status = 'active'"},
+            refresh=True,
+            conflicts="proceed",
+        )
+        return int(response.get("updated", 0))
+
+    def count_children(self, *, status: str = "active") -> int:
+        response = self.client.count(
+            index=self.config.READ_ALIAS,
+            query={"term": {"status": status}},
+        )
+        return int(response.get("count", 0))
+
+    def aggregate_documents(self) -> list[dict[str, Any]]:
+        response = self.client.search(
+            index=self.config.READ_ALIAS,
+            size=0,
+            query={"term": {"status": "active"}},
+            aggs={
+                "documents": {
+                    "terms": {"field": "doc_id", "size": 10_000},
+                    "aggs": {
+                        "sample": {
+                            "top_hits": {
+                                "size": 1,
+                                "_source": [
+                                    "source",
+                                    "doc_version",
+                                    "page_number",
+                                ],
+                            }
+                        }
+                    },
+                }
+            },
+        )
+        documents: list[dict[str, Any]] = []
+        for bucket in (
+            response.get("aggregations", {})
+            .get("documents", {})
+            .get("buckets", [])
+        ):
+            hits = bucket.get("sample", {}).get("hits", {}).get("hits", [])
+            source = dict(hits[0].get("_source") or {}) if hits else {}
+            documents.append(
+                {
+                    "doc_id": str(bucket.get("key", "")),
+                    "source": source.get("source", "未知"),
+                    "doc_version": source.get("doc_version", ""),
+                    "child_count": int(bucket.get("doc_count", 0)),
+                    "total_chunks": int(bucket.get("doc_count", 0)),
+                    "total_pages": 0,
+                    "parent_count": 0,
+                    "pages": [],
+                }
+            )
+        return documents
+
+
+def build_storage_id(
+    *,
+    doc_id: Any,
+    doc_version: Any,
+    child_id: Any,
+) -> str:
+    values = [str(value or "").strip() for value in (doc_id, doc_version, child_id)]
+    if not all(values):
+        raise ValueError("storage_id 需要非空 doc_id、doc_version 和 child_id")
+    return ":".join(values)
+
 
 def build_es_filters(metadata_filter: Mapping[str, Any] | None) -> list[dict]:
     if not metadata_filter:
