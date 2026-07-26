@@ -264,7 +264,8 @@ AND 文档类型、标签、时间、版本等业务 Filter
 
 | 类别 | 字段 | ES 类型及用途 |
 |---|---|---|
-| 标识 | `child_id` | `keyword`，同时作为 `_id` |
+| 标识 | `storage_id` | ES `_id`，格式为 `doc_id:doc_version:child_id` |
+| 标识 | `child_id` | `keyword`，作为 RRF 的逻辑融合身份 |
 | 标识 | `parent_id`、`doc_id` | `keyword`，聚合、删除和 Parent Hydration |
 | 内容 | `content` | `text`，BM25 |
 | 向量 | `embedding` | `dense_vector`，cosine + HNSW |
@@ -288,7 +289,27 @@ Mapping 应明确声明向量维度，并在应用启动或索引初始化时校
 
 不允许维度错误到第一次用户查询时才暴露。
 
-### 10.3 中文 analyzer
+### 10.3 为什么 ES `_id` 不能直接等于逻辑 `child_id`
+
+当前 `child_id` 基于 Child 内容生成。同一段未变化的内容可能同时出现在文档的新旧版本中。如果直接使用 `child_id` 作为 ES `_id`：
+
+1. 写入 staging 新版本时会覆盖旧版本中仍 active 的同一 Child。
+2. 新版本写入失败后清理 staging 数据，可能把旧版本的有效 Child 一并删除。
+3. “新版本先校验、再激活、最后删除旧版本”的无损切换无法成立。
+
+因此需要分离两个身份：
+
+```text
+逻辑检索身份 child_id
+  → 用于 BM25/Dense 结果匹配、RRF 和引用
+
+物理存储身份 storage_id = doc_id:doc_version:child_id
+  → 用作 ES _id，允许新旧版本在切换期间短暂共存
+```
+
+同一文档版本重试时 `storage_id` 不变，仍然保持幂等；不同版本不会互相覆盖。
+
+### 10.4 中文 analyzer
 
 本地 ES 没有安装额外插件。第一阶段使用 ES 内置 `cjk` analyzer，保证无需改变用户安装。
 
@@ -300,7 +321,7 @@ Mapping 应明确声明向量维度，并在应用启动或索引初始化时校
 
 更复杂的分词器不天然代表效果更好；插件版本兼容、升级和词典发布也会增加运维成本。
 
-### 10.4 本地与生产索引参数
+### 10.5 本地与生产索引参数
 
 本地默认：
 
@@ -530,7 +551,7 @@ ES Bulk 写入 status=staging 的 Child
 
 关键规则：
 
-- `child_id` 作为 ES `_id`，重试时覆盖而不是重复创建。
+- `storage_id=doc_id:doc_version:child_id` 作为 ES `_id`；同一版本重试时覆盖而不是重复创建，不同版本可以在切换期间共存。
 - 查询只读取 `status=active`。
 - Bulk API 的 HTTP 成功不代表每个 Item 都成功，必须逐项检查错误。
 - 部分失败时删除本次 `ingest_run_id` 的 staging 数据。
