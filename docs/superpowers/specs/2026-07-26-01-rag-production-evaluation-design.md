@@ -73,8 +73,9 @@ rank
 child_id / parent_id / doc_id
 source / page_range / section
 score / score_type
-matched_evidence_ids
 ```
+
+`matched_evidence_ids` 由离线 `QrelsResolver` 计算，不写入生产 Trace，避免生产链路依赖评测金标。
 
 七个正式阶段：
 
@@ -127,6 +128,10 @@ Query 标准化、实体识别、意图识别和权限 Filter 记录为 Trace Me
   "question": "产品保修期多久？",
   "reference": "产品保修期为 12 个月。",
   "expected_behavior": "answer",
+  "auth_context": {
+    "tenant_id": "tenant-1",
+    "principals": ["role:employee"]
+  },
   "qrels": [
     {
       "evidence_id": "warranty-policy",
@@ -146,6 +151,8 @@ Query 标准化、实体识别、意图识别和权限 Filter 记录为 Trace Me
 - `answer`：应基于证据回答。
 - `abstain`：知识库没有足够证据，应拒答。
 - `deny`：用户没有权限，应拒绝访问。
+
+`answer` Case 计算分阶段 IR 与 RAGAS；`abstain` 计算拒答正确率；`deny` 使用受限证据 qrels 计算权限泄漏率和拒绝正确率。后两类不参与普通 Recall/NDCG 聚合。
 
 相关等级：
 
