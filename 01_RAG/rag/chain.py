@@ -1,31 +1,57 @@
-"""
-rag/chain.py — RAG Chain 构建（LCEL）
-支持：DeepSeek > DashScope (千问) > Anthropic > OpenAI
-流程：问题改写 → 混合检索 → 上下文构建 → LLM 生成
-"""
+"""One-pass RAG execution with seven-stage retrieval and evidence citations."""
+
 from __future__ import annotations
-from langchain_core.runnables import RunnablePassthrough, RunnableLambda
+
+import re
+from dataclasses import dataclass
+from time import perf_counter
+from typing import Any, Sequence
+
+from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.documents import Document
+from langchain_core.runnables import RunnableLambda
 
-from config import DEEPSEEK_BASE_URL, DASHSCOPE_BASE_URL, llm_config, rag_config
+from config import DASHSCOPE_BASE_URL, DEEPSEEK_BASE_URL, llm_config
+from rag.context_assembler import render_evidence_block
 from rag.query_rewriter import rewrite_query
-from rag.reranker import rerank_documents
-from rag.retriever import get_hybrid_retriever, retrieve_with_hybrid
-from rag.vectorstore import get_vectorstore, similarity_search_with_threshold
+from rag.retrieval_trace import EvaluationTrace
+from rag.retriever import retrieve_with_trace
 
 
-# ────────────────────────────────────────────────────────────────
-# LLM 工厂（优先 DeepSeek）
-# ────────────────────────────────────────────────────────────────
+EVIDENCE_INSUFFICIENT_ANSWER = "根据当前知识库，未找到该问题的相关信息。"
+INVALID_CITATION_SAFE_ANSWER = (
+    "根据当前知识库，无法生成带有有效证据引用的可靠回答。"
+)
+
+SYSTEM_PROMPT = """你是专业的企业知识库问答助手。
+
+规则：
+1. 只能依据“检索到的证据”回答，不得补充证据外的业务事实。
+2. 每个事实性结论必须在句末引用一个或多个证据编号，例如 [S1] 或 [S1][S2]。
+3. 只能引用实际提供的 [Sx]，不得编造引用。
+4. 证据不足时回答：「根据当前知识库，未找到该问题的相关信息。」
+5. 回答末尾列出实际使用的来源，格式为“来源：[S1] 文档名，第 X 页”。
+
+检索到的证据：
+{context}"""
+
+
+@dataclass(frozen=True)
+class RagExecution:
+    answer: str
+    source_documents: tuple[Document, ...]
+    trace: EvaluationTrace
+    generation_latency_ms: float
+
+
 def _get_llm(model_name: str | None = None):
-    """获取对话 LLM，按 DeepSeek > DashScope > Anthropic > OpenAI 优先级"""
+    """Get the configured chat model in project priority order."""
     provider = llm_config.provider()
     model = model_name or llm_config.CHAT_MODEL
-
     if provider == "deepseek":
         from langchain_openai import ChatOpenAI
+
         return ChatOpenAI(
             model=model,
             temperature=0.3,
@@ -33,8 +59,9 @@ def _get_llm(model_name: str | None = None):
             base_url=DEEPSEEK_BASE_URL,
             max_retries=3,
         )
-    elif provider == "dashscope":
+    if provider == "dashscope":
         from langchain_openai import ChatOpenAI
+
         return ChatOpenAI(
             model=model,
             temperature=0.3,
@@ -42,187 +69,176 @@ def _get_llm(model_name: str | None = None):
             openai_api_base=DASHSCOPE_BASE_URL,
             max_retries=3,
         )
-    elif provider == "anthropic":
+    if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
+
         return ChatAnthropic(
             model=model,
             temperature=0.3,
             api_key=llm_config.ANTHROPIC_API_KEY,
         )
-    elif provider == "openai":
+    if provider == "openai":
         from langchain_openai import ChatOpenAI
+
         return ChatOpenAI(
             model=model,
             temperature=0.3,
             api_key=llm_config.OPENAI_API_KEY,
         )
-    else:
-        raise EnvironmentError(
-            "未配置可用的 API Key，请在 .env 中设置 DEEPSEEK_API_KEY"
-        )
+    raise EnvironmentError(
+        "未配置可用的 API Key，请在 .env 中设置 DEEPSEEK_API_KEY"
+    )
 
 
 def _get_rewrite_llm():
-    """问题改写用轻量模型（省 Token 成本）"""
     return _get_llm(llm_config.REWRITE_MODEL)
 
 
-# ────────────────────────────────────────────────────────────────
-# Prompt 模板
-# ────────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """你是一个专业的企业知识库问答助手。
-
-【行为准则】
-1. 严格基于提供的"检索到的文档内容"回答问题
-2. 如果文档中没有相关信息，明确告知：「根据当前知识库，未找到该问题的相关信息」
-3. 回答时引用来源，在相关句子后标注 [来源: 文档名, 第X页]
-4. 保持专业、简洁，避免直接复述文档原文
-5. 支持追问，理解对话中的代词指代
-
-【禁止行为】
-- 不补充文档未提及的通用知识
-- 不猜测或推断文档中未明确说明的内容
-- 不编造数据或参考来源
-
-检索到的文档内容：
-{context}"""
-
-REWRITE_PROMPT = """将对话中的最新用户问题改写为独立完整的问题。
-
-规则：
-1. 将代词还原为具体名词（"它" → 实际名称）
-2. 保留原问题意图，不增删信息
-3. 若问题已独立完整，直接返回原问题
-
-对话历史：
-{chat_history}
-
-最新问题：{question}
-
-独立问题（仅输出问题，不加其他文字）："""
-
-
-# ────────────────────────────────────────────────────────────────
-# 工具函数
-# ────────────────────────────────────────────────────────────────
-def format_docs_for_context(docs: list[Document]) -> str:
-    """格式化检索结果为 LLM Context"""
+def format_docs_for_context(docs: Sequence[Document]) -> str:
     if not docs:
         return "（无相关文档内容）"
-
-    parts = []
-    for i, doc in enumerate(docs, 1):
-        source = doc.metadata.get("source", "未知")
-        page = doc.metadata.get("page_range") or doc.metadata.get("page", "?")
-        section = doc.metadata.get("section_path")
-        score = doc.metadata.get("best_child_score", doc.metadata.get("similarity_score", ""))
-        score_str = f" | 分数: {score}" if score else ""
-        section_str = f" | 章节: {section}" if section else ""
-        parts.append(
-            f"【文档{i} | 来源: {source} | 第{page}页{section_str}{score_str}】\n"
-            f"{doc.page_content}"
-        )
-
-    return ("\n\n" + "─" * 40 + "\n\n").join(parts)
-
-
-# ────────────────────────────────────────────────────────────────
-# Chain 构建
-# ────────────────────────────────────────────────────────────────
-def create_rag_chain():
-    """构建完整 RAG LCEL Chain（问题改写 + 时间意图识别 → 检索 → 生成）"""
-    llm = _get_llm()
-    vs = get_vectorstore()
-    hybrid_retriever = get_hybrid_retriever()
-
-    # Step 1: 问题改写 + 时间意图识别（合并为一次 LLM 调用）
-    def rewrite_with_intent(input_dict: dict) -> dict:
-        history_msgs = input_dict.get("chat_history") or []
-        # 把 messages 简单序列化为文本喂给 rewriter
-        if history_msgs:
-            try:
-                history_text = "\n".join(
-                    f"{getattr(m, 'type', 'msg')}: {getattr(m, 'content', '')}"
-                    for m in history_msgs
-                )
-            except Exception:
-                history_text = str(history_msgs)
-        else:
-            history_text = ""
-
-        result = rewrite_query(
-            question=input_dict["question"],
-            chat_history=history_text,
-        )
-        return result  # {"rewritten_query": ..., "time_intent": {...}}
-
-    # Step 2: 检索函数
-    def retrieve_docs(input_dict: dict) -> list[Document]:
-        rewrite = input_dict.get("rewrite_result") or {}
-        q = rewrite.get("rewritten_query") or input_dict.get("question", "")
-        time_intent = rewrite.get("time_intent")
-        if not q:
-            return []
-        if hybrid_retriever is not None:
-            return retrieve_with_hybrid(
-                query=q,
-                top_k=rag_config.FINAL_TOP_K,
-                ensemble_retriever=hybrid_retriever,
-                time_intent=time_intent,
+    prepared: list[Document] = []
+    for index, document in enumerate(docs, start=1):
+        metadata = dict(document.metadata)
+        metadata.setdefault("evidence_id", f"S{index}")
+        prepared.append(
+            Document(
+                page_content=document.page_content,
+                metadata=metadata,
             )
-        docs = similarity_search_with_threshold(
-            query=q,
-            k=rag_config.FINAL_TOP_K,
-            vectorstore=vs,
         )
-        return rerank_documents(q, docs, top_n=rag_config.FINAL_TOP_K)
-
-    # Step 3: RAG Prompt
-    rag_prompt = ChatPromptTemplate.from_messages([
-        ("system", SYSTEM_PROMPT),
-        MessagesPlaceholder("chat_history"),
-        ("human", "{question}"),
-    ])
-
-    def print_standalone_question(x):
-        """打印改写后的查询和时间意图"""
-        rw = x["rewrite_result"]
-        print("\n" + "="*60)
-        print(f"Standalone Question: {rw.get('rewritten_query')}")
-        print(f"Time Intent: {rw.get('time_intent')}")
-        print("="*60 + "\n")
-        return x
-
-    # Step 4: 完整 LCEL Chain
-    rag_chain = (
-        RunnablePassthrough.assign(
-            rewrite_result=RunnableLambda(rewrite_with_intent)
-        )
-        | RunnableLambda(print_standalone_question)
-        | RunnablePassthrough.assign(
-            docs=RunnableLambda(retrieve_docs)
-        )
-        | RunnablePassthrough.assign(
-            context=RunnableLambda(lambda x: format_docs_for_context(x["docs"]))
-        )
-        | {
-            "answer": rag_prompt | llm | StrOutputParser(),
-            "sources": RunnableLambda(lambda x: x["docs"]),
-        }
+    return ("\n\n" + "─" * 40 + "\n\n").join(
+        render_evidence_block(document)
+        for document in prepared
     )
 
-    return rag_chain
+
+def generate_answer_from_documents(
+    *,
+    question: str,
+    documents: Sequence[Document],
+    chat_history: Sequence[Any],
+) -> str:
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", SYSTEM_PROMPT),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{question}"),
+        ]
+    )
+    chain = prompt | _get_llm() | StrOutputParser()
+    return str(
+        chain.invoke(
+            {
+                "context": format_docs_for_context(documents),
+                "chat_history": list(chat_history),
+                "question": question,
+            }
+        )
+    )
+
+
+def run_rag_with_trace(
+    question: str,
+    *,
+    chat_history: Sequence[Any] = (),
+    auth_context: dict[str, Any] | None = None,
+) -> RagExecution:
+    history_text = _serialize_history(chat_history)
+    rewrite = rewrite_query(
+        question=question,
+        chat_history=history_text,
+    )
+    rewritten_query = str(rewrite.get("rewritten_query") or question)
+    retrieval = retrieve_with_trace(
+        rewritten_query,
+        retrieval_context={
+            "original_query": question,
+            "time_intent": rewrite.get("time_intent"),
+            "auth_context": dict(auth_context or {}),
+        },
+    )
+    documents = retrieval.final_documents
+    if not documents:
+        return RagExecution(
+            answer=EVIDENCE_INSUFFICIENT_ANSWER,
+            source_documents=documents,
+            trace=retrieval.trace,
+            generation_latency_ms=0.0,
+        )
+
+    started = perf_counter()
+    answer = generate_answer_from_documents(
+        question=question,
+        documents=documents,
+        chat_history=chat_history,
+    )
+    if not citations_are_valid(answer, documents):
+        allowed = ", ".join(
+            f"[{document.metadata['evidence_id']}]"
+            for document in documents
+        )
+        answer = generate_answer_from_documents(
+            question=(
+                f"{question}\n\n上一次回答的证据引用无效。"
+                f"只能使用这些引用：{allowed}；每个事实结论必须引用。"
+            ),
+            documents=documents,
+            chat_history=chat_history,
+        )
+        if not citations_are_valid(answer, documents):
+            answer = INVALID_CITATION_SAFE_ANSWER
+    generation_latency_ms = (perf_counter() - started) * 1000
+    return RagExecution(
+        answer=answer,
+        source_documents=documents,
+        trace=retrieval.trace,
+        generation_latency_ms=generation_latency_ms,
+    )
+
+
+def citations_are_valid(
+    answer: str,
+    documents: Sequence[Document],
+) -> bool:
+    allowed = {
+        str(document.metadata.get("evidence_id") or "")
+        for document in documents
+    }
+    allowed.discard("")
+    cited = {
+        f"S{match}"
+        for match in re.findall(r"\[S(\d+)\]", str(answer))
+    }
+    return bool(cited) and cited.issubset(allowed)
+
+
+def create_rag_chain():
+    """Create a UI-compatible Runnable around the one-pass execution."""
+
+    def invoke(input_dict: dict[str, Any]) -> dict[str, Any]:
+        execution = run_rag_with_trace(
+            str(input_dict["question"]),
+            chat_history=input_dict.get("chat_history") or (),
+            auth_context=input_dict.get("auth_context") or {},
+        )
+        return {
+            "answer": execution.answer,
+            "sources": list(execution.source_documents),
+            "trace": execution.trace,
+            "generation_latency_ms": execution.generation_latency_ms,
+        }
+
+    return RunnableLambda(invoke)
 
 
 def create_chain_with_history():
-    """创建带对话记忆的 RAG Chain"""
-    from langchain_core.runnables.history import RunnableWithMessageHistory
     from langchain_community.chat_message_histories import ChatMessageHistory
+    from langchain_core.runnables.history import RunnableWithMessageHistory
 
     rag_chain = create_rag_chain()
     session_store: dict[str, ChatMessageHistory] = {}
 
-    # 入参通过 config["configurable"]["session_id"] 传给 RunnableWithMessageHistory
     def get_session_history(session_id: str) -> ChatMessageHistory:
         if session_id not in session_store:
             session_store[session_id] = ChatMessageHistory()
@@ -235,5 +251,17 @@ def create_chain_with_history():
         history_messages_key="chat_history",
         output_messages_key="answer",
     )
-
     return chain_with_history, get_session_history
+
+
+def _serialize_history(chat_history: Sequence[Any]) -> str:
+    if not chat_history:
+        return ""
+    try:
+        return "\n".join(
+            f"{getattr(message, 'type', 'msg')}: "
+            f"{getattr(message, 'content', '')}"
+            for message in chat_history
+        )
+    except Exception:
+        return str(chat_history)

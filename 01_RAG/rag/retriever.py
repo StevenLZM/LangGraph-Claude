@@ -52,6 +52,22 @@ class RetrievalExecution:
     trace: EvaluationTrace
 
 
+@dataclass
+class ProductionHybridRetriever:
+    time_intent: Optional[dict] = None
+    auth_context: dict[str, Any] | None = None
+
+    def invoke(self, query: str) -> List[Document]:
+        execution = retrieve_with_trace(
+            query,
+            retrieval_context={
+                "time_intent": self.time_intent,
+                "auth_context": dict(self.auth_context or {}),
+            },
+        )
+        return list(execution.final_documents)
+
+
 def _is_hard(time_intent: Optional[dict]) -> bool:
     return bool(time_intent) and time_intent.get("type") in _HARD_TYPES
 
@@ -412,11 +428,7 @@ def get_hybrid_retriever(
         store = get_vectorstore()
         if store.count_children(status="active") <= 0:
             return None
-        return build_hybrid_retriever(
-            parent_docstore=get_parent_docstore(),
-            time_intent=time_intent,
-            vectorstore=store,
-        )
+        return ProductionHybridRetriever(time_intent=time_intent)
     except Exception:
         return None
 
@@ -537,7 +549,7 @@ def retrieve_with_hybrid(
     ensemble_retriever: Optional[ParentChildHybridRetriever] = None,
     time_intent: Optional[dict] = None,
 ) -> List[Document]:
-    """Retrieve Parent documents and apply the existing phase-A reranker."""
+    """Compatibility API that uses the complete production path by default."""
     if ensemble_retriever is None or (
         time_intent is not None
         and getattr(ensemble_retriever, "time_intent", None) != time_intent
@@ -546,6 +558,8 @@ def retrieve_with_hybrid(
         if ensemble_retriever is None:
             return []
     limit = top_k or rag_config.FINAL_TOP_K
+    if isinstance(ensemble_retriever, ProductionHybridRetriever):
+        return ensemble_retriever.invoke(query)[:limit]
     results = ensemble_retriever.invoke(query)
     reranked = rerank_documents(query, results, top_n=limit)
     return reranked[:limit]

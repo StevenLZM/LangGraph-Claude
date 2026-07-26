@@ -145,3 +145,24 @@ def test_auth_and_time_filters_are_combined_for_both_routes():
             {"doc_date_max": {"$gte": 20240101}},
         ]
     }
+
+
+def test_get_hybrid_retriever_checks_count_without_scanning_children(monkeypatch):
+    from rag import retriever
+
+    class FakeStore:
+        def count_children(self, *, status):
+            assert status == "active"
+            return 1
+
+        def get_all_child_documents(self):
+            raise AssertionError("must never scan every Child")
+
+    monkeypatch.setattr(retriever, "get_vectorstore", lambda: FakeStore())
+
+    result = retriever.get_hybrid_retriever(
+        time_intent={"type": "none"},
+    )
+
+    assert result is not None
+    assert result.time_intent == {"type": "none"}

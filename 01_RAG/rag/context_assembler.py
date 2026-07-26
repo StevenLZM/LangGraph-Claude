@@ -108,10 +108,12 @@ def _evidence_header(document: Document) -> str:
     page = metadata.get("page_range") or metadata.get("page") or "?"
     parent_id = metadata.get("parent_id", "")
     version = metadata.get("version") or metadata.get("doc_version") or ""
-    version_text = f" version={version}" if version else ""
+    version_text = f" | 版本: {version}" if version else ""
+    section = metadata.get("section_path")
+    section_text = f" | 章节: {section}" if section else ""
     return (
-        f"[{evidence_id}] source={source} page={page} "
-        f"parent_id={parent_id}{version_text}\n"
+        f"[{evidence_id}] 来源: {source} | 第{page}页"
+        f"{section_text} | parent_id: {parent_id}{version_text}\n"
     )
 
 
