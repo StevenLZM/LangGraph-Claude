@@ -171,6 +171,38 @@ def test_weighted_rrf_fuses_by_child_id_and_is_deterministic():
     assert result[0].metadata["rrf_score"] > result[1].metadata["rrf_score"]
 
 
+def test_weighted_rrf_caps_children_per_parent_before_fusion():
+    from rag.elasticsearch_retrievers import weighted_rrf
+
+    documents = [
+        Document(
+            page_content=f"child-{index}",
+            metadata={
+                "child_id": f"child-{index}",
+                "parent_id": "same-parent",
+                "doc_id": "doc-1",
+            },
+        )
+        for index in range(4)
+    ]
+
+    result = weighted_rrf(
+        bm25_documents=documents,
+        dense_documents=[],
+        bm25_weight=0.4,
+        dense_weight=0.6,
+        rrf_k=60,
+        top_k=80,
+        max_children_per_parent=3,
+    )
+
+    assert [doc.metadata["child_id"] for doc in result] == [
+        "child-0",
+        "child-1",
+        "child-2",
+    ]
+
+
 def test_hybrid_retriever_degrades_when_one_route_fails():
     from rag.elasticsearch_retrievers import HybridChildRetriever
 

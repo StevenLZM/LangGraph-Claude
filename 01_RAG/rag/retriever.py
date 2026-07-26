@@ -2,26 +2,54 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from time import perf_counter
+from typing import Any, Callable, List, Mapping, Optional
+from uuid import uuid4
 
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.documents import Document
 
 from config import rag_config
+from rag.business_fusion import fuse_business_features
+from rag.context_assembler import assemble_final_context
 from rag.docstore import ParentDocStore, get_parent_docstore
 from rag.elasticsearch_retrievers import (
     ElasticsearchBM25Retriever,
     ElasticsearchDenseRetriever,
     HybridChildRetriever,
+    weighted_rrf,
 )
 from rag.embedder import get_embeddings
+from rag.postprocessor import diversify_parent_candidates
 from rag.reranker import rerank_documents
+from rag.retrieval_trace import EvaluationTrace, StageRecorder
 from rag.vectorstore import build_time_filter, get_vectorstore
 
 
 _HARD_TYPES = {"year", "before", "after", "range"}
 _SOFT_TYPES = {"latest"}
+
+
+@dataclass(frozen=True)
+class RetrievalPipelineComponents:
+    bm25: Callable[[str, Mapping[str, Any]], list[Document]]
+    dense: Callable[[str, Mapping[str, Any]], list[Document]]
+    rrf: Callable[[list[Document], list[Document]], list[Document]]
+    cross_encoder: Callable[[str, list[Document]], list[Document]]
+    business_fusion: Callable[
+        [str, list[Document], Mapping[str, Any]],
+        list[Document],
+    ]
+    diversify_parents: Callable[[list[Document]], list[Document]]
+    assemble_context: Callable[[list[Document]], list[Document]]
+
+
+@dataclass(frozen=True)
+class RetrievalExecution:
+    final_documents: tuple[Document, ...]
+    trace: EvaluationTrace
 
 
 def _is_hard(time_intent: Optional[dict]) -> bool:
@@ -30,6 +58,278 @@ def _is_hard(time_intent: Optional[dict]) -> bool:
 
 def _is_soft(time_intent: Optional[dict]) -> bool:
     return bool(time_intent) and time_intent.get("type") in _SOFT_TYPES
+
+
+def build_retrieval_metadata_filter(
+    retrieval_context: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    clauses: list[dict[str, Any]] = []
+    explicit_filter = retrieval_context.get("metadata_filter")
+    if isinstance(explicit_filter, Mapping):
+        if set(explicit_filter) == {"$and"}:
+            clauses.extend(list(explicit_filter["$and"]))
+        else:
+            clauses.append(dict(explicit_filter))
+
+    auth_context = retrieval_context.get("auth_context")
+    if not isinstance(auth_context, Mapping):
+        auth_context = retrieval_context
+    tenant_id = str(auth_context.get("tenant_id") or "").strip()
+    if tenant_id:
+        clauses.append({"tenant_id": tenant_id})
+    principals = auth_context.get("principals")
+    if isinstance(principals, (list, tuple)) and principals:
+        clauses.append({"acl_principals": {"$in": list(principals)}})
+    visibility = str(auth_context.get("visibility") or "").strip()
+    if visibility:
+        clauses.append({"visibility": visibility})
+
+    time_filter = build_time_filter(retrieval_context.get("time_intent"))
+    if time_filter:
+        if set(time_filter) == {"$and"}:
+            clauses.extend(time_filter["$and"])
+        else:
+            clauses.append(time_filter)
+    return {"$and": clauses} if clauses else None
+
+
+def retrieve_with_trace(
+    query: str,
+    *,
+    retrieval_context: Mapping[str, Any],
+    components: RetrievalPipelineComponents | None = None,
+) -> RetrievalExecution:
+    effective_context = dict(retrieval_context)
+    effective_context["metadata_filter"] = build_retrieval_metadata_filter(
+        retrieval_context
+    )
+    pipeline = components or _default_pipeline_components()
+    recorder = StageRecorder(
+        trace_id=str(retrieval_context.get("trace_id") or uuid4().hex),
+        original_query=str(
+            retrieval_context.get("original_query") or query
+        ),
+        rewritten_query=query,
+        metadata={
+            "time_intent": retrieval_context.get("time_intent"),
+            "auth_filter_applied": bool(
+                retrieval_context.get("auth_context")
+                or retrieval_context.get("tenant_id")
+                or retrieval_context.get("visibility")
+            ),
+            "degraded_stages": [],
+        },
+    )
+
+    (
+        bm25_documents,
+        dense_documents,
+        bm25_latency,
+        dense_latency,
+        branch_errors,
+    ) = _parallel_recall(query, effective_context, pipeline)
+    recorder.trace.metadata["degraded_stages"] = sorted(branch_errors)
+    recorder.trace.metadata["retrieval_errors"] = branch_errors
+    recorder.record(
+        name="bm25_child",
+        documents=bm25_documents,
+        configured_k=rag_config.BM25_TOP_K,
+        score_type="bm25_score",
+        latency_ms=bm25_latency,
+    )
+    recorder.record(
+        name="dense_child",
+        documents=dense_documents,
+        configured_k=rag_config.SEMANTIC_TOP_K,
+        score_type="dense_score",
+        latency_ms=dense_latency,
+    )
+
+    rrf_documents, latency = _timed(
+        pipeline.rrf,
+        bm25_documents,
+        dense_documents,
+    )
+    recorder.record(
+        name="rrf_child",
+        documents=rrf_documents,
+        configured_k=rag_config.RRF_TOP_K,
+        score_type="rrf_score",
+        latency_ms=latency,
+    )
+
+    reranked_documents, latency = _timed(
+        pipeline.cross_encoder,
+        query,
+        rrf_documents,
+    )
+    recorder.record(
+        name="cross_encoder_child",
+        documents=reranked_documents,
+        configured_k=rag_config.RERANK_TOP_K,
+        score_type="rerank_score",
+        latency_ms=latency,
+    )
+
+    business_documents, latency = _timed(
+        pipeline.business_fusion,
+        query,
+        reranked_documents,
+        effective_context,
+    )
+    recorder.record(
+        name="business_fused_child",
+        documents=business_documents,
+        configured_k=rag_config.BUSINESS_FUSION_TOP_K,
+        score_type="business_score",
+        latency_ms=latency,
+    )
+
+    parent_documents, latency = _timed(
+        pipeline.diversify_parents,
+        business_documents,
+    )
+    recorder.record(
+        name="diversified_parent",
+        documents=parent_documents,
+        configured_k=rag_config.DIVERSIFIED_PARENT_TOP_K,
+        score_type="mmr_score",
+        latency_ms=latency,
+    )
+
+    final_documents, latency = _timed(
+        pipeline.assemble_context,
+        parent_documents,
+    )
+    recorder.record(
+        name="final_context_parent",
+        documents=final_documents,
+        configured_k=rag_config.FINAL_PARENT_TOP_K,
+        score_type="context_score",
+        latency_ms=latency,
+    )
+    recorder.trace.require_complete()
+    return RetrievalExecution(
+        final_documents=tuple(final_documents),
+        trace=recorder.trace,
+    )
+
+
+def _default_pipeline_components() -> RetrievalPipelineComponents:
+    store = get_vectorstore()
+    embeddings = get_embeddings()
+    parent_docstore = get_parent_docstore()
+
+    def bm25(query: str, context: Mapping[str, Any]) -> list[Document]:
+        return ElasticsearchBM25Retriever(
+            store=store,
+            top_k=rag_config.BM25_TOP_K,
+            metadata_filter=context.get("metadata_filter"),
+        ).invoke(query)
+
+    def dense(query: str, context: Mapping[str, Any]) -> list[Document]:
+        return ElasticsearchDenseRetriever(
+            store=store,
+            embeddings=embeddings,
+            top_k=rag_config.SEMANTIC_TOP_K,
+            metadata_filter=context.get("metadata_filter"),
+        ).invoke(query)
+
+    return RetrievalPipelineComponents(
+        bm25=bm25,
+        dense=dense,
+        rrf=lambda bm25_documents, dense_documents: weighted_rrf(
+            bm25_documents=bm25_documents,
+            dense_documents=dense_documents,
+            bm25_weight=1 - rag_config.SEMANTIC_WEIGHT,
+            dense_weight=rag_config.SEMANTIC_WEIGHT,
+            rrf_k=rag_config.RRF_K,
+            top_k=rag_config.RRF_TOP_K,
+            max_children_per_parent=(
+                rag_config.MAX_CHILDREN_PER_PARENT_PRE_RRF
+            ),
+        ),
+        cross_encoder=lambda query, documents: rerank_documents(
+            query,
+            documents,
+            enabled=True,
+            top_n=rag_config.RERANK_TOP_K,
+        ),
+        business_fusion=lambda query, documents, context: fuse_business_features(
+            query,
+            documents,
+            time_intent=context.get("time_intent"),
+        ),
+        diversify_parents=lambda documents: diversify_parent_candidates(
+            documents,
+            parent_docstore=parent_docstore,
+            top_k=rag_config.DIVERSIFIED_PARENT_TOP_K,
+            max_parents_per_document=rag_config.MAX_PARENTS_PER_DOCUMENT,
+            similarity_threshold=rag_config.SIMILARITY_DEDUP_THRESHOLD,
+            mmr_lambda=rag_config.MMR_LAMBDA,
+        ),
+        assemble_context=lambda documents: assemble_final_context(
+            documents,
+            max_documents=rag_config.FINAL_PARENT_TOP_K,
+            token_budget=rag_config.FINAL_CONTEXT_TOKEN_BUDGET,
+            tokenizer_name=rag_config.TOKENIZER_NAME,
+        ),
+    )
+
+
+def _parallel_recall(
+    query: str,
+    context: Mapping[str, Any],
+    pipeline: RetrievalPipelineComponents,
+) -> tuple[
+    list[Document],
+    list[Document],
+    float,
+    float,
+    dict[str, str],
+]:
+    with ThreadPoolExecutor(
+        max_workers=2,
+        thread_name_prefix="rag-stage",
+    ) as executor:
+        futures = {
+            "bm25_child": executor.submit(
+                _timed,
+                pipeline.bm25,
+                query,
+                context,
+            ),
+            "dense_child": executor.submit(
+                _timed,
+                pipeline.dense,
+                query,
+                context,
+            ),
+        }
+        results: dict[str, tuple[list[Document], float]] = {}
+        errors: dict[str, str] = {}
+        for name, future in futures.items():
+            try:
+                documents, latency = future.result()
+                results[name] = (list(documents), latency)
+            except Exception as exc:
+                errors[name] = str(exc)
+                results[name] = ([], 0.0)
+    bm25_documents, bm25_latency = results["bm25_child"]
+    dense_documents, dense_latency = results["dense_child"]
+    return (
+        bm25_documents,
+        dense_documents,
+        bm25_latency,
+        dense_latency,
+        errors,
+    )
+
+
+def _timed(function: Callable[..., Any], *args: Any) -> tuple[Any, float]:
+    started = perf_counter()
+    result = function(*args)
+    return result, (perf_counter() - started) * 1000
 
 
 @dataclass

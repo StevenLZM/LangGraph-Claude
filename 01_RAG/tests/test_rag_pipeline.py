@@ -429,6 +429,7 @@ class TestConfig:
         assert RAGConfig.BM25_TOP_K == 50
         assert RAGConfig.RRF_TOP_K == 80
         assert RAGConfig.RRF_K == 60
+        assert RAGConfig.MAX_CHILDREN_PER_PARENT_PRE_RRF == 3
         assert RAGConfig.RERANK_TOP_K == 15
         assert RAGConfig.BUSINESS_FUSION_TOP_K == 15
         assert RAGConfig.DIVERSIFIED_PARENT_TOP_K == 8

@@ -100,6 +100,9 @@ class RAGConfig:
     BM25_TOP_K: int = int(os.getenv("BM25_TOP_K", "50"))
     RRF_TOP_K: int = int(os.getenv("RRF_TOP_K", "80"))
     RRF_K: int = int(os.getenv("RRF_K", "60"))
+    MAX_CHILDREN_PER_PARENT_PRE_RRF: int = int(
+        os.getenv("MAX_CHILDREN_PER_PARENT_PRE_RRF", "3")
+    )
     RERANK_TOP_K: int = int(os.getenv("RERANK_TOP_K", "15"))
     BUSINESS_FUSION_TOP_K: int = int(
         os.getenv("BUSINESS_FUSION_TOP_K", "15")

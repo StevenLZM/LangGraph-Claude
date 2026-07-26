@@ -148,6 +148,7 @@ def weighted_rrf(
     dense_weight: float,
     rrf_k: int,
     top_k: int,
+    max_children_per_parent: int = 3,
 ) -> list[Document]:
     scores: dict[str, float] = {}
     documents: dict[str, Document] = {}
@@ -159,13 +160,19 @@ def weighted_rrf(
         ("dense", dense_documents, dense_weight),
     ):
         seen_in_route: set[str] = set()
+        parent_counts: dict[str, int] = {}
         for rank, document in enumerate(route_documents, start=1):
             child_id = str(document.metadata.get("child_id") or "").strip()
+            parent_id = str(document.metadata.get("parent_id") or "").strip()
             if not child_id:
                 raise ValueError(f"{route} 候选缺少 child_id，无法执行 RRF")
             if child_id in seen_in_route:
                 continue
+            if parent_id and parent_counts.get(parent_id, 0) >= max_children_per_parent:
+                continue
             seen_in_route.add(child_id)
+            if parent_id:
+                parent_counts[parent_id] = parent_counts.get(parent_id, 0) + 1
             scores[child_id] = scores.get(child_id, 0.0) + (
                 float(weight) / (rrf_k + rank)
             )
