@@ -238,6 +238,22 @@ final_context_parent_ndcg_at_6
 
 报告同时展示相邻阶段的变化，用于定位召回或排序损失。
 
+### 8.5 每阶段主要指标
+
+底层结果为每个阶段保留全部四项 IR 指标，但报告突出该阶段最有诊断价值的指标：
+
+| 阶段 | 主要指标 | 诊断目标 |
+|---|---|---|
+| `bm25_child@50` | Recall@50 | 关键词证据是否召回 |
+| `dense_child@50` | Recall@50 | 语义证据是否召回 |
+| `rrf_child@80` | Recall@80、NDCG@80 | 融合是否增加召回且保持合理排序 |
+| `cross_encoder_child@15` | NDCG@15、MRR@15 | Rerank 是否把正确证据提前 |
+| `business_fused_child@15` | NDCG@15 | 时间、版本和权威性是否改善排序 |
+| `diversified_parent@8` | Recall@8、NDCG@8 | 去重和 MMR 是否误删有效证据 |
+| `final_context_parent@6` | Recall@6、NDCG@6、Hit@6 | 最终交给 LLM 的证据是否完整 |
+
+Recall 更适合诊断召回阶段，NDCG/MRR 更适合诊断排序阶段，Hit 用作最低保障检查。
+
 ## 9. 生成质量
 
 生成层继续使用真实 RAGAS：
@@ -345,6 +361,21 @@ Candidate 与 Baseline 必须使用：
 6. P95 端到端延迟增长不超过 20%，除非明确批准。
 
 中间阶段指标主要用于诊断，不单独阻止发布。最终上下文、生成质量、安全和延迟负责门禁。
+
+发布摘要只突出：
+
+```text
+BM25 Recall@50
+Dense Recall@50
+RRF Recall@80
+Cross-Encoder NDCG@15
+Final Context Recall@6
+Final Context NDCG@6
+Faithfulness
+Answer Correctness
+```
+
+完整分阶段结果仍保存在明细文件中。系统不把这些指标加权合成为一个“RAG 总分”。
 
 ## 14. 组件边界
 
