@@ -143,7 +143,24 @@ def _run_real_evaluation_impl(
     checkpoint = (
         EvaluationCheckpoint.resume(run_dir, fingerprint)
         if resume
-        else EvaluationCheckpoint.create(run_dir, fingerprint)
+        else EvaluationCheckpoint.create(
+            run_dir,
+            fingerprint,
+            run_metadata={
+                "split": split,
+                "release_mode": release_mode,
+                "expected_case_count": len(cases),
+                "models": {
+                    "embedding": llm_config.EMBEDDING_MODEL,
+                    "reranker": rerank_config.MODEL,
+                    "generation": llm_config.CHAT_MODEL,
+                    "judge": (
+                        __import__("os").getenv("RAGAS_LLM_MODEL")
+                        or llm_config.REWRITE_MODEL
+                    ),
+                },
+            },
+        )
     )
 
     current_case: EvaluationCase | None = None

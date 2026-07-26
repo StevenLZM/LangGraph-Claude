@@ -39,6 +39,8 @@ class EvaluationCheckpoint:
         cls,
         run_dir: Path,
         fingerprint: RunFingerprint,
+        *,
+        run_metadata: dict[str, Any] | None = None,
     ) -> Self:
         run_dir = Path(run_dir)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -52,6 +54,7 @@ class EvaluationCheckpoint:
             "fingerprint": asdict(fingerprint),
             "completed_case_count": 0,
             "failed_case_count": 0,
+            **dict(run_metadata or {}),
         }
         _write_json_atomic(manifest_path, manifest)
         (run_dir / CASE_RESULTS_FILE).touch(exist_ok=False)
