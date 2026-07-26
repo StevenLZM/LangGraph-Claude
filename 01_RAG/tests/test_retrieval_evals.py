@@ -8,6 +8,123 @@ from langchain_core.documents import Document
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
+def _write_cases(path: Path, cases: list[dict]) -> None:
+    path.write_text(
+        "".join(json.dumps(case, ensure_ascii=False) + "\n" for case in cases),
+        encoding="utf-8",
+    )
+
+
+def _valid_case(case_id: str, question: str) -> dict:
+    return {
+        "id": case_id,
+        "category": "precise",
+        "query_type": "keyword",
+        "question": question,
+        "reference": "产品保修期为 12 个月。",
+        "expected_behavior": "answer",
+        "auth_context": {},
+        "qrels": [
+            {
+                "evidence_id": f"{case_id}-evidence",
+                "source": "manual.pdf",
+                "page_range": "3",
+                "section": "保修政策",
+                "evidence_text": "保修期为 12 个月",
+                "evidence_hash": "pending-resolver-validation",
+                "grade": 3,
+            }
+        ],
+    }
+
+
+def test_qrel_requires_grade_between_zero_and_three():
+    import pytest
+
+    from evals.models import EvidenceQrel
+
+    with pytest.raises(ValueError, match="grade"):
+        EvidenceQrel.from_dict(
+            {
+                "evidence_id": "e-1",
+                "source": "manual.pdf",
+                "page_range": "3",
+                "section": "保修",
+                "evidence_text": "保修期为 12 个月",
+                "evidence_hash": "abc",
+                "grade": 4,
+            }
+        )
+
+
+def test_case_requires_reviewed_qrels_for_answer_behavior():
+    import pytest
+
+    from evals.models import EvaluationCase
+
+    with pytest.raises(ValueError, match="qrels"):
+        EvaluationCase.from_dict(
+            {
+                "id": "case-1",
+                "category": "precise",
+                "query_type": "keyword",
+                "question": "保修多久",
+                "reference": "12 个月",
+                "expected_behavior": "answer",
+                "auth_context": {},
+                "qrels": [],
+            },
+            split="test",
+        )
+
+
+def test_validate_dataset_rejects_same_question_in_train_and_test(tmp_path):
+    import pytest
+
+    from evals.models import validate_dataset
+
+    _write_cases(
+        tmp_path / "train.jsonl",
+        [_valid_case("train-1", "产品保修多久？")],
+    )
+    _write_cases(
+        tmp_path / "test.jsonl",
+        [_valid_case("test-1", " 产品保修多久? ")],
+    )
+    (tmp_path / "dev.jsonl").write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="跨 split"):
+        validate_dataset(tmp_path, release_mode=False)
+
+
+def test_release_mode_requires_two_hundred_test_cases(tmp_path):
+    import pytest
+
+    from evals.models import validate_dataset
+
+    _write_cases(
+        tmp_path / "test.jsonl",
+        [_valid_case(f"test-{index}", f"问题 {index}") for index in range(199)],
+    )
+    (tmp_path / "train.jsonl").write_text("", encoding="utf-8")
+    (tmp_path / "dev.jsonl").write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="至少 200"):
+        validate_dataset(tmp_path, release_mode=True)
+
+
+def test_case_split_comes_from_physical_file(tmp_path):
+    from evals.models import load_split
+
+    case = _valid_case("dev-1", "保修多久？")
+    case["split"] = "test"
+    _write_cases(tmp_path / "dev.jsonl", [case])
+
+    loaded = load_split(tmp_path, "dev")
+
+    assert loaded[0].split == "dev"
+
+
 def test_dataset_loader_requires_ragas_reference(tmp_path):
     from evals.run import load_dataset
 

@@ -1,0 +1,15 @@
+{
+  "version": "1.0.0",
+  "status": "annotation_required",
+  "corpus_version": "pending",
+  "split_counts": {
+    "train": 0,
+    "dev": 0,
+    "test": 0
+  },
+  "split_sha256": {
+    "train": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "dev": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "test": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+  }
+}
