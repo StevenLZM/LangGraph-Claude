@@ -212,6 +212,7 @@ def test_document_conversion_preserves_stable_identity_and_score():
     assert restored.metadata["child_id"] == "child-1"
     assert restored.metadata["retrieval_source"] == "bm25"
     assert restored.metadata["es_score"] == 4.2
+    assert restored.metadata["retrieval_embedding"] == [0.1, 0.2, 0.3]
 
 
 def test_storage_id_includes_document_version():

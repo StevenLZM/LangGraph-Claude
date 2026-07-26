@@ -489,6 +489,8 @@ def hit_to_document(hit: Mapping[str, Any], retrieval_source: str) -> Document:
     )
     metadata["retrieval_source"] = str(retrieval_source)
     metadata["es_score"] = hit.get("_score")
+    if isinstance(source.get("embedding"), list):
+        metadata["retrieval_embedding"] = list(source["embedding"])
     if "page" not in metadata and "page_number" in metadata:
         metadata["page"] = metadata["page_number"]
     return Document(
