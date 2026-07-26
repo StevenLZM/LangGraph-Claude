@@ -173,7 +173,15 @@ def _build_ragas_run_config() -> Any:
     try:
         from ragas.run_config import RunConfig
     except ImportError:
-        return None
+        try:
+            from ragas import RunConfig
+        except ImportError:
+            from dataclasses import make_dataclass
+
+            RunConfig = make_dataclass(
+                "RunConfig",
+                [("timeout", int), ("max_workers", int)],
+            )
     return RunConfig(
         timeout=int(os.getenv("RAGAS_TIMEOUT_SECONDS", "300")),
         max_workers=int(os.getenv("RAGAS_MAX_WORKERS", "1")),

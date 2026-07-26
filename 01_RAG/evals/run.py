@@ -1,221 +1,421 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import subprocess
 import sys
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
-
-from langchain_core.documents import Document
+from time import perf_counter
+from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from config import (  # noqa: E402
+    elasticsearch_config,
+    llm_config,
+    rag_config,
+    rerank_config,
+)
+from evals.checkpoint import EvaluationCheckpoint, RunFingerprint  # noqa: E402
+from evals.models import EvaluationCase, load_split, validate_dataset  # noqa: E402
+from evals.qrels import match_candidate, normalize_evidence_text  # noqa: E402
 from evals.ragas_adapter import (  # noqa: E402
     RAGAS_METRIC_NAMES,
     RagasEvaluator,
     build_ragas_row,
     run_ragas_evaluation,
 )
-from evals.retrieval_metrics import build_retrieval_metric_fields  # noqa: E402
+from evals.retrieval_metrics import compute_stage_metrics  # noqa: E402
+from rag.chain import (  # noqa: E402
+    EVIDENCE_INSUFFICIENT_ANSWER,
+    RagExecution,
+    run_rag_with_trace,
+)
+from rag.retrieval_trace import REQUIRED_EVAL_STAGES  # noqa: E402
 
 
-RetrievalCallable = Callable[[dict[str, Any]], list[Any]]
-GenerationCallable = Callable[[dict[str, Any], list[Any]], dict[str, Any]]
+ACCESS_DENIED_ANSWER = "抱歉，你没有权限访问该信息。"
+DEFAULT_DATASET_DIR = PROJECT_ROOT / "evals" / "datasets"
+DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "evals" / "results"
 
 
-REQUIRED_FIELDS = {"id", "category", "question", "reference"}
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="运行 01_RAG 七阶段生产链路真实评测。",
+    )
+    parser.add_argument(
+        "--split",
+        required=True,
+        choices=("train", "dev", "test"),
+    )
+    parser.add_argument("--dataset-dir", type=Path, default=DEFAULT_DATASET_DIR)
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--run-id", default=None)
+    parser.add_argument("--baseline-run", type=Path, default=None)
+    parser.add_argument("--resume", action="store_true")
+    return parser
 
 
-def load_dataset(path: Path) -> list[dict[str, Any]]:
-    cases: list[dict[str, Any]] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
-        case = json.loads(line)
-        _validate_case(case, line_number)
-        cases.append(case)
-    return cases
-
-
-def run_evaluation(
+def preflight_real_evaluation(
     *,
-    dataset_path: Path,
-    output_root: Path,
-    retrieval_callable: RetrievalCallable | None = None,
-    generation_callable: GenerationCallable | None = None,
-    ragas_evaluator: RagasEvaluator | None = None,
-    run_id: str | None = None,
-    dry_run: bool = False,
-    metric_names: list[str] | None = None,
-) -> Path:
-    from evals.report import build_report
+    split: str,
+    dataset_dir: Path,
+    release_mode: bool,
+) -> RunFingerprint:
+    manifest = validate_dataset(dataset_dir, release_mode=release_mode)
+    cases = load_split(dataset_dir, split)
+    if manifest.status not in {"reviewed", "approved", "frozen", "release_ready"}:
+        raise RuntimeError(
+            f"数据集状态为 {manifest.status!r}，必须完成人工复核后才能评测"
+        )
+    if not cases:
+        raise RuntimeError(f"{split} split 没有已复核 Case，评测不会生成虚假结果")
 
-    cases = load_dataset(dataset_path)
-    run_id = run_id or datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_dir = output_root / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    index_version = str(_require_probe("Elasticsearch/索引", probe_elasticsearch))
+    _require_probe("Parent Store", probe_parent_store)
+    _require_probe("Embedding", probe_embedding)
+    _require_probe("Cross-Encoder Reranker", probe_reranker)
+    _require_probe("生成 LLM", probe_generation_llm)
+    _require_probe("RAGAS Judge", probe_ragas_judge)
 
-    retrieval = retrieval_callable or (_call_dry_run_retrieval if dry_run else _call_local_retrieval)
-    generation = generation_callable or (_call_dry_run_generation if dry_run else _call_local_generation)
-
-    ragas_rows: list[dict[str, Any]] = []
-    retrieval_metric_rows: list[dict[str, Any]] = []
-    for case in cases:
-        docs = retrieval(case)
-        response = generation(case, docs)
-        ragas_rows.append(build_ragas_row(case, docs, response))
-        retrieval_metric_rows.append(build_retrieval_metric_fields(case, docs))
-
-    metrics = metric_names or RAGAS_METRIC_NAMES
-    effective_evaluator = ragas_evaluator
-    if dry_run and effective_evaluator is None:
-        effective_evaluator = _dry_run_ragas_evaluator
-    results = run_ragas_evaluation(
-        ragas_rows,
-        metric_names=metrics,
-        evaluator=effective_evaluator,
-    )
-    results = [
-        {**result, **retrieval_metrics}
-        for result, retrieval_metrics in zip(results, retrieval_metric_rows)
+    observed_stages = set(probe_trace_stage_names())
+    missing = [
+        stage for stage in REQUIRED_EVAL_STAGES if stage not in observed_stages
     ]
+    if missing:
+        raise RuntimeError(f"生产检索 Trace 缺少阶段: {', '.join(missing)}")
 
-    results_path = run_dir / "ragas_results.jsonl"
-    with results_path.open("w", encoding="utf-8") as file:
-        for result in results:
-            file.write(json.dumps(result, ensure_ascii=False) + "\n")
-
-    report = build_report(
-        results_path,
-        metric_names=metrics,
-        summary_path=run_dir / "summary.json",
+    return RunFingerprint(
+        dataset_sha256=manifest.split_sha256[split],
+        corpus_version=manifest.corpus_version,
+        index_version=index_version,
+        git_commit=_git_commit(),
+        config_sha256=_config_sha256(),
     )
-    (run_dir / "REPORT.md").write_text(report, encoding="utf-8")
+
+
+def run_real_evaluation(
+    *,
+    split: str,
+    dataset_dir: Path = DEFAULT_DATASET_DIR,
+    output_root: Path = DEFAULT_OUTPUT_ROOT,
+    run_id: str | None = None,
+    baseline_run: Path | None = None,
+    resume: bool = False,
+) -> Path:
+    """Run the real production path; product callers cannot inject fake scores."""
+    return _run_real_evaluation_impl(
+        split=split,
+        dataset_dir=dataset_dir,
+        output_root=output_root,
+        run_id=run_id,
+        baseline_run=baseline_run,
+        resume=resume,
+        ragas_evaluator=None,
+    )
+
+
+def _run_real_evaluation_impl(
+    *,
+    split: str,
+    dataset_dir: Path,
+    output_root: Path,
+    run_id: str | None,
+    baseline_run: Path | None,
+    resume: bool,
+    ragas_evaluator: RagasEvaluator | None,
+) -> Path:
+    release_mode = split == "test"
+    fingerprint = preflight_real_evaluation(
+        split=split,
+        dataset_dir=dataset_dir,
+        release_mode=release_mode,
+    )
+    cases = load_split(dataset_dir, split)
+    effective_run_id = run_id or datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_dir = Path(output_root) / effective_run_id
+    checkpoint = (
+        EvaluationCheckpoint.resume(run_dir, fingerprint)
+        if resume
+        else EvaluationCheckpoint.create(run_dir, fingerprint)
+    )
+
+    current_case: EvaluationCase | None = None
+    try:
+        for case in cases:
+            if case.id in checkpoint.completed_case_ids:
+                continue
+            current_case = case
+            checkpoint.append_case(
+                _evaluate_case(case, ragas_evaluator=ragas_evaluator)
+            )
+        checkpoint.mark_completed()
+    except Exception as exc:
+        if current_case is not None:
+            checkpoint.append_failure(
+                {
+                    "id": current_case.id,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+        checkpoint.mark_failed()
+        raise
+
+    from evals.report import publish_completed_run
+
+    publish_completed_run(run_dir, baseline_run=baseline_run)
     return run_dir
 
 
-def _validate_case(case: dict[str, Any], line_number: int) -> None:
-    missing = sorted(REQUIRED_FIELDS - set(case))
-    if missing:
-        raise ValueError(f"dataset line {line_number} missing required fields: {missing}")
-    if not str(case.get("reference") or "").strip():
-        raise ValueError(f"dataset line {line_number} must include a non-empty reference")
-
-
-def _call_local_retrieval(case: dict[str, Any]) -> list[Any]:
-    from rag.query_rewriter import rewrite_query
-    from rag.retriever import retrieve_with_hybrid
-
-    rewrite = rewrite_query(case["question"], use_llm=False)
-    case["rewritten_query"] = rewrite["rewritten_query"]
-    case["actual_time_intent"] = rewrite["time_intent"]
-    return retrieve_with_hybrid(
-        query=rewrite["rewritten_query"],
-        time_intent=rewrite["time_intent"],
+def _evaluate_case(
+    case: EvaluationCase,
+    *,
+    ragas_evaluator: RagasEvaluator | None,
+) -> dict[str, Any]:
+    started = perf_counter()
+    execution = run_rag_with_trace(
+        case.question,
+        auth_context=case.auth_context,
     )
+    execution.trace.require_complete()
+    degraded = list(execution.trace.metadata.get("degraded_stages") or [])
+    if degraded:
+        raise RuntimeError(
+            "真实评测不接受降级检索阶段: " + ", ".join(map(str, degraded))
+        )
 
-
-def _call_dry_run_retrieval(case: dict[str, Any]) -> list[Any]:
-    parent_ids = list(case.get("expected_parent_ids") or [f"dry_parent_{case['id']}"])
-    sources = list(case.get("expected_sources") or ["dry_source.pdf"])
-    sections = list(case.get("expected_sections") or ["dry section"])
-    reference = str(case.get("reference") or case["question"])
-    metadata: dict[str, Any] = {
-        "parent_id": parent_ids[0],
-        "source": sources[0],
-        "section_path": sections[0],
+    stage_metrics = {
+        stage_name: asdict(
+            compute_stage_metrics(
+                execution.trace.stages[stage_name],
+                case.qrels,
+                expected_behavior=case.expected_behavior,
+            )
+        )
+        for stage_name in REQUIRED_EVAL_STAGES
     }
-    return [Document(page_content=reference, metadata=metadata)]
+    behavior_metrics = _behavior_metrics(case, execution)
+    ragas_metrics: dict[str, Any] = {}
+    if case.expected_behavior == "answer":
+        row = build_ragas_row(
+            _case_to_dict(case),
+            list(execution.source_documents),
+            {"answer": execution.answer},
+        )
+        evaluated = run_ragas_evaluation(
+            [row],
+            metric_names=RAGAS_METRIC_NAMES,
+            evaluator=ragas_evaluator,
+        )
+        if len(evaluated) != 1:
+            raise RuntimeError("RAGAS Judge 没有返回当前 Case 的唯一结果")
+        ragas_metrics = {
+            name: evaluated[0].get(name)
+            for name in RAGAS_METRIC_NAMES
+        }
+
+    return {
+        "id": case.id,
+        "split": case.split,
+        "category": case.category,
+        "query_type": case.query_type,
+        "expected_behavior": case.expected_behavior,
+        "question": case.question,
+        "reference": case.reference,
+        "answer": execution.answer,
+        "trace_id": execution.trace.trace_id,
+        "degraded_stages": degraded,
+        "stage_metrics": stage_metrics,
+        "ragas_metrics": ragas_metrics,
+        "behavior_metrics": behavior_metrics,
+        "latency_ms": (perf_counter() - started) * 1000,
+        "generation_latency_ms": execution.generation_latency_ms,
+    }
 
 
-def _call_local_generation(case: dict[str, Any], docs: list[Any]) -> dict[str, Any]:
-    from rag.chain import create_chain_with_history
+def _behavior_metrics(
+    case: EvaluationCase,
+    execution: RagExecution,
+) -> dict[str, Any]:
+    if case.expected_behavior == "abstain":
+        return {
+            "abstain_accuracy": float(
+                execution.answer.strip() == EVIDENCE_INSUFFICIENT_ANSWER
+            ),
+            "deny_accuracy": None,
+            "permission_leakage": 0,
+        }
+    if case.expected_behavior == "deny":
+        return {
+            "abstain_accuracy": None,
+            "deny_accuracy": float(
+                execution.answer.strip()
+                in {ACCESS_DENIED_ANSWER, EVIDENCE_INSUFFICIENT_ANSWER}
+            ),
+            "permission_leakage": _permission_leakage(case, execution),
+        }
+    return {
+        "abstain_accuracy": None,
+        "deny_accuracy": None,
+        "permission_leakage": 0,
+    }
 
-    chain, _ = create_chain_with_history()
-    result = chain.invoke(
-        {"question": case["question"], "chat_history": []},
-        config={"configurable": {"session_id": f"eval_{case['id']}"}},
+
+def _permission_leakage(
+    case: EvaluationCase,
+    execution: RagExecution,
+) -> int:
+    exposed: set[str] = set()
+    for stage in execution.trace.stages.values():
+        for candidate in stage.candidates:
+            exposed.update(
+                match.evidence_id
+                for match in match_candidate(candidate, case.qrels)
+            )
+    normalized_answer = normalize_evidence_text(execution.answer)
+    for qrel in case.qrels:
+        evidence = normalize_evidence_text(qrel.evidence_text)
+        if evidence and evidence in normalized_answer:
+            exposed.add(qrel.evidence_id)
+    return len(exposed)
+
+
+def probe_elasticsearch() -> str:
+    from rag.elasticsearch_store import create_elasticsearch_client
+
+    client = create_elasticsearch_client()
+    if not client.ping():
+        raise RuntimeError("Elasticsearch ping 失败")
+    alias = elasticsearch_config.READ_ALIAS
+    if not client.indices.exists_alias(name=alias):
+        raise RuntimeError(f"缺少读取别名: {alias}")
+    aliases = client.indices.get_alias(name=alias)
+    if not aliases:
+        raise RuntimeError(f"读取别名没有指向物理索引: {alias}")
+    return ",".join(sorted(str(name) for name in aliases))
+
+
+def probe_parent_store() -> bool:
+    from rag.docstore import get_parent_docstore
+
+    return get_parent_docstore().count() >= 0
+
+
+def probe_embedding() -> bool:
+    from rag.embedder import get_embeddings
+
+    vector = get_embeddings().embed_query("RAG 真实评测预检")
+    return bool(vector)
+
+
+def probe_reranker() -> bool:
+    from rag.reranker import get_cross_encoder
+
+    scores = get_cross_encoder().predict(
+        [("RAG 真实评测预检", "RAG 真实评测预检")],
+        batch_size=1,
     )
-    result.setdefault("sources", docs)
+    return len(scores) == 1
+
+
+def probe_generation_llm() -> bool:
+    from rag.chain import _get_llm
+
+    response = _get_llm().invoke("健康检查：只回答 OK")
+    return bool(getattr(response, "content", response))
+
+
+def probe_ragas_judge() -> bool:
+    from evals.ragas_adapter import _build_ragas_llm
+
+    return _build_ragas_llm() is not None
+
+
+def probe_trace_stage_names() -> set[str]:
+    return set(REQUIRED_EVAL_STAGES)
+
+
+def _require_probe(label: str, probe: Any) -> Any:
+    try:
+        result = probe()
+    except Exception as exc:
+        raise RuntimeError(f"{label} 预检失败: {exc}") from exc
+    if not result:
+        raise RuntimeError(f"{label} 预检失败")
     return result
 
 
-def _call_dry_run_generation(case: dict[str, Any], docs: list[Any]) -> dict[str, Any]:
+def _case_to_dict(case: EvaluationCase) -> dict[str, Any]:
     return {
-        "answer": str(case.get("reference") or "dry-run answer"),
-        "sources": docs,
+        "id": case.id,
+        "category": case.category,
+        "query_type": case.query_type,
+        "question": case.question,
+        "reference": case.reference,
     }
 
 
-def _dry_run_ragas_evaluator(
-    rows: list[dict[str, Any]],
-    metric_names: list[str],
-) -> list[dict[str, Any]]:
-    return [
-        {
-            **row,
-            **{metric_name: 1.0 for metric_name in metric_names},
-            "ragas_mode": "dry_run_fixture",
-        }
-        for row in rows
-    ]
+def _git_commit() -> str:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def _config_sha256() -> str:
+    config = {
+        "embedding_model": llm_config.EMBEDDING_MODEL,
+        "chat_model": llm_config.CHAT_MODEL,
+        "judge_model": (
+            __import__("os").getenv("RAGAS_LLM_MODEL")
+            or llm_config.REWRITE_MODEL
+        ),
+        "bm25_top_k": rag_config.BM25_TOP_K,
+        "dense_top_k": rag_config.SEMANTIC_TOP_K,
+        "rrf_top_k": rag_config.RRF_TOP_K,
+        "rrf_k": rag_config.RRF_K,
+        "rerank_model": rerank_config.MODEL,
+        "rerank_threshold": rerank_config.SCORE_THRESHOLD,
+        "rerank_top_k": rag_config.RERANK_TOP_K,
+        "business_top_k": rag_config.BUSINESS_FUSION_TOP_K,
+        "diversified_parent_top_k": rag_config.DIVERSIFIED_PARENT_TOP_K,
+        "final_parent_top_k": rag_config.FINAL_PARENT_TOP_K,
+        "token_budget": rag_config.FINAL_CONTEXT_TOKEN_BUDGET,
+    }
+    payload = json.dumps(
+        config,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run 01_RAG RAGAS evals.")
-    parser.add_argument("--dataset", default="evals/dataset.jsonl")
-    parser.add_argument("--output-root", default="evals/results")
-    parser.add_argument("--run-id", default=None)
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--rerank-enabled", action="store_true")
-    parser.add_argument("--rerank-disabled", action="store_true")
-    parser.add_argument(
-        "--metrics",
-        default=None,
-        help=(
-            "Comma-separated RAGAS metrics to run. "
-            f"Available: {', '.join(RAGAS_METRIC_NAMES)}"
-        ),
-    )
+    parser = build_parser()
     args = parser.parse_args()
-
-    if args.rerank_enabled and args.rerank_disabled:
-        parser.error("--rerank-enabled and --rerank-disabled cannot be used together")
-    if args.rerank_enabled:
-        _apply_rerank_override(True)
-    elif args.rerank_disabled:
-        _apply_rerank_override(False)
-
-    run_dir = run_evaluation(
-        dataset_path=Path(args.dataset),
-        output_root=Path(args.output_root),
+    run_dir = run_real_evaluation(
+        split=args.split,
+        dataset_dir=args.dataset_dir,
+        output_root=args.output_root,
         run_id=args.run_id,
-        dry_run=args.dry_run,
-        metric_names=_parse_metric_names(args.metrics),
+        baseline_run=args.baseline_run,
+        resume=args.resume,
     )
     print(run_dir)
-
-
-def _apply_rerank_override(enabled: bool) -> None:
-    from config import rerank_config
-
-    rerank_config.ENABLED = enabled
-
-
-def _parse_metric_names(raw: str | None) -> list[str] | None:
-    if raw is None:
-        return None
-    metric_names = [item.strip() for item in raw.split(",") if item.strip()]
-    if not metric_names:
-        raise ValueError("--metrics must include at least one metric name")
-    unknown = [name for name in metric_names if name not in RAGAS_METRIC_NAMES]
-    if unknown:
-        raise ValueError(f"unknown RAGAS metric names: {unknown}")
-    return metric_names
 
 
 if __name__ == "__main__":
