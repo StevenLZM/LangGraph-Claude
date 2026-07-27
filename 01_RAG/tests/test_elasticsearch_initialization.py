@@ -1,0 +1,226 @@
+from types import SimpleNamespace
+
+import pytest
+
+from rag.elasticsearch_store import IndexInitializationResult
+from rag.init_elasticsearch import (
+    initialize_elasticsearch,
+    main,
+    validate_initialization_config,
+)
+
+
+PHYSICAL_INDEX = "rag-child-chunks-v1"
+READ_ALIAS = "rag-child-chunks-read"
+WRITE_ALIAS = "rag-child-chunks-write"
+
+
+class FakeIndices:
+    def __init__(self, *, vector_dims=1024, aliases=None):
+        self.vector_dims = vector_dims
+        self.aliases = aliases or {
+            READ_ALIAS: {},
+            WRITE_ALIAS: {"is_write_index": True},
+        }
+        self.read_indices = []
+
+    def get_mapping(self, *, index):
+        self.read_indices.append(("mapping", index))
+        return {
+            index: {
+                "mappings": {
+                    "properties": {
+                        "embedding": {
+                            "type": "dense_vector",
+                            "dims": self.vector_dims,
+                        }
+                    }
+                }
+            }
+        }
+
+    def get_alias(self, *, index):
+        self.read_indices.append(("aliases", index))
+        return {index: {"aliases": self.aliases}}
+
+
+class FakeClient:
+    def __init__(self, *, ping_result=True, vector_dims=1024, aliases=None):
+        self.ping_result = ping_result
+        self.indices = FakeIndices(vector_dims=vector_dims, aliases=aliases)
+        self.count_indices = []
+
+    def ping(self):
+        return self.ping_result
+
+    def count(self, *, index):
+        self.count_indices.append(index)
+        return {"count": 0}
+
+
+class FakeStore:
+    def __init__(self, *, status="created", client=None, config=None):
+        self.ensure_calls = []
+        self.status = status
+        self.client = client
+        self.config = config or SimpleNamespace(
+            PHYSICAL_INDEX=PHYSICAL_INDEX,
+            READ_ALIAS=READ_ALIAS,
+            WRITE_ALIAS=WRITE_ALIAS,
+        )
+
+    def ensure_index(self, vector_dims):
+        self.ensure_calls.append(vector_dims)
+        return IndexInitializationResult(
+            status=self.status,
+            physical_index=self.config.PHYSICAL_INDEX,
+            vector_dims=vector_dims,
+            read_alias=self.config.READ_ALIAS,
+            write_alias=self.config.WRITE_ALIAS,
+        )
+
+
+@pytest.mark.parametrize(
+    ("api_key", "model", "dims", "message"),
+    [
+        ("", "qwen3.7-text-embedding", 1024, "DASHSCOPE_API_KEY"),
+        ("你的真实百炼APIKey", "qwen3.7-text-embedding", 1024, "DASHSCOPE_API_KEY"),
+        ("sk-valid-value", "text-embedding-v3", 1024, "EMBEDDING_MODEL"),
+        ("sk-valid-value", "qwen3.7-text-embedding", 768, "ES_EMBEDDING_DIMS"),
+    ],
+)
+def test_validate_initialization_config_rejects_invalid_values(
+    api_key,
+    model,
+    dims,
+    message,
+):
+    """Rejecting a missing, placeholder, incompatible model, or wrong dimensions."""
+    with pytest.raises(ValueError, match=message):
+        validate_initialization_config(
+            api_key=api_key,
+            embedding_model=model,
+            embedding_dims=dims,
+        )
+
+
+@pytest.mark.parametrize("placeholder", ["your-api-key", "replace-me"])
+def test_validate_initialization_config_rejects_common_key_placeholders(placeholder):
+    """Rejecting placeholder keys prevents a harmless-looking empty index setup."""
+    with pytest.raises(ValueError, match="DASHSCOPE_API_KEY"):
+        validate_initialization_config(
+            api_key=placeholder,
+            embedding_model="qwen3.7-text-embedding",
+            embedding_dims=1024,
+        )
+
+
+def test_initialize_stops_before_index_write_when_ping_fails():
+    """A failed cluster health check cannot reach the write-capable store."""
+    client = FakeClient(ping_result=False)
+    store = FakeStore()
+
+    with pytest.raises(ConnectionError, match="Elasticsearch"):
+        initialize_elasticsearch(
+            client=client,
+            store=store,
+            api_key="sk-valid-value",
+            embedding_model="qwen3.7-text-embedding",
+            embedding_dims=1024,
+        )
+
+    assert store.ensure_calls == []
+
+
+def test_initialize_returns_verified_empty_index_summary():
+    """A successful setup reports only the independently re-read empty index state."""
+    client = FakeClient()
+    store = FakeStore()
+
+    summary = initialize_elasticsearch(
+        client=client,
+        store=store,
+        api_key="sk-valid-value",
+        embedding_model="qwen3.7-text-embedding",
+        embedding_dims=1024,
+    )
+
+    assert summary.status == "created"
+    assert summary.physical_index == PHYSICAL_INDEX
+    assert summary.vector_dims == 1024
+    assert summary.document_count == 0
+    assert summary.read_alias == READ_ALIAS
+    assert summary.write_alias == WRITE_ALIAS
+    assert client.indices.read_indices == [
+        ("mapping", PHYSICAL_INDEX),
+        ("aliases", PHYSICAL_INDEX),
+    ]
+    assert client.count_indices == [PHYSICAL_INDEX]
+
+
+@pytest.mark.parametrize("status", ["created", "aliases_repaired", "already_initialized"])
+def test_initialize_rereads_every_successful_initialization_status(status):
+    """A future shortcut that trusts ensure_index results would lose verification."""
+    client = FakeClient()
+    store = FakeStore(status=status)
+
+    summary = initialize_elasticsearch(
+        client=client,
+        store=store,
+        api_key="sk-valid-value",
+        embedding_model="qwen3.7-text-embedding",
+        embedding_dims=1024,
+    )
+
+    assert summary.status == status
+    assert client.indices.read_indices == [
+        ("mapping", PHYSICAL_INDEX),
+        ("aliases", PHYSICAL_INDEX),
+    ]
+    assert client.count_indices == [PHYSICAL_INDEX]
+
+
+@pytest.mark.parametrize(
+    ("vector_dims", "aliases", "message"),
+    [
+        (768, None, "embedding"),
+        (1024, {READ_ALIAS: {}, WRITE_ALIAS: {}}, WRITE_ALIAS),
+    ],
+)
+def test_initialize_rejects_inconsistent_readback(vector_dims, aliases, message):
+    """A stale mapping or write alias must fail instead of producing a trusted summary."""
+    client = FakeClient(vector_dims=vector_dims, aliases=aliases)
+    store = FakeStore()
+
+    with pytest.raises(ValueError, match=message):
+        initialize_elasticsearch(
+            client=client,
+            store=store,
+            api_key="sk-valid-value",
+            embedding_model="qwen3.7-text-embedding",
+            embedding_dims=1024,
+        )
+
+
+def test_main_prints_a_safe_initialization_summary(monkeypatch, capsys, caplog):
+    """The CLI summary must not surface the configured DashScope credential."""
+    from rag import init_elasticsearch
+
+    unique_key = "sk-unique-secret-value"
+    client = FakeClient()
+    store = FakeStore(status="already_initialized", client=client)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", unique_key)
+    monkeypatch.setattr(init_elasticsearch.llm_config, "DASHSCOPE_API_KEY", unique_key)
+    monkeypatch.setattr(init_elasticsearch.llm_config, "EMBEDDING_MODEL", "qwen3.7-text-embedding")
+    monkeypatch.setattr(init_elasticsearch.elasticsearch_config, "EMBEDDING_DIMS", 1024)
+    monkeypatch.setattr(init_elasticsearch, "create_elasticsearch_client", lambda: client)
+    monkeypatch.setattr(init_elasticsearch, "ElasticsearchChildStore", lambda *, client: store)
+
+    assert main() == 0
+
+    captured = capsys.readouterr()
+    assert "status=already_initialized" in captured.out
+    assert "documents=0" in captured.out
+    assert unique_key not in captured.out
+    assert unique_key not in captured.err
+    assert unique_key not in caplog.text
