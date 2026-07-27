@@ -16,6 +16,9 @@ from rag.elasticsearch_store import (
 
 REQUIRED_EMBEDDING_MODEL = "qwen3.7-text-embedding"
 REQUIRED_EMBEDDING_DIMS = 1024
+REQUIRED_PHYSICAL_INDEX = "rag-child-chunks-v1"
+REQUIRED_READ_ALIAS = "rag-child-chunks-read"
+REQUIRED_WRITE_ALIAS = "rag-child-chunks-write"
 _KEY_PLACEHOLDERS = frozenset(
     value.casefold()
     for value in (
@@ -69,29 +72,30 @@ def initialize_elasticsearch(
         embedding_model=embedding_model,
         embedding_dims=embedding_dims,
     )
+    _validate_initialization_targets(store)
     if not client.ping():
         raise ConnectionError("Elasticsearch ping failed")
 
     result = store.ensure_index(REQUIRED_EMBEDDING_DIMS)
     _validate_mapping(
-        client.indices.get_mapping(index=result.physical_index),
-        physical_index=result.physical_index,
-        vector_dims=result.vector_dims,
+        client.indices.get_mapping(index=REQUIRED_PHYSICAL_INDEX),
+        physical_index=REQUIRED_PHYSICAL_INDEX,
+        vector_dims=REQUIRED_EMBEDDING_DIMS,
     )
     _validate_aliases(
-        client.indices.get_alias(index=result.physical_index),
-        physical_index=result.physical_index,
-        read_alias=result.read_alias,
-        write_alias=result.write_alias,
+        client.indices.get_alias(index=REQUIRED_PHYSICAL_INDEX),
+        physical_index=REQUIRED_PHYSICAL_INDEX,
+        read_alias=REQUIRED_READ_ALIAS,
+        write_alias=REQUIRED_WRITE_ALIAS,
     )
-    count_response = client.count(index=result.physical_index)
+    count_response = client.count(index=REQUIRED_PHYSICAL_INDEX)
     document_count = _document_count(count_response)
     return ElasticsearchInitializationSummary(
         status=result.status,
-        physical_index=result.physical_index,
-        vector_dims=result.vector_dims,
-        read_alias=result.read_alias,
-        write_alias=result.write_alias,
+        physical_index=REQUIRED_PHYSICAL_INDEX,
+        vector_dims=REQUIRED_EMBEDDING_DIMS,
+        read_alias=REQUIRED_READ_ALIAS,
+        write_alias=REQUIRED_WRITE_ALIAS,
         document_count=document_count,
     )
 
@@ -133,6 +137,17 @@ def main() -> int:
         )
     )
     return 0
+
+
+def _validate_initialization_targets(store: ElasticsearchChildStore) -> None:
+    expected_targets = (
+        ("PHYSICAL_INDEX", "ES_PHYSICAL_INDEX", REQUIRED_PHYSICAL_INDEX),
+        ("READ_ALIAS", "ES_INDEX_READ_ALIAS", REQUIRED_READ_ALIAS),
+        ("WRITE_ALIAS", "ES_INDEX_WRITE_ALIAS", REQUIRED_WRITE_ALIAS),
+    )
+    for attribute, field_name, expected_value in expected_targets:
+        if getattr(store.config, attribute, None) != expected_value:
+            raise ValueError(f"{field_name} must be {expected_value}")
 
 
 def _validate_mapping(

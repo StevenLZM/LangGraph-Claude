@@ -48,9 +48,11 @@ class FakeClient:
     def __init__(self, *, ping_result=True, vector_dims=1024, aliases=None):
         self.ping_result = ping_result
         self.indices = FakeIndices(vector_dims=vector_dims, aliases=aliases)
+        self.ping_calls = 0
         self.count_indices = []
 
     def ping(self):
+        self.ping_calls += 1
         return self.ping_result
 
     def count(self, *, index):
@@ -130,6 +132,44 @@ def test_initialize_stops_before_index_write_when_ping_fails():
         )
 
     assert store.ensure_calls == []
+
+
+@pytest.mark.parametrize(
+    ("config_attribute", "invalid_target", "message"),
+    [
+        ("PHYSICAL_INDEX", "wrong-child-index", "ES_PHYSICAL_INDEX"),
+        ("READ_ALIAS", "wrong-child-read", "ES_INDEX_READ_ALIAS"),
+        ("WRITE_ALIAS", "wrong-child-write", "ES_INDEX_WRITE_ALIAS"),
+    ],
+)
+def test_initialize_rejects_noncanonical_targets_before_ping_or_index_write(
+    config_attribute,
+    invalid_target,
+    message,
+):
+    """A configurable target must not redirect the formal initializer write."""
+    config_values = {
+        "PHYSICAL_INDEX": PHYSICAL_INDEX,
+        "READ_ALIAS": READ_ALIAS,
+        "WRITE_ALIAS": WRITE_ALIAS,
+    }
+    config_values[config_attribute] = invalid_target
+    client = FakeClient()
+    store = FakeStore(config=SimpleNamespace(**config_values))
+
+    with pytest.raises(ValueError, match=message):
+        initialize_elasticsearch(
+            client=client,
+            store=store,
+            api_key="sk-valid-value",
+            embedding_model="qwen3.7-text-embedding",
+            embedding_dims=1024,
+        )
+
+    assert client.ping_calls == 0
+    assert store.ensure_calls == []
+    assert client.indices.read_indices == []
+    assert client.count_indices == []
 
 
 def test_initialize_returns_verified_empty_index_summary():
