@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from threading import Event, Timer
 
 import pytest
 from langchain_core.documents import Document
@@ -83,6 +84,45 @@ def _record_stage_spans(monkeypatch):
     monkeypatch.setattr(retriever, "trace_span", fake_trace_span)
     monkeypatch.setattr(retriever, "end_trace_span", fake_end_trace_span)
     return spans
+
+
+def test_parallel_recall_enters_bm25_span_first_when_its_entry_is_delayed(
+    monkeypatch,
+):
+    """Executor scheduling must not reorder the two required recall spans."""
+    from rag import retriever
+
+    spans = []
+    allow_bm25_entry = Event()
+
+    @contextmanager
+    def delayed_trace_span(name, *, inputs=None, **kwargs):
+        if name == "bm25_child":
+            assert allow_bm25_entry.wait(timeout=5)
+        span = _RecordedSpan(name, inputs)
+        spans.append(span)
+        yield span
+
+    monkeypatch.setattr(retriever, "trace_span", delayed_trace_span)
+    monkeypatch.setattr(
+        retriever,
+        "end_trace_span",
+        lambda span, *, outputs: setattr(span, "outputs", outputs),
+    )
+    release_bm25 = Timer(0.1, allow_bm25_entry.set)
+    release_bm25.start()
+    try:
+        retrieve_with_trace(
+            "保修期",
+            retrieval_context={},
+            components=_complete_fake_components(),
+        )
+    finally:
+        allow_bm25_entry.set()
+        release_bm25.cancel()
+        release_bm25.join()
+
+    assert tuple(span.name for span in spans) == REQUIRED_EVAL_STAGES
 
 
 def test_retrieval_records_all_required_langsmith_stage_spans(monkeypatch):
@@ -246,6 +286,33 @@ def test_stage_latency_measures_business_call_not_trace_setup(monkeypatch):
 
     assert result == [_child("bm25")]
     assert latency == 1000.0
+
+
+def test_stage_entry_signal_is_released_when_trace_setup_fails(monkeypatch):
+    """A failed BM25 trace setup must not leave the Dense worker blocked."""
+    from rag import retriever
+
+    span_entered = Event()
+
+    @contextmanager
+    def failing_trace_span(name, *, inputs):
+        raise RuntimeError("trace setup failed")
+        yield
+
+    monkeypatch.setattr(retriever, "trace_span", failing_trace_span)
+
+    with pytest.raises(RuntimeError, match="trace setup failed"):
+        retriever._run_traced_stage(
+            name="bm25_child",
+            function=lambda: [_child("bm25")],
+            args=(),
+            inputs={},
+            configured_k=50,
+            score_type="bm25_score",
+            span_entered_event=span_entered,
+        )
+
+    assert span_entered.is_set()
 
 
 @pytest.mark.parametrize("failing_branch", ["bm25", "dense"])

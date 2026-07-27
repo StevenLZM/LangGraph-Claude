@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from dataclasses import dataclass
 from functools import partial
+from threading import Event
 from time import perf_counter
 from typing import Any, Callable, List, Mapping, Optional
 from uuid import uuid4
@@ -364,6 +365,7 @@ def _parallel_recall(
         "metadata_filter": context.get("metadata_filter"),
         "documents": [],
     }
+    bm25_span_entered = Event()
     bm25_call = partial(
         _run_traced_stage,
         name="bm25_child",
@@ -372,6 +374,7 @@ def _parallel_recall(
         inputs=audit_inputs,
         configured_k=rag_config.BM25_TOP_K,
         score_type="bm25_score",
+        span_entered_event=bm25_span_entered,
     )
     dense_call = partial(
         _run_traced_stage,
@@ -381,6 +384,7 @@ def _parallel_recall(
         inputs=audit_inputs,
         configured_k=rag_config.SEMANTIC_TOP_K,
         score_type="dense_score",
+        wait_for_span_entry=bm25_span_entered,
     )
     bm25_context = copy_context()
     dense_context = copy_context()
@@ -426,34 +430,44 @@ def _run_traced_stage(
     inputs: Mapping[str, Any],
     configured_k: int,
     score_type: str,
+    wait_for_span_entry: Event | None = None,
+    span_entered_event: Event | None = None,
 ) -> tuple[Any, float]:
-    with trace_span(name, inputs=inputs) as span:
-        started = perf_counter()
-        try:
-            result = function(*args)
-        except Exception as exc:
+    if wait_for_span_entry is not None:
+        wait_for_span_entry.wait()
+    try:
+        with trace_span(name, inputs=inputs) as span:
+            if span_entered_event is not None:
+                span_entered_event.set()
+            started = perf_counter()
+            try:
+                result = function(*args)
+            except Exception as exc:
+                latency = (perf_counter() - started) * 1000
+                end_trace_span(
+                    span,
+                    outputs={
+                        "documents": [],
+                        "configured_k": configured_k,
+                        "score_type": score_type,
+                        "latency_ms": latency,
+                        "error": str(exc),
+                    },
+                )
+                raise
             latency = (perf_counter() - started) * 1000
             end_trace_span(
                 span,
                 outputs={
-                    "documents": [],
+                    "documents": serialize_documents_for_trace(result),
                     "configured_k": configured_k,
                     "score_type": score_type,
                     "latency_ms": latency,
-                    "error": str(exc),
                 },
             )
-            raise
-        latency = (perf_counter() - started) * 1000
-        end_trace_span(
-            span,
-            outputs={
-                "documents": serialize_documents_for_trace(result),
-                "configured_k": configured_k,
-                "score_type": score_type,
-                "latency_ms": latency,
-            },
-        )
+    finally:
+        if span_entered_event is not None:
+            span_entered_event.set()
     return result, latency
 
 
