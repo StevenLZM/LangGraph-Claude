@@ -78,6 +78,10 @@ def _record_trace_spans(monkeypatch, chain):
     return spans
 
 
+def _generation_attempt_spans(spans):
+    return [span for span in spans if span.name == "generation.attempt"]
+
+
 def test_run_rag_with_trace_retrieves_once_and_generates_from_final_context(
     monkeypatch,
 ):
@@ -216,6 +220,7 @@ def test_rag_execution_records_root_rewrite_retrieval_and_generation_spans(
         "query.rewrite",
         "retrieval",
         "generation",
+        "generation.attempt",
     ]
     assert spans[0].inputs == {
         "question": "保修期多久？",
@@ -249,6 +254,13 @@ def test_rag_execution_records_root_rewrite_retrieval_and_generation_spans(
         "system_prompt": chain.SYSTEM_PROMPT,
     }
     assert spans[3].outputs["answer"] == execution.answer
+    assert _generation_attempt_spans(spans)[0].inputs == {
+        "question": "保修期多久？",
+        "chat_history": history,
+        "documents": retrieval.final_documents,
+        "evidence_context": chain.format_docs_for_context(retrieval.final_documents),
+        "system_prompt": chain.SYSTEM_PROMPT,
+    }
     assert spans[0].outputs["answer"] == execution.answer
     assert spans[0].outputs["documents"] == spans[2].outputs["documents"]
     assert spans[0].outputs["evaluation_trace"]["trace_id"] == "trace-1"
@@ -311,4 +323,28 @@ def test_generation_span_records_two_attempts_without_extra_retry(monkeypatch):
     execution = chain.run_rag_with_trace("保修期多久？")
 
     assert len(calls) == 2
-    assert spans[-1].outputs == {"answer": execution.answer, "attempts": 2}
+    generation_span = next(span for span in spans if span.name == "generation")
+    assert generation_span.outputs == {"answer": execution.answer, "attempts": 2}
+    assert [span.inputs for span in _generation_attempt_spans(spans)] == [
+        {
+            "question": "保修期多久？",
+            "chat_history": (),
+            "documents": _retrieval_execution().final_documents,
+            "evidence_context": chain.format_docs_for_context(
+                _retrieval_execution().final_documents
+            ),
+            "system_prompt": chain.SYSTEM_PROMPT,
+        },
+        {
+            "question": (
+                "保修期多久？\n\n上一次回答的证据引用无效。"
+                "只能使用这些引用：[S1]；每个事实结论必须引用。"
+            ),
+            "chat_history": (),
+            "documents": _retrieval_execution().final_documents,
+            "evidence_context": chain.format_docs_for_context(
+                _retrieval_execution().final_documents
+            ),
+            "system_prompt": chain.SYSTEM_PROMPT,
+        },
+    ]

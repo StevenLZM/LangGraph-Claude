@@ -238,25 +238,40 @@ def run_rag_with_trace(
                 else:
                     started = perf_counter()
                     attempts = 1
-                    answer = generate_answer_from_documents(
-                        question=question,
-                        documents=documents,
-                        chat_history=chat_history,
-                    )
+
+                    def generate_attempt(attempt_question: str) -> str:
+                        attempt_inputs = {
+                            **generation_inputs,
+                            "question": attempt_question,
+                        }
+                        with trace_span(
+                            "generation.attempt",
+                            inputs=attempt_inputs,
+                            tags=resolved_tags,
+                        ) as attempt_span:
+                            attempt_answer = generate_answer_from_documents(
+                                question=attempt_question,
+                                documents=documents,
+                                chat_history=chat_history,
+                            )
+                            end_trace_span(
+                                attempt_span,
+                                outputs={"answer": attempt_answer},
+                            )
+                            return attempt_answer
+
+                    answer = generate_attempt(question)
                     if not citations_are_valid(answer, documents):
                         allowed = ", ".join(
                             f"[{document.metadata['evidence_id']}]"
                             for document in documents
                         )
                         attempts = 2
-                        answer = generate_answer_from_documents(
-                            question=(
-                                f"{question}\n\n上一次回答的证据引用无效。"
-                                f"只能使用这些引用：{allowed}；每个事实结论必须引用。"
-                            ),
-                            documents=documents,
-                            chat_history=chat_history,
+                        retry_question = (
+                            f"{question}\n\n上一次回答的证据引用无效。"
+                            f"只能使用这些引用：{allowed}；每个事实结论必须引用。"
                         )
+                        answer = generate_attempt(retry_question)
                         if not citations_are_valid(answer, documents):
                             answer = INVALID_CITATION_SAFE_ANSWER
                     generation_latency_ms = (perf_counter() - started) * 1000
