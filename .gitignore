@@ -28,5 +28,9 @@ venv/
 01_RAG/data/date_cache.sqlite
 01_RAG/data/vectorstore/milvus.db/
 
-# 注意：本项目为私有项目，.env、向量库、SQLite 数据都随仓库提交，
-# 保证在另一台机器克隆后可直接运行。
+# Local project secrets: keep files on disk, never include future commits.
+/01_RAG/.env
+/02_REACT_AGENT/.env
+/03_MULTI_AGENT/.env
+/04_HUMAN_IN_THE_LOOP/.env
+/05_PRODUCT_AGENT/.env
