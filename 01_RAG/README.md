@@ -131,6 +131,22 @@ python -m rag.init_elasticsearch
 
 `.env` 是本机私密配置；后续提交中只有 `*.env.example` 可以进入版本控制，绝不提交真实 Key。
 
+### LangSmith 审计 Trace（可选）
+
+本项目的 LangSmith Trace 用于审计 RAG 请求、检索和生成过程。默认关闭；在 `.env` 中配置后启用：
+
+```dotenv
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=
+LANGSMITH_PROJECT=01-rag-local
+```
+
+请在本机 `.env` 的 `LANGSMITH_API_KEY=` 后填入自己的 Key，示例和版本控制中必须保持空值。新配置优先使用 `LANGSMITH_*`，同时兼容旧变量 `LANGCHAIN_TRACING_V2`、`LANGCHAIN_API_KEY` 和 `LANGCHAIN_PROJECT`。
+
+这是显式的审计模式：API key、authorization、password、token、secret、cookie 等凭证字段的值会被隐藏，并统一显示为 `[REDACTED_CREDENTIAL]`。为保留完整审计证据，下列内容**不会**隐藏：问题、历史、完整 Chunk/Parent 正文、证据 context、Prompt、回答、引用、业务 metadata 和分数。
+
+因此，部署方必须自行负责 LangSmith 项目的访问控制和数据保留策略；完整正文也会增加 Trace 存储量和相应成本。关闭 LangSmith，或未配置可用的 LangSmith 凭证时，RAG 主流程不受影响，应用仍可正常运行。
+
 ### 第四步：生成示例 PDF（可选）
 
 ```bash
