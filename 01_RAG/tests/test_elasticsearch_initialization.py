@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from elastic_transport import ApiResponseMeta, HttpHeaders, NodeConfig, ObjectApiResponse
 
 from rag.elasticsearch_store import IndexInitializationResult
 from rag.init_elasticsearch import (
@@ -16,7 +17,14 @@ WRITE_ALIAS = "rag-child-chunks-write"
 
 
 class FakeIndices:
-    def __init__(self, *, vector_dims=1024, aliases=None, global_aliases=None):
+    def __init__(
+        self,
+        *,
+        vector_dims=1024,
+        aliases=None,
+        global_aliases=None,
+        alias_responses=None,
+    ):
         self.vector_dims = vector_dims
         self.aliases = aliases or {
             READ_ALIAS: {},
@@ -26,6 +34,7 @@ class FakeIndices:
             alias_name: {PHYSICAL_INDEX: attributes}
             for alias_name, attributes in self.aliases.items()
         }
+        self.alias_responses = alias_responses or {}
         self.read_indices = []
 
     def get_mapping(self, *, index):
@@ -45,6 +54,8 @@ class FakeIndices:
 
     def get_alias(self, *, name):
         self.read_indices.append(("alias", name))
+        if name in self.alias_responses:
+            return self.alias_responses[name]
         return {
             target_index: {"aliases": {name: attributes}}
             for target_index, attributes in self.global_aliases.get(name, {}).items()
@@ -59,12 +70,14 @@ class FakeClient:
         vector_dims=1024,
         aliases=None,
         global_aliases=None,
+        alias_responses=None,
     ):
         self.ping_result = ping_result
         self.indices = FakeIndices(
             vector_dims=vector_dims,
             aliases=aliases,
             global_aliases=global_aliases,
+            alias_responses=alias_responses,
         )
         self.ping_calls = 0
         self.count_indices = []
@@ -98,6 +111,19 @@ class FakeStore:
             read_alias=self.config.READ_ALIAS,
             write_alias=self.config.WRITE_ALIAS,
         )
+
+
+def _object_api_response(body):
+    return ObjectApiResponse(
+        body=body,
+        meta=ApiResponseMeta(
+            status=200,
+            http_version="1.1",
+            headers=HttpHeaders(),
+            duration=0.0,
+            node=NodeConfig(scheme="http", host="localhost", port=9200),
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -215,6 +241,61 @@ def test_initialize_returns_verified_empty_index_summary():
         ("alias", WRITE_ALIAS),
     ]
     assert client.count_indices == [PHYSICAL_INDEX]
+
+
+def test_initialize_accepts_object_api_response_alias_readback():
+    """Elasticsearch 8 transport object responses retain the full alias target map."""
+    client = FakeClient(
+        alias_responses={
+            READ_ALIAS: _object_api_response(
+                {PHYSICAL_INDEX: {"aliases": {READ_ALIAS: {}}}}
+            ),
+            WRITE_ALIAS: _object_api_response(
+                {
+                    PHYSICAL_INDEX: {
+                        "aliases": {WRITE_ALIAS: {"is_write_index": True}}
+                    }
+                }
+            ),
+        }
+    )
+    store = FakeStore()
+
+    summary = initialize_elasticsearch(
+        client=client,
+        store=store,
+        api_key="sk-valid-value",
+        embedding_model="qwen3.7-text-embedding",
+        embedding_dims=1024,
+    )
+
+    assert summary.status == "created"
+
+
+def test_initialize_rejects_non_dict_object_api_response_alias_readback():
+    """A transport response whose body is not an alias object cannot validate."""
+    client = FakeClient(
+        alias_responses={
+            READ_ALIAS: _object_api_response([]),
+            WRITE_ALIAS: _object_api_response(
+                {
+                    PHYSICAL_INDEX: {
+                        "aliases": {WRITE_ALIAS: {"is_write_index": True}}
+                    }
+                }
+            ),
+        }
+    )
+    store = FakeStore()
+
+    with pytest.raises(ValueError, match="read alias"):
+        initialize_elasticsearch(
+            client=client,
+            store=store,
+            api_key="sk-valid-value",
+            embedding_model="qwen3.7-text-embedding",
+            embedding_dims=1024,
+        )
 
 
 @pytest.mark.parametrize("status", ["created", "aliases_repaired", "already_initialized"])

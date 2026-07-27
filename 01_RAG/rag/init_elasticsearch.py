@@ -187,13 +187,13 @@ def _validate_aliases(
     read_alias: str,
     write_alias: str,
 ) -> None:
-    read_targets = aliases.get(read_alias)
+    read_targets = _alias_targets_as_mapping(aliases.get(read_alias))
     if not isinstance(read_targets, Mapping) or set(read_targets) != {physical_index}:
         raise ValueError(
             f"Elasticsearch read alias must target only {physical_index}: {read_alias}"
         )
 
-    write_targets = aliases.get(write_alias)
+    write_targets = _alias_targets_as_mapping(aliases.get(write_alias))
     if not isinstance(write_targets, Mapping) or set(write_targets) != {physical_index}:
         raise ValueError(
             f"Elasticsearch write alias must target only {physical_index}: {write_alias}"
@@ -206,6 +206,18 @@ def _validate_aliases(
         "is_write_index"
     ) is not True:
         raise ValueError(f"Elasticsearch write alias must be writable: {write_alias}")
+
+
+def _alias_targets_as_mapping(response: object) -> Mapping[str, Any] | None:
+    if isinstance(response, Mapping):
+        return response
+    items = getattr(response, "items", None)
+    if not callable(items):
+        return None
+    try:
+        return dict(items())
+    except (TypeError, ValueError):
+        return None
 
 
 def _safe_cli_error_message(exc: Exception) -> str:
