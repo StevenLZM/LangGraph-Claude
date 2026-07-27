@@ -141,12 +141,14 @@ class ElasticsearchChildStore:
         self._validate_vector_dims(vector_dims)
         index = self.config.PHYSICAL_INDEX
         if not self.client.indices.exists(index=index):
+            self._reject_existing_aliases_before_create()
             try:
                 self._create_index(vector_dims)
             except Exception as exc:
                 if not _is_resource_already_exists(exc):
                     raise
             else:
+                self._require_complete_aliases(self._read_aliases())
                 return self._initialization_result("created", vector_dims)
 
         return self._validate_existing_index(vector_dims)
@@ -215,6 +217,27 @@ class ElasticsearchChildStore:
             else:
                 aliases[alias_name] = None
         return aliases
+
+    def _reject_existing_aliases_before_create(self) -> None:
+        aliases = self._read_aliases()
+        for alias_name, targets in aliases.items():
+            if targets is not None:
+                conflict_targets = ", ".join(sorted(targets)) or "<none>"
+                raise ValueError(
+                    f"别名冲突: {alias_name} 绑定到 {conflict_targets}，"
+                    "物理索引尚不存在，不能创建或重绑别名"
+                )
+
+    def _require_complete_aliases(
+        self,
+        aliases: Mapping[str, Mapping[str, Any] | None],
+    ) -> None:
+        missing_actions = self._alias_actions_for_missing_aliases(aliases)
+        if missing_actions:
+            missing_aliases = ", ".join(
+                action["add"]["alias"] for action in missing_actions
+            )
+            raise RuntimeError(f"Elasticsearch 索引创建后别名缺失: {missing_aliases}")
 
     def _alias_actions_for_missing_aliases(
         self,

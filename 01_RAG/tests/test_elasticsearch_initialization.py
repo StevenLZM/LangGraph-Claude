@@ -16,11 +16,15 @@ WRITE_ALIAS = "rag-child-chunks-write"
 
 
 class FakeIndices:
-    def __init__(self, *, vector_dims=1024, aliases=None):
+    def __init__(self, *, vector_dims=1024, aliases=None, global_aliases=None):
         self.vector_dims = vector_dims
         self.aliases = aliases or {
             READ_ALIAS: {},
             WRITE_ALIAS: {"is_write_index": True},
+        }
+        self.global_aliases = global_aliases or {
+            alias_name: {PHYSICAL_INDEX: attributes}
+            for alias_name, attributes in self.aliases.items()
         }
         self.read_indices = []
 
@@ -39,15 +43,29 @@ class FakeIndices:
             }
         }
 
-    def get_alias(self, *, index):
-        self.read_indices.append(("aliases", index))
-        return {index: {"aliases": self.aliases}}
+    def get_alias(self, *, name):
+        self.read_indices.append(("alias", name))
+        return {
+            target_index: {"aliases": {name: attributes}}
+            for target_index, attributes in self.global_aliases.get(name, {}).items()
+        }
 
 
 class FakeClient:
-    def __init__(self, *, ping_result=True, vector_dims=1024, aliases=None):
+    def __init__(
+        self,
+        *,
+        ping_result=True,
+        vector_dims=1024,
+        aliases=None,
+        global_aliases=None,
+    ):
         self.ping_result = ping_result
-        self.indices = FakeIndices(vector_dims=vector_dims, aliases=aliases)
+        self.indices = FakeIndices(
+            vector_dims=vector_dims,
+            aliases=aliases,
+            global_aliases=global_aliases,
+        )
         self.ping_calls = 0
         self.count_indices = []
 
@@ -193,7 +211,8 @@ def test_initialize_returns_verified_empty_index_summary():
     assert summary.write_alias == WRITE_ALIAS
     assert client.indices.read_indices == [
         ("mapping", PHYSICAL_INDEX),
-        ("aliases", PHYSICAL_INDEX),
+        ("alias", READ_ALIAS),
+        ("alias", WRITE_ALIAS),
     ]
     assert client.count_indices == [PHYSICAL_INDEX]
 
@@ -215,7 +234,8 @@ def test_initialize_rereads_every_successful_initialization_status(status):
     assert summary.status == status
     assert client.indices.read_indices == [
         ("mapping", PHYSICAL_INDEX),
-        ("aliases", PHYSICAL_INDEX),
+        ("alias", READ_ALIAS),
+        ("alias", WRITE_ALIAS),
     ]
     assert client.count_indices == [PHYSICAL_INDEX]
 
@@ -233,6 +253,29 @@ def test_initialize_rejects_inconsistent_readback(vector_dims, aliases, message)
     store = FakeStore()
 
     with pytest.raises(ValueError, match=message):
+        initialize_elasticsearch(
+            client=client,
+            store=store,
+            api_key="sk-valid-value",
+            embedding_model="qwen3.7-text-embedding",
+            embedding_dims=1024,
+        )
+
+
+def test_initialize_rejects_global_read_alias_with_an_extra_target():
+    """Physical-index readback alone must not hide a multi-target read alias."""
+    client = FakeClient(
+        global_aliases={
+            READ_ALIAS: {
+                PHYSICAL_INDEX: {},
+                "another-index": {},
+            },
+            WRITE_ALIAS: {PHYSICAL_INDEX: {"is_write_index": True}},
+        }
+    )
+    store = FakeStore()
+
+    with pytest.raises(ValueError, match="read alias"):
         initialize_elasticsearch(
             client=client,
             store=store,
@@ -264,3 +307,44 @@ def test_main_prints_a_safe_initialization_summary(monkeypatch, capsys, caplog):
     assert unique_key not in captured.out
     assert unique_key not in captured.err
     assert unique_key not in caplog.text
+
+
+def test_main_reports_known_validation_reason_without_unknown_exception_text(
+    monkeypatch,
+    capsys,
+    caplog,
+):
+    """CLI failures distinguish known validation from arbitrary secret-bearing errors."""
+    from rag import init_elasticsearch
+
+    monkeypatch.setattr(
+        init_elasticsearch,
+        "initialize_from_environment",
+        lambda: (_ for _ in ()).throw(
+            ValueError("EMBEDDING_MODEL must be qwen3.7-text-embedding")
+        ),
+    )
+
+    assert main() == 1
+
+    known_failure = capsys.readouterr()
+    assert "EMBEDDING_MODEL must be qwen3.7-text-embedding" in known_failure.err
+
+    unique_secret = "do-not-print-this-unknown-exception-secret"
+    monkeypatch.setattr(
+        init_elasticsearch,
+        "initialize_from_environment",
+        lambda: (_ for _ in ()).throw(RuntimeError(unique_secret)),
+    )
+
+    assert main() == 1
+
+    unknown_failure = capsys.readouterr()
+    combined_output = (
+        known_failure.out
+        + known_failure.err
+        + unknown_failure.out
+        + unknown_failure.err
+        + caplog.text
+    )
+    assert unique_secret not in combined_output

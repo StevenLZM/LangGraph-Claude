@@ -67,9 +67,10 @@ def test_create_client_prefers_api_key_over_basic_auth(monkeypatch):
 
 
 class _CreateIndices:
-    def __init__(self):
+    def __init__(self, *, aliases=None):
         self.created = None
         self.create_calls = 0
+        self.aliases = aliases or {}
 
     def exists(self, *, index):
         return False
@@ -77,12 +78,23 @@ class _CreateIndices:
     def create(self, *, index, body):
         self.create_calls += 1
         self.created = (index, body)
+        for alias_name, attributes in body["aliases"].items():
+            self.aliases.setdefault(alias_name, {})[index] = attributes
         return {"acknowledged": True}
+
+    def exists_alias(self, *, name):
+        return bool(self.aliases.get(name))
+
+    def get_alias(self, *, name):
+        return {
+            target_index: {"aliases": {name: attributes}}
+            for target_index, attributes in self.aliases.get(name, {}).items()
+        }
 
 
 class _CreateClient:
-    def __init__(self):
-        self.indices = _CreateIndices()
+    def __init__(self, **kwargs):
+        self.indices = _CreateIndices(**kwargs)
 
 
 def test_ensure_index_creates_versioned_index_and_aliases():
@@ -107,6 +119,45 @@ def test_ensure_index_creates_versioned_index_and_aliases():
     assert body["mappings"]["properties"]["embedding"]["similarity"] == "cosine"
     assert body["aliases"]["rag-child-chunks-read"] == {}
     assert body["aliases"]["rag-child-chunks-write"]["is_write_index"] is True
+
+
+@pytest.mark.parametrize(
+    "alias_name",
+    ["rag-child-chunks-read", "rag-child-chunks-write"],
+)
+def test_ensure_index_rejects_global_alias_target_before_creating_absent_index(
+    alias_name,
+):
+    """An absent physical index must never add either alias to another target."""
+    from rag.elasticsearch_store import ElasticsearchChildStore
+
+    client = _CreateClient(aliases={alias_name: {"another-index": {}}})
+    store = ElasticsearchChildStore(client=client, config=_config())
+
+    with pytest.raises(ValueError, match="别名冲突"):
+        store.ensure_index(vector_dims=3)
+
+    assert client.indices.create_calls == 0
+
+
+def test_ensure_index_rejects_extra_global_alias_target_after_create():
+    """Creation cannot report success when a globally read alias has two targets."""
+    from rag.elasticsearch_store import ElasticsearchChildStore
+
+    class ExtraAliasTargetAfterCreateIndices(_CreateIndices):
+        def create(self, *, index, body):
+            response = super().create(index=index, body=body)
+            self.aliases["rag-child-chunks-read"]["another-index"] = {}
+            return response
+
+    client = _CreateClient()
+    client.indices = ExtraAliasTargetAfterCreateIndices()
+    store = ElasticsearchChildStore(client=client, config=_config())
+
+    with pytest.raises(ValueError, match="别名冲突"):
+        store.ensure_index(vector_dims=3)
+
+    assert client.indices.create_calls == 1
 
 
 def test_ensure_index_rejects_configured_embedding_dimension_mismatch():
@@ -135,7 +186,7 @@ class _ExistingIndices:
                 }
             }
         }
-        self.aliases = aliases or {
+        self.aliases = aliases if aliases is not None else {
             "rag-child-chunks-read": {"rag-child-chunks-v1": {}},
             "rag-child-chunks-write": {
                 "rag-child-chunks-v1": {"is_write_index": True}
@@ -359,7 +410,7 @@ def test_ensure_index_rejects_write_alias_without_write_index_marker():
 
 class _ConcurrentCreateIndices(_ExistingIndices):
     def __init__(self):
-        super().__init__()
+        super().__init__(aliases={})
         self.exists_calls = 0
 
     def exists(self, *, index):
@@ -368,6 +419,12 @@ class _ConcurrentCreateIndices(_ExistingIndices):
 
     def create(self, *, index, body):
         self.create_calls += 1
+        self.aliases = {
+            "rag-child-chunks-read": {"rag-child-chunks-v1": {}},
+            "rag-child-chunks-write": {
+                "rag-child-chunks-v1": {"is_write_index": True}
+            },
+        }
         raise RuntimeError("resource_already_exists_exception")
 
 
