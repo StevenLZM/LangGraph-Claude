@@ -122,7 +122,7 @@ def rag_tracing_context(
             client=client,
             project_name=settings.project_name,
             enabled=True,
-            tags=tags,
+            tags=list(tags),
             metadata=safe_metadata,
         )
     ):
@@ -153,7 +153,7 @@ def trace_span(
             run_type=run_type,
             client=client,
             inputs=safe_inputs,
-            tags=tags,
+            tags=list(tags),
             metadata=safe_metadata,
         )
     ) as span:

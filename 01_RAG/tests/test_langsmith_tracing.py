@@ -330,10 +330,31 @@ def test_rag_context_sanitizes_explicit_metadata_before_transport(monkeypatch):
             "client": client,
             "project_name": "project",
             "enabled": True,
-            "tags": (),
+            "tags": [],
             "metadata": {"api_key": REDACTED_CREDENTIAL, "answer": "safe"},
         }
     ]
+
+
+def test_rag_context_converts_tuple_tags_to_a_langsmith_compatible_list(monkeypatch):
+    """Tuple tags must work when LangSmith appends its own list of tags."""
+    received = []
+    context = _RecordingContext()
+    monkeypatch.setattr(tracing, "resolve_langsmith_settings", lambda environ=None: _enabled_settings())
+    monkeypatch.setattr(tracing, "get_safe_langsmith_client", lambda settings: object())
+
+    def langsmith_context(**kwargs):
+        received.append(kwargs)
+        kwargs["tags"] + ["langsmith"]
+        return context
+
+    monkeypatch.setattr(tracing, "tracing_context", langsmith_context)
+
+    with tracing.rag_tracing_context(tags=("request",)):
+        pass
+
+    assert received[0]["tags"] == ["request"]
+    assert context.exit_calls == [(None, None, None)]
 
 
 def test_span_sanitizes_explicit_inputs_metadata_and_outputs(monkeypatch):
@@ -366,6 +387,28 @@ def test_span_sanitizes_explicit_inputs_metadata_and_outputs(monkeypatch):
     assert received[0]["inputs"] == {"token": REDACTED_CREDENTIAL, "question": "question"}
     assert received[0]["metadata"] == {"password": REDACTED_CREDENTIAL}
     assert span.ended_with == {"cookie": REDACTED_CREDENTIAL, "answer": "answer"}
+
+
+def test_trace_span_converts_tuple_tags_to_a_langsmith_compatible_list(monkeypatch):
+    """Tuple span tags must not degrade tracing when LangSmith appends a list."""
+    received = []
+    span = object()
+    context = _RecordingContext(span=span)
+    monkeypatch.setattr(tracing, "resolve_langsmith_settings", lambda environ=None: _enabled_settings())
+    monkeypatch.setattr(tracing, "get_safe_langsmith_client", lambda settings: object())
+
+    def langsmith_trace(**kwargs):
+        received.append(kwargs)
+        kwargs["tags"] + ["langsmith"]
+        return context
+
+    monkeypatch.setattr(tracing, "trace", langsmith_trace)
+
+    with tracing.trace_span("rag.request", tags=("rag",)) as actual_span:
+        assert actual_span is span
+
+    assert received[0]["tags"] == ["rag"]
+    assert context.exit_calls == [(None, None, None)]
 
 
 @pytest.mark.parametrize("phase", ["enter", "exit"])
