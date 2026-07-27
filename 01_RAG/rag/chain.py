@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableConfig, RunnableLambda
+from langchain_core.runnables.config import var_child_runnable_config
 
 from config import DASHSCOPE_BASE_URL, DEEPSEEK_BASE_URL, llm_config
 from rag.context_assembler import render_evidence_block
-from rag.langsmith_tracing import end_trace_span, rag_tracing_context, trace_span
+from rag.langsmith_tracing import (
+    ambient_tracing_disabled,
+    end_trace_span,
+    rag_tracing_context,
+    trace_span,
+)
 from rag.query_rewriter import rewrite_query
 from rag.retrieval_trace import EvaluationTrace
 from rag.retriever import retrieve_with_trace
@@ -44,6 +51,32 @@ class RagExecution:
     source_documents: tuple[Document, ...]
     trace: EvaluationTrace
     generation_latency_ms: float
+
+
+class _AmbientTracingDisabledHistoryChain:
+    """Enter the disabled tracing boundary before the wrapped Runnable starts."""
+
+    def __init__(self, runnable: Any) -> None:
+        self._runnable = runnable
+
+    def invoke(
+        self,
+        input_dict: dict[str, Any],
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        with ambient_tracing_disabled():
+            return self._runnable.invoke(input_dict, config=config, **kwargs)
+
+
+@contextmanager
+def _without_inherited_runnable_config() -> Iterator[None]:
+    """Prevent disabled outer callbacks from becoming parents of safe traces."""
+    token = var_child_runnable_config.set(None)
+    try:
+        yield None
+    finally:
+        var_child_runnable_config.reset(token)
 
 
 def _get_llm(model_name: str | None = None):
@@ -156,7 +189,7 @@ def run_rag_with_trace(
         "auth_context": resolved_auth_context,
     }
     with rag_tracing_context(tags=resolved_tags, metadata=resolved_metadata):
-        with trace_span(
+        with _without_inherited_runnable_config(), trace_span(
             "rag.request",
             inputs=root_inputs,
             tags=resolved_tags,
@@ -357,7 +390,10 @@ def create_chain_with_history():
         history_messages_key="chat_history",
         output_messages_key="answer",
     )
-    return chain_with_history, get_session_history
+    return (
+        _AmbientTracingDisabledHistoryChain(chain_with_history),
+        get_session_history,
+    )
 
 
 def _serialize_history(chat_history: Sequence[Any]) -> str:

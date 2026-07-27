@@ -13,12 +13,13 @@ from functools import lru_cache
 from typing import Any
 
 from langchain_core.documents import Document
+from langchain_core.messages import BaseMessage
 from langsmith import Client, trace, tracing_context
+from pydantic import BaseModel
 
 
 REDACTED_CREDENTIAL = "[REDACTED_CREDENTIAL]"
 _CIRCULAR_REFERENCE = "[CIRCULAR_REFERENCE]"
-_MAX_UNKNOWN_REPR_LENGTH = 256
 _CREDENTIAL_KEYS = frozenset(
     {
         "apikey",
@@ -104,29 +105,39 @@ def get_safe_langsmith_client(
 
 
 @contextmanager
+def ambient_tracing_disabled() -> Iterator[None]:
+    """Override environment tracing before LangChain can create callbacks."""
+    with tracing_context(enabled=False):
+        yield None
+
+
+@contextmanager
 def rag_tracing_context(
     *,
     tags: Sequence[str] = (),
     metadata: Mapping[str, Any] | None = None,
 ) -> Iterator[None]:
     """Scope LangSmith request tracing without affecting business execution."""
-    settings = resolve_langsmith_settings()
-    client = get_safe_langsmith_client(settings)
-    if client is None:
-        yield None
-        return
+    with ambient_tracing_disabled():
+        settings = resolve_langsmith_settings()
+        client = get_safe_langsmith_client(settings)
+        if client is None:
+            yield None
+            return
 
-    safe_metadata = sanitize_trace_credentials(metadata) if metadata is not None else None
-    with _failure_isolated_context(
-        lambda: tracing_context(
-            client=client,
-            project_name=settings.project_name,
-            enabled=True,
-            tags=list(tags),
-            metadata=safe_metadata,
+        safe_metadata = (
+            sanitize_trace_credentials(metadata) if metadata is not None else None
         )
-    ):
-        yield None
+        with _failure_isolated_context(
+            lambda: tracing_context(
+                client=client,
+                project_name=settings.project_name,
+                enabled=True,
+                tags=list(tags),
+                metadata=safe_metadata,
+            )
+        ):
+            yield None
 
 
 @contextmanager
@@ -234,6 +245,16 @@ def _sanitize_trace_value(value: Any, *, seen: set[int]) -> Any:
     if value_id in seen:
         return _CIRCULAR_REFERENCE
 
+    if isinstance(value, BaseMessage):
+        return _sanitize_container(
+            value,
+            seen=seen,
+            build=lambda: _sanitize_trace_value(
+                value.model_dump(mode="python"),
+                seen=seen,
+            ),
+        )
+
     if isinstance(value, Document):
         return _sanitize_container(
             value,
@@ -242,6 +263,16 @@ def _sanitize_trace_value(value: Any, *, seen: set[int]) -> Any:
                 "page_content": _sanitize_trace_value(value.page_content, seen=seen),
                 "metadata": _sanitize_trace_value(value.metadata, seen=seen),
             },
+        )
+
+    if isinstance(value, BaseModel):
+        return _sanitize_container(
+            value,
+            seen=seen,
+            build=lambda: _sanitize_trace_value(
+                value.model_dump(mode="python"),
+                seen=seen,
+            ),
         )
 
     if isinstance(value, Mapping):
@@ -287,7 +318,7 @@ def _sanitize_trace_value(value: Any, *, seen: set[int]) -> Any:
             },
         )
 
-    return _bounded_repr(value)
+    return f"[UNSUPPORTED_TYPE:{type(value).__name__}]"
 
 
 def _sanitize_container(
@@ -298,11 +329,3 @@ def _sanitize_container(
         return build()
     finally:
         seen.remove(id(value))
-
-
-def _bounded_repr(value: Any) -> str:
-    try:
-        representation = repr(value)
-    except Exception:
-        representation = f"<{type(value).__name__}>"
-    return representation[:_MAX_UNKNOWN_REPR_LENGTH]

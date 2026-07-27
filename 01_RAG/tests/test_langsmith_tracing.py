@@ -8,6 +8,9 @@ from threading import Barrier
 
 import pytest
 from langchain_core.documents import Document
+from langchain_core.messages import AIMessage, HumanMessage
+from langsmith import get_tracing_context
+from pydantic import BaseModel
 
 from rag import langsmith_tracing as tracing
 from rag.chain import RagExecution, create_rag_chain
@@ -109,6 +112,12 @@ class _StatefulUnknown:
         return "unknown-object-" + ("x" * 400)
 
 
+class _TracePayloadModel(BaseModel):
+    question: str
+    auth_context: dict[str, object]
+    metadata: dict[str, object]
+
+
 def test_sanitizer_serializes_supported_containers_documents_and_dataclasses():
     document = Document(
         page_content="保修期为 12 个月",
@@ -148,15 +157,116 @@ def test_sanitizer_serializes_supported_containers_documents_and_dataclasses():
     assert record.token == "record-token"
 
 
-def test_sanitizer_uses_bounded_repr_for_unknown_objects_without_business_methods():
+def test_sanitizer_preserves_complete_messages_and_redacts_structured_fields():
+    human_content = "用户历史问题：" + ("保修条款甲乙丙" * 1_000)
+    ai_content = "助手历史回答：" + ("完整审计内容丁戊己" * 1_000)
+    human = HumanMessage(
+        content=human_content,
+        additional_kwargs={
+            "authorization": "Bearer message-authorization",
+            "tool_context": {"client_secret": "message-client-secret"},
+        },
+        response_metadata={
+            "model": "offline-model",
+            "refresh_token": "message-refresh-token",
+        },
+        name="customer",
+        id="human-message-1",
+    )
+    ai = AIMessage(
+        content=ai_content,
+        additional_kwargs={
+            "tool_calls": [
+                {
+                    "name": "lookup",
+                    "args": {"api_key": "message-tool-api-key"},
+                }
+            ]
+        },
+        response_metadata={
+            "usage": {"input_tokens": 12},
+            "cookie": "message-cookie",
+        },
+        name="assistant",
+        id="ai-message-1",
+    )
+    original_human = human.model_dump(mode="python")
+    original_ai = ai.model_dump(mode="python")
+
+    sanitized = sanitize_trace_credentials(
+        {"chat_history": [human, ai]}
+    )["chat_history"]
+
+    assert sanitized[0]["type"] == "human"
+    assert sanitized[0]["content"].encode("utf-8") == human_content.encode("utf-8")
+    assert sanitized[0]["name"] == "customer"
+    assert sanitized[0]["id"] == "human-message-1"
+    assert (
+        sanitized[0]["additional_kwargs"]["authorization"]
+        == REDACTED_CREDENTIAL
+    )
+    assert (
+        sanitized[0]["additional_kwargs"]["tool_context"]["client_secret"]
+        == REDACTED_CREDENTIAL
+    )
+    assert (
+        sanitized[0]["response_metadata"]["refresh_token"]
+        == REDACTED_CREDENTIAL
+    )
+    assert sanitized[1]["type"] == "ai"
+    assert sanitized[1]["content"].encode("utf-8") == ai_content.encode("utf-8")
+    assert sanitized[1]["name"] == "assistant"
+    assert sanitized[1]["id"] == "ai-message-1"
+    assert (
+        sanitized[1]["additional_kwargs"]["tool_calls"][0]["args"]["api_key"]
+        == REDACTED_CREDENTIAL
+    )
+    assert sanitized[1]["response_metadata"]["cookie"] == REDACTED_CREDENTIAL
+    assert human.model_dump(mode="python") == original_human
+    assert ai.model_dump(mode="python") == original_ai
+
+
+def test_sanitizer_uses_public_pydantic_dump_without_mutating_model():
+    model = _TracePayloadModel(
+        question="保修期多久？",
+        auth_context={
+            "tenant_id": "tenant-1",
+            "access_token": "model-access-token",
+        },
+        metadata={
+            "nested": {
+                "password": "model-password",
+                "score": 0.91,
+            }
+        },
+    )
+    original = model.model_dump(mode="python")
+
+    sanitized = sanitize_trace_credentials(model)
+
+    assert sanitized == {
+        "question": "保修期多久？",
+        "auth_context": {
+            "tenant_id": "tenant-1",
+            "access_token": REDACTED_CREDENTIAL,
+        },
+        "metadata": {
+            "nested": {
+                "password": REDACTED_CREDENTIAL,
+                "score": 0.91,
+            }
+        },
+    }
+    assert model.model_dump(mode="python") == original
+
+
+def test_sanitizer_uses_type_only_marker_without_invoking_unknown_repr():
     unknown = _StatefulUnknown()
 
     sanitized = sanitize_trace_credentials({"unknown": unknown})
 
-    assert isinstance(sanitized["unknown"], str)
-    assert sanitized["unknown"].startswith("unknown-object-")
-    assert len(sanitized["unknown"]) <= 256
-    assert unknown.repr_calls == 1
+    assert sanitized["unknown"] == "[UNSUPPORTED_TYPE:_StatefulUnknown]"
+    assert unknown.repr_calls == 0
 
 
 def test_sanitizer_terminates_for_self_referential_containers():
@@ -314,6 +424,35 @@ def test_trace_span_is_noop_when_disabled(monkeypatch):
     assert called == [None, None]
 
 
+def test_rag_context_keeps_ambient_disabled_when_safe_context_entry_fails(
+    monkeypatch,
+):
+    """A failed enabled context must not restore ambient tracing mid-request."""
+    from langsmith import tracing_context as real_tracing_context
+
+    monkeypatch.setattr(
+        tracing,
+        "resolve_langsmith_settings",
+        lambda environ=None: _enabled_settings(),
+    )
+    monkeypatch.setattr(
+        tracing,
+        "get_safe_langsmith_client",
+        lambda settings: object(),
+    )
+
+    def fail_enabled_context(**kwargs):
+        if kwargs["enabled"] is True:
+            raise RuntimeError("safe context unavailable")
+        return real_tracing_context(**kwargs)
+
+    monkeypatch.setattr(tracing, "tracing_context", fail_enabled_context)
+
+    with real_tracing_context(enabled=True):
+        with tracing.rag_tracing_context():
+            assert get_tracing_context()["enabled"] is False
+
+
 def test_rag_context_sanitizes_explicit_metadata_before_transport(monkeypatch):
     """Passing raw context metadata would bypass the automatic client hooks."""
     received = []
@@ -331,6 +470,7 @@ def test_rag_context_sanitizes_explicit_metadata_before_transport(monkeypatch):
         pass
 
     assert received == [
+        {"enabled": False},
         {
             "client": client,
             "project_name": "project",
@@ -350,7 +490,8 @@ def test_rag_context_converts_tuple_tags_to_a_langsmith_compatible_list(monkeypa
 
     def langsmith_context(**kwargs):
         received.append(kwargs)
-        kwargs["tags"] + ["langsmith"]
+        if kwargs["enabled"] is True:
+            kwargs["tags"] + ["langsmith"]
         return context
 
     monkeypatch.setattr(tracing, "tracing_context", langsmith_context)
@@ -358,8 +499,8 @@ def test_rag_context_converts_tuple_tags_to_a_langsmith_compatible_list(monkeypa
     with tracing.rag_tracing_context(tags=("request",)):
         pass
 
-    assert received[0]["tags"] == ["request"]
-    assert context.exit_calls == [(None, None, None)]
+    assert received[1]["tags"] == ["request"]
+    assert context.exit_calls == [(None, None, None), (None, None, None)]
 
 
 def test_span_sanitizes_explicit_inputs_metadata_and_outputs(monkeypatch):
@@ -419,11 +560,20 @@ def test_trace_span_converts_tuple_tags_to_a_langsmith_compatible_list(monkeypat
 @pytest.mark.parametrize("phase", ["enter", "exit"])
 def test_rag_context_transport_failures_preserve_the_business_result(monkeypatch, phase):
     """An error while opening or closing context must not replace a successful result."""
-    context = _RecordingContext(**{f"{phase}_error": RuntimeError("transport unavailable")})
+    disabled_context = _RecordingContext()
+    enabled_context = _RecordingContext(
+        **{f"{phase}_error": RuntimeError("transport unavailable")}
+    )
     calls = 0
     monkeypatch.setattr(tracing, "resolve_langsmith_settings", lambda environ=None: _enabled_settings())
     monkeypatch.setattr(tracing, "get_safe_langsmith_client", lambda settings: object())
-    monkeypatch.setattr(tracing, "tracing_context", lambda **kwargs: context)
+    monkeypatch.setattr(
+        tracing,
+        "tracing_context",
+        lambda **kwargs: (
+            enabled_context if kwargs["enabled"] is True else disabled_context
+        ),
+    )
 
     def business_function():
         nonlocal calls
