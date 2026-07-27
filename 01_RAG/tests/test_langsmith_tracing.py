@@ -8,7 +8,9 @@ import pytest
 from langchain_core.documents import Document
 
 from rag import langsmith_tracing as tracing
+from rag.chain import RagExecution, create_rag_chain
 from rag.langsmith_tracing import REDACTED_CREDENTIAL, sanitize_trace_credentials
+from rag.retrieval_trace import EvaluationTrace
 
 
 @pytest.mark.parametrize(
@@ -480,3 +482,48 @@ def test_trace_span_preserves_a_business_exception_when_trace_exit_also_fails(mo
     with pytest.raises(BusinessError, match="business failure"):
         with tracing.trace_span("rag.request"):
             raise BusinessError("business failure")
+
+
+def test_runnable_forwards_only_standard_config_audit_fields(monkeypatch):
+    """Dropping config tags or leaking configurable objects breaks trace isolation."""
+    import rag.chain as chain
+
+    received = {}
+    execution = RagExecution(
+        answer="保修期为 12 个月。[S1]",
+        source_documents=(),
+        trace=EvaluationTrace(
+            trace_id="trace-1",
+            original_query="保修期多久？",
+            rewritten_query="产品保修期多久？",
+        ),
+        generation_latency_ms=1.0,
+    )
+
+    def fake_run(question, **kwargs):
+        received["question"] = question
+        received.update(kwargs)
+        return execution
+
+    monkeypatch.setattr(chain, "run_rag_with_trace", fake_run)
+
+    result = create_rag_chain().invoke(
+        {
+            "question": "保修期多久？",
+            "auth_context": {"tenant_id": "tenant-1"},
+        },
+        config={
+            "tags": ["01-rag", "interactive"],
+            "metadata": {"session_id": "session-1"},
+            "configurable": {"session_factory": object()},
+        },
+    )
+
+    assert result["answer"] == execution.answer
+    assert received == {
+        "question": "保修期多久？",
+        "chat_history": (),
+        "auth_context": {"tenant_id": "tenant-1"},
+        "trace_tags": ("01-rag", "interactive"),
+        "trace_metadata": {"session_id": "session-1"},
+    }

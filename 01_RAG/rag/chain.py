@@ -5,15 +5,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.runnables import RunnableLambda
+from langchain_core.runnables import RunnableConfig, RunnableLambda
 
 from config import DASHSCOPE_BASE_URL, DEEPSEEK_BASE_URL, llm_config
 from rag.context_assembler import render_evidence_block
+from rag.langsmith_tracing import end_trace_span, rag_tracing_context, trace_span
 from rag.query_rewriter import rewrite_query
 from rag.retrieval_trace import EvaluationTrace
 from rag.retriever import retrieve_with_trace
@@ -143,58 +144,143 @@ def run_rag_with_trace(
     *,
     chat_history: Sequence[Any] = (),
     auth_context: dict[str, Any] | None = None,
+    trace_tags: Sequence[str] = (),
+    trace_metadata: Mapping[str, Any] | None = None,
 ) -> RagExecution:
-    history_text = _serialize_history(chat_history)
-    rewrite = rewrite_query(
-        question=question,
-        chat_history=history_text,
-    )
-    rewritten_query = str(rewrite.get("rewritten_query") or question)
-    retrieval = retrieve_with_trace(
-        rewritten_query,
-        retrieval_context={
-            "original_query": question,
-            "time_intent": rewrite.get("time_intent"),
-            "auth_context": dict(auth_context or {}),
-        },
-    )
-    documents = retrieval.final_documents
-    if not documents:
-        return RagExecution(
-            answer=EVIDENCE_INSUFFICIENT_ANSWER,
-            source_documents=documents,
-            trace=retrieval.trace,
-            generation_latency_ms=0.0,
-        )
+    resolved_auth_context = dict(auth_context or {})
+    resolved_tags = tuple(trace_tags)
+    resolved_metadata = dict(trace_metadata or {})
+    root_inputs = {
+        "question": question,
+        "chat_history": chat_history,
+        "auth_context": resolved_auth_context,
+    }
+    with rag_tracing_context(tags=resolved_tags, metadata=resolved_metadata):
+        with trace_span(
+            "rag.request",
+            inputs=root_inputs,
+            tags=resolved_tags,
+            metadata=resolved_metadata,
+        ) as root_span:
+            history_text = _serialize_history(chat_history)
+            with trace_span(
+                "query.rewrite",
+                inputs={"question": question, "chat_history": chat_history},
+                tags=resolved_tags,
+            ) as rewrite_span:
+                rewrite = rewrite_query(
+                    question=question,
+                    chat_history=history_text,
+                )
+                rewritten_query = str(rewrite.get("rewritten_query") or question)
+                end_trace_span(
+                    rewrite_span,
+                    outputs={
+                        "rewritten_query": rewritten_query,
+                        "time_intent": rewrite.get("time_intent"),
+                        "rewrite_result": rewrite,
+                    },
+                )
 
-    started = perf_counter()
-    answer = generate_answer_from_documents(
-        question=question,
-        documents=documents,
-        chat_history=chat_history,
-    )
-    if not citations_are_valid(answer, documents):
-        allowed = ", ".join(
-            f"[{document.metadata['evidence_id']}]"
-            for document in documents
-        )
-        answer = generate_answer_from_documents(
-            question=(
-                f"{question}\n\n上一次回答的证据引用无效。"
-                f"只能使用这些引用：{allowed}；每个事实结论必须引用。"
-            ),
-            documents=documents,
-            chat_history=chat_history,
-        )
-        if not citations_are_valid(answer, documents):
-            answer = INVALID_CITATION_SAFE_ANSWER
-    generation_latency_ms = (perf_counter() - started) * 1000
-    return RagExecution(
-        answer=answer,
-        source_documents=documents,
-        trace=retrieval.trace,
-        generation_latency_ms=generation_latency_ms,
-    )
+            time_intent = rewrite.get("time_intent")
+            with trace_span(
+                "retrieval",
+                inputs={
+                    "rewritten_query": rewritten_query,
+                    "time_intent": time_intent,
+                    "auth_context": resolved_auth_context,
+                },
+                tags=resolved_tags,
+            ) as retrieval_span:
+                retrieval = retrieve_with_trace(
+                    rewritten_query,
+                    retrieval_context={
+                        "original_query": question,
+                        "time_intent": time_intent,
+                        "auth_context": resolved_auth_context,
+                    },
+                )
+                documents = retrieval.final_documents
+                end_trace_span(
+                    retrieval_span,
+                    outputs={
+                        "metadata_filter": retrieval.trace.metadata.get(
+                            "metadata_filter"
+                        ),
+                        "documents": documents,
+                        "evaluation_trace": retrieval.trace,
+                    },
+                )
+
+            generation_inputs = {
+                "question": question,
+                "chat_history": chat_history,
+                "documents": documents,
+                "evidence_context": format_docs_for_context(documents),
+                "system_prompt": SYSTEM_PROMPT,
+            }
+            with trace_span(
+                "generation",
+                inputs=generation_inputs,
+                tags=resolved_tags,
+            ) as generation_span:
+                if not documents:
+                    execution = RagExecution(
+                        answer=EVIDENCE_INSUFFICIENT_ANSWER,
+                        source_documents=documents,
+                        trace=retrieval.trace,
+                        generation_latency_ms=0.0,
+                    )
+                    end_trace_span(
+                        generation_span,
+                        outputs={"skipped": True, "reason": "no_evidence"},
+                    )
+                else:
+                    started = perf_counter()
+                    attempts = 1
+                    answer = generate_answer_from_documents(
+                        question=question,
+                        documents=documents,
+                        chat_history=chat_history,
+                    )
+                    if not citations_are_valid(answer, documents):
+                        allowed = ", ".join(
+                            f"[{document.metadata['evidence_id']}]"
+                            for document in documents
+                        )
+                        attempts = 2
+                        answer = generate_answer_from_documents(
+                            question=(
+                                f"{question}\n\n上一次回答的证据引用无效。"
+                                f"只能使用这些引用：{allowed}；每个事实结论必须引用。"
+                            ),
+                            documents=documents,
+                            chat_history=chat_history,
+                        )
+                        if not citations_are_valid(answer, documents):
+                            answer = INVALID_CITATION_SAFE_ANSWER
+                    generation_latency_ms = (perf_counter() - started) * 1000
+                    execution = RagExecution(
+                        answer=answer,
+                        source_documents=documents,
+                        trace=retrieval.trace,
+                        generation_latency_ms=generation_latency_ms,
+                    )
+                    end_trace_span(
+                        generation_span,
+                        outputs={"answer": execution.answer, "attempts": attempts},
+                    )
+
+            end_trace_span(
+                root_span,
+                outputs={
+                    "answer": execution.answer,
+                    "documents": execution.source_documents,
+                    "evaluation_trace": execution.trace,
+                    "generation_latency_ms": execution.generation_latency_ms,
+                },
+            )
+            return execution
 
 
 def citations_are_valid(
@@ -216,11 +302,16 @@ def citations_are_valid(
 def create_rag_chain():
     """Create a UI-compatible Runnable around the one-pass execution."""
 
-    def invoke(input_dict: dict[str, Any]) -> dict[str, Any]:
+    def invoke(
+        input_dict: dict[str, Any],
+        config: RunnableConfig,
+    ) -> dict[str, Any]:
         execution = run_rag_with_trace(
             str(input_dict["question"]),
             chat_history=input_dict.get("chat_history") or (),
             auth_context=input_dict.get("auth_context") or {},
+            trace_tags=tuple(config.get("tags") or ()),
+            trace_metadata=dict(config.get("metadata") or {}),
         )
         return {
             "answer": execution.answer,

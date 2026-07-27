@@ -128,6 +128,7 @@ def retrieve_with_trace(
         rewritten_query=query,
         metadata={
             "time_intent": retrieval_context.get("time_intent"),
+            "metadata_filter": effective_context["metadata_filter"],
             "auth_filter_applied": bool(
                 retrieval_context.get("auth_context")
                 or retrieval_context.get("tenant_id")

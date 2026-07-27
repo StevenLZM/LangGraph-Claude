@@ -1,4 +1,7 @@
+from contextlib import contextmanager
+
 from langchain_core.documents import Document
+from langchain_core.messages import HumanMessage
 
 from rag.retrieval_trace import EvaluationTrace
 from rag.retriever import RetrievalExecution
@@ -26,7 +29,9 @@ def _retrieval_execution():
             trace_id="trace-1",
             original_query="保修期多久？",
             rewritten_query="产品保修期多久？",
-            metadata={},
+            metadata={
+                "metadata_filter": {"$and": [{"tenant_id": "tenant-1"}]},
+            },
             stages={},
         ),
     )
@@ -41,6 +46,36 @@ def _patch_rewrite(monkeypatch, chain):
             "time_intent": {"type": "none"},
         },
     )
+
+
+class _RecordedSpan:
+    def __init__(self, name, inputs, tags, metadata):
+        self.name = name
+        self.inputs = inputs
+        self.tags = tags
+        self.metadata = metadata
+        self.outputs = None
+
+    def end(self, *, outputs):
+        self.outputs = outputs
+
+
+def _record_trace_spans(monkeypatch, chain):
+    spans = []
+
+    @contextmanager
+    def fake_rag_tracing_context(**kwargs):
+        yield None
+
+    @contextmanager
+    def fake_trace_span(name, *, inputs=None, tags=(), metadata=None, **kwargs):
+        span = _RecordedSpan(name, inputs, tags, metadata)
+        spans.append(span)
+        yield span
+
+    monkeypatch.setattr(chain, "trace_span", fake_trace_span)
+    monkeypatch.setattr(chain, "rag_tracing_context", fake_rag_tracing_context)
+    return spans
 
 
 def test_run_rag_with_trace_retrieves_once_and_generates_from_final_context(
@@ -149,3 +184,131 @@ def test_empty_final_context_returns_evidence_insufficient_without_generation(
     execution = chain.run_rag_with_trace("不存在的问题")
 
     assert execution.answer == chain.EVIDENCE_INSUFFICIENT_ANSWER
+
+
+def test_rag_execution_records_root_rewrite_retrieval_and_generation_spans(
+    monkeypatch,
+):
+    """Removing a request boundary would hide the audited one-pass execution."""
+    import rag.chain as chain
+
+    _patch_rewrite(monkeypatch, chain)
+    spans = _record_trace_spans(monkeypatch, chain)
+    retrieval = _retrieval_execution()
+    monkeypatch.setattr(chain, "retrieve_with_trace", lambda *args, **kwargs: retrieval)
+    monkeypatch.setattr(
+        chain,
+        "generate_answer_from_documents",
+        lambda **kwargs: "保修期为 12 个月。[S1]",
+    )
+    history = [HumanMessage(content="上一轮问题")]
+
+    execution = chain.run_rag_with_trace(
+        "保修期多久？",
+        chat_history=history,
+        auth_context={"tenant_id": "tenant-1"},
+        trace_metadata={"session_id": "session-1"},
+        trace_tags=("01-rag",),
+    )
+
+    assert [span.name for span in spans] == [
+        "rag.request",
+        "query.rewrite",
+        "retrieval",
+        "generation",
+    ]
+    assert spans[0].inputs == {
+        "question": "保修期多久？",
+        "chat_history": history,
+        "auth_context": {"tenant_id": "tenant-1"},
+    }
+    assert spans[0].tags == ("01-rag",)
+    assert spans[0].metadata == {"session_id": "session-1"}
+    assert spans[1].outputs["rewritten_query"] == "产品保修期多久？"
+    assert spans[1].outputs["time_intent"] == {"type": "none"}
+    assert spans[2].inputs == {
+        "rewritten_query": "产品保修期多久？",
+        "time_intent": {"type": "none"},
+        "auth_context": {"tenant_id": "tenant-1"},
+    }
+    assert spans[2].outputs["metadata_filter"] == retrieval.trace.metadata[
+        "metadata_filter"
+    ]
+    assert spans[2].outputs["documents"] == (
+        {
+            "page_content": "产品保修期为 12 个月。",
+            "metadata": _final_documents()[0].metadata,
+        },
+    )
+    assert spans[2].outputs["evaluation_trace"]["trace_id"] == "trace-1"
+    assert spans[3].inputs == {
+        "question": "保修期多久？",
+        "chat_history": history,
+        "documents": retrieval.final_documents,
+        "evidence_context": chain.format_docs_for_context(retrieval.final_documents),
+        "system_prompt": chain.SYSTEM_PROMPT,
+    }
+    assert spans[3].outputs["answer"] == execution.answer
+    assert spans[0].outputs["answer"] == execution.answer
+    assert spans[0].outputs["documents"] == spans[2].outputs["documents"]
+    assert spans[0].outputs["evaluation_trace"]["trace_id"] == "trace-1"
+    assert spans[0].outputs["generation_latency_ms"] == execution.generation_latency_ms
+
+
+def test_empty_final_context_records_skipped_generation_span_without_calling_llm(
+    monkeypatch,
+):
+    """Treating an evidence miss as generation would conceal that no LLM ran."""
+    import rag.chain as chain
+
+    _patch_rewrite(monkeypatch, chain)
+    spans = _record_trace_spans(monkeypatch, chain)
+    monkeypatch.setattr(
+        chain,
+        "retrieve_with_trace",
+        lambda *args, **kwargs: RetrievalExecution(
+            final_documents=(), trace=_retrieval_execution().trace
+        ),
+    )
+
+    def fail_generation(**kwargs):
+        raise AssertionError("empty context must not call the LLM")
+
+    monkeypatch.setattr(chain, "generate_answer_from_documents", fail_generation)
+
+    execution = chain.run_rag_with_trace("不存在的问题")
+
+    assert execution.answer == chain.EVIDENCE_INSUFFICIENT_ANSWER
+    assert [span.name for span in spans] == [
+        "rag.request",
+        "query.rewrite",
+        "retrieval",
+        "generation",
+    ]
+    assert spans[-1].outputs == {"skipped": True, "reason": "no_evidence"}
+
+
+def test_generation_span_records_two_attempts_without_extra_retry(monkeypatch):
+    """Wrapping retries must not introduce an additional answer-model invocation."""
+    import rag.chain as chain
+
+    _patch_rewrite(monkeypatch, chain)
+    spans = _record_trace_spans(monkeypatch, chain)
+    monkeypatch.setattr(
+        chain,
+        "retrieve_with_trace",
+        lambda *args, **kwargs: _retrieval_execution(),
+    )
+    answers = iter(["保修期为 12 个月。", "保修期为 12 个月。[S1]"])
+    calls = []
+
+    def fake_generate(*, question, documents, chat_history):
+        calls.append(question)
+        return next(answers)
+
+    monkeypatch.setattr(chain, "generate_answer_from_documents", fake_generate)
+
+    execution = chain.run_rag_with_trace("保修期多久？")
+
+    assert len(calls) == 2
+    assert spans[-1].outputs == {"answer": execution.answer, "attempts": 2}
