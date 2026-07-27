@@ -213,6 +213,19 @@ def sanitize_trace_credentials(payload: Any) -> Any:
     return _sanitize_trace_value(payload, seen=set())
 
 
+def serialize_documents_for_trace(
+    documents: Sequence[Document],
+) -> list[dict[str, Any]]:
+    """Preserve complete document content and metadata in an audit payload."""
+    return [
+        {
+            "page_content": document.page_content,
+            "metadata": dict(document.metadata),
+        }
+        for document in documents
+    ]
+
+
 def _sanitize_trace_value(value: Any, *, seen: set[int]) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections import UserDict
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
+from threading import Barrier
 
 import pytest
 from langchain_core.documents import Document
@@ -11,6 +13,7 @@ from rag import langsmith_tracing as tracing
 from rag.chain import RagExecution, create_rag_chain
 from rag.langsmith_tracing import REDACTED_CREDENTIAL, sanitize_trace_credentials
 from rag.retrieval_trace import EvaluationTrace
+from rag.retriever import RetrievalPipelineComponents, retrieve_with_trace
 
 
 @pytest.mark.parametrize(
@@ -482,6 +485,69 @@ def test_trace_span_preserves_a_business_exception_when_trace_exit_also_fails(mo
     with pytest.raises(BusinessError, match="business failure"):
         with tracing.trace_span("rag.request"):
             raise BusinessError("business failure")
+
+
+def test_parallel_recall_copies_trace_context_to_each_worker():
+    """Losing the request context would detach both recall spans from retrieval."""
+    marker = ContextVar("retrieval_trace_marker", default=None)
+    workers_ready = Barrier(2)
+    seen_by_bm25 = []
+    seen_by_dense = []
+
+    def child(child_id):
+        return Document(
+            page_content=f"child {child_id}",
+            metadata={
+                "doc_id": "doc-1",
+                "parent_id": f"parent-{child_id}",
+                "child_id": child_id,
+                "source": "manual.pdf",
+                "page_range": "3",
+            },
+        )
+
+    def parent(parent_id):
+        return Document(
+            page_content=f"parent {parent_id}",
+            metadata={
+                "doc_id": "doc-1",
+                "parent_id": parent_id,
+                "source": "manual.pdf",
+                "page_range": "3",
+            },
+        )
+
+    def bm25(query, context):
+        workers_ready.wait(timeout=5)
+        seen_by_bm25.append(marker.get())
+        return [child("bm25")]
+
+    def dense(query, context):
+        workers_ready.wait(timeout=5)
+        seen_by_dense.append(marker.get())
+        return [child("dense")]
+
+    components = RetrievalPipelineComponents(
+        bm25=bm25,
+        dense=dense,
+        rrf=lambda bm25_documents, dense_documents: [child("rrf")],
+        cross_encoder=lambda query, documents: [child("reranked")],
+        business_fusion=lambda query, documents, context: [child("business")],
+        diversify_parents=lambda documents: [parent("diversified")],
+        assemble_context=lambda documents: [parent("final")],
+    )
+    token = marker.set("rag-request-1")
+    try:
+        retrieve_with_trace(
+            "保修期",
+            retrieval_context={"trace_id": "trace-1"},
+            components=components,
+        )
+    finally:
+        marker.reset(token)
+
+    assert seen_by_bm25 == ["rag-request-1"]
+    assert seen_by_dense == ["rag-request-1"]
 
 
 def test_runnable_forwards_only_standard_config_audit_fields(monkeypatch):

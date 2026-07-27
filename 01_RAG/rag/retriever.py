@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
+from functools import partial
 from time import perf_counter
 from typing import Any, Callable, List, Mapping, Optional
 from uuid import uuid4
@@ -22,6 +24,11 @@ from rag.elasticsearch_retrievers import (
     weighted_rrf,
 )
 from rag.embedder import get_embeddings
+from rag.langsmith_tracing import (
+    end_trace_span,
+    serialize_documents_for_trace,
+    trace_span,
+)
 from rag.postprocessor import diversify_parent_candidates
 from rag.reranker import rerank_documents
 from rag.retrieval_trace import EvaluationTrace, StageRecorder
@@ -162,10 +169,24 @@ def retrieve_with_trace(
         latency_ms=dense_latency,
     )
 
-    rrf_documents, latency = _timed(
-        pipeline.rrf,
-        bm25_documents,
-        dense_documents,
+    rrf_documents, latency = _run_traced_stage(
+        name="rrf_child",
+        function=pipeline.rrf,
+        args=(bm25_documents, dense_documents),
+        inputs={
+            "query": query,
+            "metadata_filter": effective_context["metadata_filter"],
+            "documents": {
+                "bm25_child": serialize_documents_for_trace(
+                    bm25_documents
+                ),
+                "dense_child": serialize_documents_for_trace(
+                    dense_documents
+                ),
+            },
+        },
+        configured_k=rag_config.RRF_TOP_K,
+        score_type="rrf_score",
     )
     recorder.record(
         name="rrf_child",
@@ -175,10 +196,17 @@ def retrieve_with_trace(
         latency_ms=latency,
     )
 
-    reranked_documents, latency = _timed(
-        pipeline.cross_encoder,
-        query,
-        rrf_documents,
+    reranked_documents, latency = _run_traced_stage(
+        name="cross_encoder_child",
+        function=pipeline.cross_encoder,
+        args=(query, rrf_documents),
+        inputs={
+            "query": query,
+            "metadata_filter": effective_context["metadata_filter"],
+            "documents": serialize_documents_for_trace(rrf_documents),
+        },
+        configured_k=rag_config.RERANK_TOP_K,
+        score_type="rerank_score",
     )
     recorder.record(
         name="cross_encoder_child",
@@ -188,11 +216,19 @@ def retrieve_with_trace(
         latency_ms=latency,
     )
 
-    business_documents, latency = _timed(
-        pipeline.business_fusion,
-        query,
-        reranked_documents,
-        effective_context,
+    business_documents, latency = _run_traced_stage(
+        name="business_fused_child",
+        function=pipeline.business_fusion,
+        args=(query, reranked_documents, effective_context),
+        inputs={
+            "query": query,
+            "metadata_filter": effective_context["metadata_filter"],
+            "documents": serialize_documents_for_trace(
+                reranked_documents
+            ),
+        },
+        configured_k=rag_config.BUSINESS_FUSION_TOP_K,
+        score_type="business_score",
     )
     recorder.record(
         name="business_fused_child",
@@ -202,9 +238,19 @@ def retrieve_with_trace(
         latency_ms=latency,
     )
 
-    parent_documents, latency = _timed(
-        pipeline.diversify_parents,
-        business_documents,
+    parent_documents, latency = _run_traced_stage(
+        name="diversified_parent",
+        function=pipeline.diversify_parents,
+        args=(business_documents,),
+        inputs={
+            "query": query,
+            "metadata_filter": effective_context["metadata_filter"],
+            "documents": serialize_documents_for_trace(
+                business_documents
+            ),
+        },
+        configured_k=rag_config.DIVERSIFIED_PARENT_TOP_K,
+        score_type="mmr_score",
     )
     recorder.record(
         name="diversified_parent",
@@ -214,9 +260,17 @@ def retrieve_with_trace(
         latency_ms=latency,
     )
 
-    final_documents, latency = _timed(
-        pipeline.assemble_context,
-        parent_documents,
+    final_documents, latency = _run_traced_stage(
+        name="final_context_parent",
+        function=pipeline.assemble_context,
+        args=(parent_documents,),
+        inputs={
+            "query": query,
+            "metadata_filter": effective_context["metadata_filter"],
+            "documents": serialize_documents_for_trace(parent_documents),
+        },
+        configured_k=rag_config.FINAL_PARENT_TOP_K,
+        score_type="context_score",
     )
     recorder.record(
         name="final_context_parent",
@@ -305,22 +359,43 @@ def _parallel_recall(
     float,
     dict[str, str],
 ]:
+    audit_inputs = {
+        "query": query,
+        "metadata_filter": context.get("metadata_filter"),
+        "documents": [],
+    }
+    bm25_call = partial(
+        _run_traced_stage,
+        name="bm25_child",
+        function=pipeline.bm25,
+        args=(query, context),
+        inputs=audit_inputs,
+        configured_k=rag_config.BM25_TOP_K,
+        score_type="bm25_score",
+    )
+    dense_call = partial(
+        _run_traced_stage,
+        name="dense_child",
+        function=pipeline.dense,
+        args=(query, context),
+        inputs=audit_inputs,
+        configured_k=rag_config.SEMANTIC_TOP_K,
+        score_type="dense_score",
+    )
+    bm25_context = copy_context()
+    dense_context = copy_context()
     with ThreadPoolExecutor(
         max_workers=2,
         thread_name_prefix="rag-stage",
     ) as executor:
         futures = {
             "bm25_child": executor.submit(
-                _timed,
-                pipeline.bm25,
-                query,
-                context,
+                bm25_context.run,
+                bm25_call,
             ),
             "dense_child": executor.submit(
-                _timed,
-                pipeline.dense,
-                query,
-                context,
+                dense_context.run,
+                dense_call,
             ),
         }
         results: dict[str, tuple[list[Document], float]] = {}
@@ -343,10 +418,43 @@ def _parallel_recall(
     )
 
 
-def _timed(function: Callable[..., Any], *args: Any) -> tuple[Any, float]:
-    started = perf_counter()
-    result = function(*args)
-    return result, (perf_counter() - started) * 1000
+def _run_traced_stage(
+    *,
+    name: str,
+    function: Callable[..., Any],
+    args: tuple[Any, ...],
+    inputs: Mapping[str, Any],
+    configured_k: int,
+    score_type: str,
+) -> tuple[Any, float]:
+    with trace_span(name, inputs=inputs) as span:
+        started = perf_counter()
+        try:
+            result = function(*args)
+        except Exception as exc:
+            latency = (perf_counter() - started) * 1000
+            end_trace_span(
+                span,
+                outputs={
+                    "documents": [],
+                    "configured_k": configured_k,
+                    "score_type": score_type,
+                    "latency_ms": latency,
+                    "error": str(exc),
+                },
+            )
+            raise
+        latency = (perf_counter() - started) * 1000
+        end_trace_span(
+            span,
+            outputs={
+                "documents": serialize_documents_for_trace(result),
+                "configured_k": configured_k,
+                "score_type": score_type,
+                "latency_ms": latency,
+            },
+        )
+    return result, latency
 
 
 @dataclass
