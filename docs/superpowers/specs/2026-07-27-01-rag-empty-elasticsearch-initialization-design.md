@@ -51,7 +51,7 @@ EMBEDDING_MODEL=qwen3.7-text-embedding
 ES_EMBEDDING_DIMS=1024
 ```
 
-`.env` 必须保持不被 Git 跟踪。初始化命令只能输出“配置是否有效”，不得输出 Key 内容。
+初始化命令只能输出“配置是否有效”，不得输出 Key 内容。历史提交中的 `.env` 保留；本次任务不得暂存或提交任何 `.env` 内容。
 
 当前实现通过 `config.py` 的 `load_dotenv()` 加载 `01_RAG/.env`，再由：
 
@@ -104,6 +104,34 @@ conda run -n langgraph-cc-multiagent \
 - 任一别名指向其他索引：明确失败，不自动切换。
 - ES 不可用、Key 缺失、模型或维度错误：在任何 ES 写操作前失败。
 - 命令不提供 `--force`、删除或重建选项。
+
+具体幂等算法：
+
+```text
+读取物理索引是否存在
+  ├─ 不存在
+  │    ├─ CREATE rag-child-chunks-v1（Mapping 内固定 dims=1024）
+  │    └─ 若并发初始化返回 resource_already_exists，转入“已存在”校验
+  └─ 已存在
+       ├─ 回读 embedding Mapping
+       ├─ dims != 1024 → 失败，不修改
+       ├─ 检查 read/write alias 的现有目标
+       ├─ alias 指向其他索引 → 失败，不改绑
+       ├─ alias 缺失 → 原子补充缺失 alias
+       └─ Mapping 和 alias 已完全一致 → no-op
+
+最后统一回读 Mapping、alias 和文档数
+```
+
+因此第二次及以后执行不会调用 Create、不会重建 Mapping、不会删除文档，也不会重复写入业务数据。并发执行时只有一个请求真正创建索引，其他请求在收到 `resource_already_exists` 后回读并验证同一个结果。
+
+初始化函数返回以下状态之一，便于日志和测试区分：
+
+```text
+created
+aliases_repaired
+already_initialized
+```
 
 ## 代码边界
 
