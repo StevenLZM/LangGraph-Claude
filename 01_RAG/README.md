@@ -103,6 +103,34 @@ curl http://127.0.0.1:9200
 
 项目按 Elasticsearch 8.19 和 Basic License 设计，不依赖 Docker 或 Enterprise 原生 RRF。
 
+### 初始化全新 Elasticsearch
+
+在 `01_RAG/` 中先复制模板并编辑 `.env`：`DASHSCOPE_API_KEY` 必须填入您自己的真实 Key；初始化命令固定使用 `EMBEDDING_MODEL=qwen3.7-text-embedding` 与 `ES_EMBEDDING_DIMS=1024`。同时保持物理索引和别名为模板中的固定值。
+
+先启动本机 Elasticsearch：
+
+```bash
+cd ~/Downloads/elasticsearch-8
+./bin/elasticsearch
+```
+
+项目声明的 ES client 依赖包含在 `requirements.txt` 中；在 `01_RAG/` 目录安装后运行初始化命令：
+
+```bash
+pip install -r requirements.txt
+python -m rag.init_elasticsearch
+```
+
+命令只初始化并校验空库，不会摄取文档。输出中的幂等状态含义如下：
+
+- `created`：创建了固定物理索引、1024 维 mapping 和读写别名。
+- `aliases_repaired`：已存在且 mapping 正确的物理索引缺少别名，命令补齐了缺失别名。
+- `already_initialized`：索引、mapping 和读写别名均已正确存在，无需更改。
+
+可安全重复执行：它不会摄取、删除或迁移任何数据。若发现向量维度冲突或别名指向其他索引等冲突，命令会直接失败，不会自动修复或改写已有数据结构。
+
+`.env` 是本机私密配置；后续提交中只有 `*.env.example` 可以进入版本控制，绝不提交真实 Key。
+
 ### 第四步：生成示例 PDF（可选）
 
 ```bash
