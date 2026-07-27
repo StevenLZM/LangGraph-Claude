@@ -181,7 +181,16 @@ class ElasticsearchChildStore:
             return self._initialization_result("already_initialized", vector_dims)
 
         self.client.indices.update_aliases(body={"actions": actions})
-        self._alias_actions_for_missing_aliases(self._read_aliases())
+        remaining_actions = self._alias_actions_for_missing_aliases(
+            self._read_aliases()
+        )
+        if remaining_actions:
+            missing_aliases = ", ".join(
+                action["add"]["alias"] for action in remaining_actions
+            )
+            raise RuntimeError(
+                f"Elasticsearch 别名修复后仍缺失: {missing_aliases}"
+            )
         return self._initialization_result("aliases_repaired", vector_dims)
 
     def _mapping_vector_dims(self, mapping: Mapping[str, Any]) -> int:

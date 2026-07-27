@@ -241,6 +241,32 @@ def test_ensure_index_repairs_only_missing_alias(missing_alias, expected_action)
     assert client.indices.update_alias_calls == [{"actions": [expected_action]}]
 
 
+def test_ensure_index_rejects_repair_when_alias_is_still_missing_after_update():
+    from rag.elasticsearch_store import ElasticsearchChildStore
+
+    class MissingAliasAfterUpdateIndices(_ExistingIndices):
+        def update_aliases(self, *, body):
+            response = super().update_aliases(body=body)
+            self.aliases.pop("rag-child-chunks-write")
+            return response
+
+    class MissingAliasAfterUpdateClient:
+        def __init__(self):
+            self.indices = MissingAliasAfterUpdateIndices(
+                aliases={
+                    "rag-child-chunks-read": {"rag-child-chunks-v1": {}},
+                }
+            )
+
+    store = ElasticsearchChildStore(
+        client=MissingAliasAfterUpdateClient(),
+        config=_config(),
+    )
+
+    with pytest.raises(RuntimeError, match="别名修复后仍缺失"):
+        store.ensure_index(vector_dims=3)
+
+
 @pytest.mark.parametrize(
     ("alias_name", "other_index"),
     [
