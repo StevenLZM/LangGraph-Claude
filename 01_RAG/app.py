@@ -8,6 +8,7 @@ import time
 import sys
 import os
 from pathlib import Path
+from typing import Any
 
 # 确保项目根目录在 sys.path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -34,6 +35,19 @@ from rag.vectorstore import (
 )
 from rag.chain import create_chain_with_history, format_docs_for_context
 from memory.session import get_session_manager
+
+
+def build_rag_invoke_config(session_id: str) -> dict[str, Any]:
+    """Build the minimal LangSmith audit context for one Streamlit request."""
+    return {
+        "configurable": {"session_id": session_id},
+        "metadata": {
+            "session_id": session_id,
+            "application": "01_RAG",
+            "interface": "streamlit",
+        },
+        "tags": ["01-rag", "streamlit"],
+    }
 
 
 # ════════════════════════════════════════════════════════════════
@@ -489,7 +503,7 @@ def _process_query(query: str):
                     "question": query,
                     "chat_history": [],  # 由 RunnableWithMessageHistory 自动注入
                 },
-                config={"configurable": {"session_id": st.session_state.session_id}},
+                config=build_rag_invoke_config(st.session_state.session_id),
             )
             elapsed_ms = round((time.time() - t0) * 1000)
 
