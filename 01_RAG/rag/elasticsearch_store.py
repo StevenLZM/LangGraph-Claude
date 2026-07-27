@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Literal, Mapping, Sequence
 
 from langchain_core.documents import Document
 
@@ -86,6 +87,21 @@ SOURCE_METADATA_FIELDS = (
     "embedding_version",
 )
 
+InitializationStatus = Literal[
+    "created",
+    "aliases_repaired",
+    "already_initialized",
+]
+
+
+@dataclass(frozen=True)
+class IndexInitializationResult:
+    status: InitializationStatus
+    physical_index: str
+    vector_dims: int
+    read_alias: str
+    write_alias: str
+
 
 def create_elasticsearch_client(
     *,
@@ -121,39 +137,22 @@ class ElasticsearchChildStore:
         self.client = client or create_elasticsearch_client(config=config)
         self.config = config
 
-    def ensure_index(self, vector_dims: int) -> None:
+    def ensure_index(self, vector_dims: int) -> IndexInitializationResult:
         self._validate_vector_dims(vector_dims)
         index = self.config.PHYSICAL_INDEX
-        if self.client.indices.exists(index=index):
-            mapping = self.client.indices.get_mapping(index=index)
-            actual_dims = int(
-                mapping[index]["mappings"]["properties"]["embedding"]["dims"]
-            )
-            if actual_dims != vector_dims:
-                raise ValueError(
-                    f"向量维度不一致: index={actual_dims}, actual={vector_dims}"
-                )
-            self.client.indices.update_aliases(
-                body={
-                    "actions": [
-                        {
-                            "add": {
-                                "index": index,
-                                "alias": self.config.READ_ALIAS,
-                            }
-                        },
-                        {
-                            "add": {
-                                "index": index,
-                                "alias": self.config.WRITE_ALIAS,
-                                "is_write_index": True,
-                            }
-                        },
-                    ]
-                }
-            )
-            return
+        if not self.client.indices.exists(index=index):
+            try:
+                self._create_index(vector_dims)
+            except Exception as exc:
+                if not _is_resource_already_exists(exc):
+                    raise
+            else:
+                return self._initialization_result("created", vector_dims)
 
+        return self._validate_existing_index(vector_dims)
+
+    def _create_index(self, vector_dims: int) -> None:
+        index = self.config.PHYSICAL_INDEX
         body = _index_definition(
             vector_dims=vector_dims,
             read_alias=self.config.READ_ALIAS,
@@ -164,6 +163,95 @@ class ElasticsearchChildStore:
         response = self.client.indices.create(index=index, body=body)
         if response.get("acknowledged") is False:
             raise RuntimeError(f"Elasticsearch 索引创建未确认: {index}")
+
+    def _validate_existing_index(
+        self,
+        vector_dims: int,
+    ) -> IndexInitializationResult:
+        mapping = self.client.indices.get_mapping(index=self.config.PHYSICAL_INDEX)
+        actual_dims = self._mapping_vector_dims(mapping)
+        if actual_dims != vector_dims:
+            raise ValueError(
+                f"向量维度不一致: index={actual_dims}, actual={vector_dims}"
+            )
+
+        aliases = self._read_aliases()
+        actions = self._alias_actions_for_missing_aliases(aliases)
+        if not actions:
+            return self._initialization_result("already_initialized", vector_dims)
+
+        self.client.indices.update_aliases(body={"actions": actions})
+        self._alias_actions_for_missing_aliases(self._read_aliases())
+        return self._initialization_result("aliases_repaired", vector_dims)
+
+    def _mapping_vector_dims(self, mapping: Mapping[str, Any]) -> int:
+        try:
+            embedding = mapping[self.config.PHYSICAL_INDEX]["mappings"][
+                "properties"
+            ]["embedding"]
+        except (KeyError, TypeError) as exc:
+            raise ValueError("Elasticsearch mapping 缺少 embedding 字段") from exc
+        if not isinstance(embedding, Mapping) or embedding.get("type") != "dense_vector":
+            raise ValueError("Elasticsearch mapping 的 embedding 必须是 dense_vector")
+        try:
+            return int(embedding["dims"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Elasticsearch mapping 的 embedding 缺少有效 dims") from exc
+
+    def _read_aliases(self) -> dict[str, Mapping[str, Any] | None]:
+        aliases: dict[str, Mapping[str, Any] | None] = {}
+        for alias_name in (self.config.READ_ALIAS, self.config.WRITE_ALIAS):
+            if self.client.indices.exists_alias(name=alias_name):
+                aliases[alias_name] = self.client.indices.get_alias(name=alias_name)
+            else:
+                aliases[alias_name] = None
+        return aliases
+
+    def _alias_actions_for_missing_aliases(
+        self,
+        aliases: Mapping[str, Mapping[str, Any] | None],
+    ) -> list[dict[str, Any]]:
+        index = self.config.PHYSICAL_INDEX
+        actions: list[dict[str, Any]] = []
+        for alias_name in (self.config.READ_ALIAS, self.config.WRITE_ALIAS):
+            targets = aliases[alias_name]
+            if targets is None:
+                add: dict[str, Any] = {"index": index, "alias": alias_name}
+                if alias_name == self.config.WRITE_ALIAS:
+                    add["is_write_index"] = True
+                actions.append({"add": add})
+                continue
+
+            target_indices = set(targets)
+            if target_indices != {index}:
+                conflict_targets = ", ".join(sorted(target_indices)) or "<none>"
+                raise ValueError(
+                    f"别名冲突: {alias_name} 绑定到 {conflict_targets}，"
+                    f"期望 {index}"
+                )
+            if alias_name == self.config.WRITE_ALIAS:
+                write_attributes = targets[index].get("aliases", {}).get(
+                    alias_name,
+                    {},
+                )
+                if write_attributes.get("is_write_index") is not True:
+                    raise ValueError(
+                        f"别名冲突: {alias_name} 在 {index} 必须标记为 write index"
+                    )
+        return actions
+
+    def _initialization_result(
+        self,
+        status: InitializationStatus,
+        vector_dims: int,
+    ) -> IndexInitializationResult:
+        return IndexInitializationResult(
+            status=status,
+            physical_index=self.config.PHYSICAL_INDEX,
+            vector_dims=vector_dims,
+            read_alias=self.config.READ_ALIAS,
+            write_alias=self.config.WRITE_ALIAS,
+        )
 
     def _validate_vector_dims(self, vector_dims: int) -> None:
         if vector_dims <= 0:
@@ -609,3 +697,17 @@ def _is_sequence(value: Any) -> bool:
         value,
         (str, bytes, bytearray),
     )
+
+
+def _is_resource_already_exists(exc: Exception) -> bool:
+    error = getattr(exc, "error", "")
+    body = getattr(exc, "body", None)
+    body_type = (
+        body.get("error", {}).get("type", "")
+        if isinstance(body, Mapping) and isinstance(body.get("error"), Mapping)
+        else ""
+    )
+    return "resource_already_exists_exception" in {
+        str(error),
+        str(body_type),
+    } or "resource_already_exists_exception" in str(exc)

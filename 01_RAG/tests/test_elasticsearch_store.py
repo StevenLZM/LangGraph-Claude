@@ -69,11 +69,13 @@ def test_create_client_prefers_api_key_over_basic_auth(monkeypatch):
 class _CreateIndices:
     def __init__(self):
         self.created = None
+        self.create_calls = 0
 
     def exists(self, *, index):
         return False
 
     def create(self, *, index, body):
+        self.create_calls += 1
         self.created = (index, body)
         return {"acknowledged": True}
 
@@ -89,7 +91,13 @@ def test_ensure_index_creates_versioned_index_and_aliases():
     client = _CreateClient()
     store = ElasticsearchChildStore(client=client, config=_config())
 
-    store.ensure_index(vector_dims=3)
+    result = store.ensure_index(vector_dims=3)
+
+    assert result.status == "created"
+    assert result.physical_index == "rag-child-chunks-v1"
+    assert result.vector_dims == 3
+    assert result.read_alias == "rag-child-chunks-read"
+    assert result.write_alias == "rag-child-chunks-write"
 
     index, body = client.indices.created
     assert index == "rag-child-chunks-v1"
@@ -114,27 +122,58 @@ def test_ensure_index_rejects_configured_embedding_dimension_mismatch():
 
 
 class _ExistingIndices:
+    def __init__(
+        self,
+        *,
+        mapping=None,
+        aliases=None,
+    ):
+        self.mapping = mapping or {
+            "mappings": {
+                "properties": {
+                    "embedding": {"type": "dense_vector", "dims": 3}
+                }
+            }
+        }
+        self.aliases = aliases or {
+            "rag-child-chunks-read": {"rag-child-chunks-v1": {}},
+            "rag-child-chunks-write": {
+                "rag-child-chunks-v1": {"is_write_index": True}
+            },
+        }
+        self.create_calls = 0
+        self.update_alias_calls = []
+
     def exists(self, *, index):
         return True
 
     def get_mapping(self, *, index):
+        return {index: self.mapping}
+
+    def exists_alias(self, *, name):
+        return bool(self.aliases.get(name))
+
+    def get_alias(self, *, name):
         return {
-            "rag-child-chunks-v1": {
-                "mappings": {
-                    "properties": {
-                        "embedding": {"type": "dense_vector", "dims": 3}
-                    }
-                }
-            }
+            index: {"aliases": {name: attributes}}
+            for index, attributes in self.aliases.get(name, {}).items()
         }
 
     def update_aliases(self, *, body):
+        self.update_alias_calls.append(body)
+        for action in body["actions"]:
+            add = action["add"]
+            self.aliases.setdefault(add["alias"], {})[add["index"]] = {
+                key: value
+                for key, value in add.items()
+                if key not in {"alias", "index"}
+            }
         return {"acknowledged": True}
 
 
 class _ExistingClient:
-    def __init__(self):
-        self.indices = _ExistingIndices()
+    def __init__(self, **kwargs):
+        self.indices = _ExistingIndices(**kwargs)
 
 
 def test_ensure_index_rejects_existing_mapping_dimension_mismatch():
@@ -144,6 +183,199 @@ def test_ensure_index_rejects_existing_mapping_dimension_mismatch():
 
     with pytest.raises(ValueError, match="向量维度"):
         store.ensure_index(vector_dims=4)
+
+
+def test_ensure_index_is_noop_when_mapping_and_aliases_match():
+    from rag.elasticsearch_store import ElasticsearchChildStore
+
+    client = _ExistingClient()
+    store = ElasticsearchChildStore(client=client, config=_config())
+
+    result = store.ensure_index(vector_dims=3)
+
+    assert result.status == "already_initialized"
+    assert client.indices.create_calls == 0
+    assert client.indices.update_alias_calls == []
+
+
+@pytest.mark.parametrize(
+    ("missing_alias", "expected_action"),
+    [
+        (
+            "rag-child-chunks-read",
+            {
+                "add": {
+                    "index": "rag-child-chunks-v1",
+                    "alias": "rag-child-chunks-read",
+                }
+            },
+        ),
+        (
+            "rag-child-chunks-write",
+            {
+                "add": {
+                    "index": "rag-child-chunks-v1",
+                    "alias": "rag-child-chunks-write",
+                    "is_write_index": True,
+                }
+            },
+        ),
+    ],
+)
+def test_ensure_index_repairs_only_missing_alias(missing_alias, expected_action):
+    from rag.elasticsearch_store import ElasticsearchChildStore
+
+    aliases = {
+        "rag-child-chunks-read": {"rag-child-chunks-v1": {}},
+        "rag-child-chunks-write": {
+            "rag-child-chunks-v1": {"is_write_index": True}
+        },
+    }
+    aliases.pop(missing_alias)
+    client = _ExistingClient(aliases=aliases)
+    store = ElasticsearchChildStore(client=client, config=_config())
+
+    result = store.ensure_index(vector_dims=3)
+
+    assert result.status == "aliases_repaired"
+    assert client.indices.update_alias_calls == [{"actions": [expected_action]}]
+
+
+@pytest.mark.parametrize(
+    ("alias_name", "other_index"),
+    [
+        ("rag-child-chunks-read", "another-index"),
+        ("rag-child-chunks-write", "another-index"),
+    ],
+)
+def test_ensure_index_rejects_alias_bound_to_another_index(
+    alias_name,
+    other_index,
+):
+    from rag.elasticsearch_store import ElasticsearchChildStore
+
+    aliases = {
+        "rag-child-chunks-read": {"rag-child-chunks-v1": {}},
+        "rag-child-chunks-write": {
+            "rag-child-chunks-v1": {"is_write_index": True}
+        },
+    }
+    aliases[alias_name] = {other_index: {}}
+    client = _ExistingClient(aliases=aliases)
+    store = ElasticsearchChildStore(client=client, config=_config())
+
+    with pytest.raises(ValueError, match="别名冲突"):
+        store.ensure_index(vector_dims=3)
+
+    assert client.indices.update_alias_calls == []
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        {"mappings": {"properties": {}}},
+        {
+            "mappings": {
+                "properties": {
+                    "embedding": {"type": "keyword", "dims": 3}
+                }
+            }
+        },
+    ],
+)
+def test_ensure_index_rejects_missing_or_non_vector_embedding_mapping(mapping):
+    from rag.elasticsearch_store import ElasticsearchChildStore
+
+    client = _ExistingClient(mapping=mapping)
+    store = ElasticsearchChildStore(client=client, config=_config())
+
+    with pytest.raises(ValueError, match="embedding"):
+        store.ensure_index(vector_dims=3)
+
+    assert client.indices.update_alias_calls == []
+
+
+def test_ensure_index_rejects_existing_mapping_dimension_mismatch_before_alias_update():
+    from rag.elasticsearch_store import ElasticsearchChildStore
+
+    client = _ExistingClient(
+        mapping={
+            "mappings": {
+                "properties": {
+                    "embedding": {"type": "dense_vector", "dims": 4}
+                }
+            }
+        }
+    )
+    store = ElasticsearchChildStore(client=client, config=_config())
+
+    with pytest.raises(ValueError, match="向量维度"):
+        store.ensure_index(vector_dims=3)
+
+    assert client.indices.update_alias_calls == []
+
+
+def test_ensure_index_rejects_write_alias_without_write_index_marker():
+    from rag.elasticsearch_store import ElasticsearchChildStore
+
+    aliases = {
+        "rag-child-chunks-read": {"rag-child-chunks-v1": {}},
+        "rag-child-chunks-write": {"rag-child-chunks-v1": {}},
+    }
+    client = _ExistingClient(aliases=aliases)
+    store = ElasticsearchChildStore(client=client, config=_config())
+
+    with pytest.raises(ValueError, match="rag-child-chunks-write"):
+        store.ensure_index(vector_dims=3)
+
+    assert client.indices.update_alias_calls == []
+
+
+class _ConcurrentCreateIndices(_ExistingIndices):
+    def __init__(self):
+        super().__init__()
+        self.exists_calls = 0
+
+    def exists(self, *, index):
+        self.exists_calls += 1
+        return self.exists_calls > 1
+
+    def create(self, *, index, body):
+        self.create_calls += 1
+        raise RuntimeError("resource_already_exists_exception")
+
+
+class _ConcurrentCreateClient:
+    def __init__(self):
+        self.indices = _ConcurrentCreateIndices()
+
+
+def test_ensure_index_recovers_from_concurrent_create_race():
+    from rag.elasticsearch_store import ElasticsearchChildStore
+
+    client = _ConcurrentCreateClient()
+    store = ElasticsearchChildStore(client=client, config=_config())
+
+    result = store.ensure_index(vector_dims=3)
+
+    assert result.status == "already_initialized"
+    assert client.indices.create_calls == 1
+    assert client.indices.update_alias_calls == []
+
+
+def test_ensure_index_reraises_non_concurrent_create_error():
+    from rag.elasticsearch_store import ElasticsearchChildStore
+
+    class FailingIndices(_CreateIndices):
+        def create(self, *, index, body):
+            raise RuntimeError("cluster unavailable")
+
+    client = _CreateClient()
+    client.indices = FailingIndices()
+    store = ElasticsearchChildStore(client=client, config=_config())
+
+    with pytest.raises(RuntimeError, match="cluster unavailable"):
+        store.ensure_index(vector_dims=3)
 
 
 def test_build_es_filters_supports_date_range_and_status():
@@ -251,6 +483,17 @@ def test_bulk_stage_children_rejects_partial_bulk_failure():
                     }
                 }
             }
+
+        def exists_alias(self, *, name):
+            return True
+
+        def get_alias(self, *, name):
+            attributes = (
+                {"is_write_index": True}
+                if name == "rag-child-chunks-write"
+                else {}
+            )
+            return {"rag-child-chunks-v1": {"aliases": {name: attributes}}}
 
         def update_aliases(self, *, body):
             return {"acknowledged": True}
