@@ -6,6 +6,7 @@ langchain-openai
 langchain-anthropic
 langchain-text-splitters
 langchain-classic
+langsmith>=0.7.32,<0.8
 
 # ── LLM ─────────────────────────────────────────────────────────
 dashscope>=1.14.0

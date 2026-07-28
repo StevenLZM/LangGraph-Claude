@@ -141,7 +141,11 @@ class ElasticsearchChildStore:
         self._validate_vector_dims(vector_dims)
         index = self.config.PHYSICAL_INDEX
         if not self.client.indices.exists(index=index):
-            self._reject_existing_aliases_before_create()
+            aliases = self._read_aliases()
+            if any(targets is not None for targets in aliases.values()):
+                if self.client.indices.exists(index=index):
+                    return self._validate_existing_index(vector_dims)
+                self._reject_existing_aliases_before_create(aliases)
             try:
                 self._create_index(vector_dims)
             except Exception as exc:
@@ -218,8 +222,10 @@ class ElasticsearchChildStore:
                 aliases[alias_name] = None
         return aliases
 
-    def _reject_existing_aliases_before_create(self) -> None:
-        aliases = self._read_aliases()
+    def _reject_existing_aliases_before_create(
+        self,
+        aliases: Mapping[str, Mapping[str, Any] | None],
+    ) -> None:
         for alias_name, targets in aliases.items():
             if targets is not None:
                 conflict_targets = ", ".join(sorted(targets)) or "<none>"

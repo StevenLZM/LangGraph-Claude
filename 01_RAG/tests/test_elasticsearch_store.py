@@ -446,6 +446,37 @@ def test_ensure_index_recovers_from_concurrent_create_race():
     assert client.indices.update_alias_calls == []
 
 
+def test_ensure_index_validates_winner_state_when_aliases_appear_before_create():
+    """A concurrent winner with complete aliases is an existing index, not a conflict."""
+    from rag.elasticsearch_store import ElasticsearchChildStore
+
+    class AliasPreflightRaceIndices(_ExistingIndices):
+        def __init__(self):
+            super().__init__()
+            self.exists_calls = 0
+
+        def exists(self, *, index):
+            self.exists_calls += 1
+            return self.exists_calls > 1
+
+        def create(self, *, index, body):
+            raise AssertionError("the concurrent winner already created the index")
+
+    class AliasPreflightRaceClient:
+        def __init__(self):
+            self.indices = AliasPreflightRaceIndices()
+
+    client = AliasPreflightRaceClient()
+    store = ElasticsearchChildStore(client=client, config=_config())
+
+    result = store.ensure_index(vector_dims=3)
+
+    assert result.status == "already_initialized"
+    assert client.indices.exists_calls == 2
+    assert client.indices.create_calls == 0
+    assert client.indices.update_alias_calls == []
+
+
 def test_ensure_index_reraises_non_concurrent_create_error():
     from rag.elasticsearch_store import ElasticsearchChildStore
 
