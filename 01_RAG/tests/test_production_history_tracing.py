@@ -19,6 +19,7 @@ _CREDENTIAL_MARKER = "synthetic-production-authorization-marker"
 class _TracingStateObserver(BaseCallbackHandler):
     def __init__(self) -> None:
         self.chain_start_states: list[bool | str | None] = []
+        self.chain_start_events: list[dict[str, Any]] = []
 
     def on_chain_start(
         self,
@@ -29,6 +30,13 @@ class _TracingStateObserver(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         self.chain_start_states.append(get_tracing_context()["enabled"])
+        self.chain_start_events.append(
+            {
+                "name": kwargs.get("name"),
+                "tags": list(kwargs.get("tags") or []),
+                "metadata": dict(kwargs.get("metadata") or {}),
+            }
+        )
 
 
 class _TransportRecordingClient:
@@ -221,6 +229,62 @@ def test_production_history_chain_disables_ambient_before_safe_root_trace(
         ("human", "保修期多久？"),
         ("ai", "保修期为 12 个月。[S1]"),
     ]
+
+
+def test_production_history_chain_propagates_business_callback_to_nested_generation(
+    monkeypatch,
+):
+    """Clearing the inherited Runnable config drops nested business callbacks."""
+    import rag.chain as chain
+    from rag import langsmith_tracing as tracing
+
+    _configure_ambient_tracing(monkeypatch)
+    _patch_offline_rag_dependencies(monkeypatch, chain)
+    default_client_calls = _configure_client_boundary(
+        monkeypatch, tracing, fail=False
+    )
+    observer = _TracingStateObserver()
+    callback_tag = "business-monitoring-tag"
+    callback_metadata = {"business_monitor": "answer-generation"}
+    invoke_config = {
+        "callbacks": [observer],
+        "tags": [callback_tag],
+        "metadata": callback_metadata,
+        "configurable": {"session_id": "callback-propagation-session"},
+    }
+
+    history_chain, _ = chain.create_chain_with_history()
+    result = history_chain.invoke(
+        {"question": "保修期多久？"},
+        config=invoke_config,
+    )
+
+    assert result["answer"] == "保修期为 12 个月。[S1]"
+    nested_prompt_events = [
+        event
+        for event in observer.chain_start_events
+        if event["name"] == "ChatPromptTemplate"
+    ]
+    assert len(nested_prompt_events) == 1
+    assert callback_tag in nested_prompt_events[0]["tags"]
+    assert (
+        nested_prompt_events[0]["metadata"]["business_monitor"]
+        == "answer-generation"
+    )
+    assert invoke_config == {
+        "callbacks": [observer],
+        "tags": ["business-monitoring-tag"],
+        "metadata": {"business_monitor": "answer-generation"},
+        "configurable": {"session_id": "callback-propagation-session"},
+    }
+    assert default_client_calls == []
+    assert len(_TransportRecordingClient.instances) == 1
+    client = _TransportRecordingClient.instances[0]
+    assert [
+        run["name"]
+        for run in client.created
+        if run.get("parent_run_id") is None
+    ] == ["rag.request"]
 
 
 def test_safe_client_failure_keeps_production_history_execution_untraced(

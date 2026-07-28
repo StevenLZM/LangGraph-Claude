@@ -8,11 +8,13 @@ from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, Iterator, Mapping, Sequence
 
+from langchain_core.callbacks import BaseCallbackManager, CallbackManager
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langchain_core.runnables.config import var_child_runnable_config
+from langchain_core.tracers.langchain import LangChainTracer
 
 from config import DASHSCOPE_BASE_URL, DEEPSEEK_BASE_URL, llm_config
 from rag.context_assembler import render_evidence_block
@@ -70,13 +72,48 @@ class _AmbientTracingDisabledHistoryChain:
 
 
 @contextmanager
-def _without_inherited_runnable_config() -> Iterator[None]:
-    """Prevent disabled outer callbacks from becoming parents of safe traces."""
-    token = var_child_runnable_config.set(None)
+def _without_inherited_langsmith_parent() -> Iterator[None]:
+    """Retain business callbacks without inheriting the disabled outer run."""
+    inherited_config = var_child_runnable_config.get()
+    safe_config = dict(inherited_config) if inherited_config is not None else None
+    if safe_config is not None:
+        safe_config["tags"] = list(safe_config.get("tags") or [])
+        safe_config["metadata"] = dict(safe_config.get("metadata") or {})
+        safe_config["configurable"] = dict(safe_config.get("configurable") or {})
+        safe_config["callbacks"] = _copy_business_callbacks(
+            safe_config.get("callbacks")
+        )
+    token = var_child_runnable_config.set(safe_config)
     try:
         yield None
     finally:
         var_child_runnable_config.reset(token)
+
+
+def _copy_business_callbacks(callbacks: Any) -> Any:
+    if isinstance(callbacks, list):
+        return [
+            handler
+            for handler in callbacks
+            if not isinstance(handler, LangChainTracer)
+        ]
+    if not isinstance(callbacks, BaseCallbackManager):
+        return callbacks
+
+    inheritable_handlers = [
+        handler
+        for handler in callbacks.inheritable_handlers
+        if not isinstance(handler, LangChainTracer)
+    ]
+    return CallbackManager(
+        handlers=inheritable_handlers.copy(),
+        inheritable_handlers=inheritable_handlers.copy(),
+        parent_run_id=None,
+        tags=callbacks.inheritable_tags.copy(),
+        inheritable_tags=callbacks.inheritable_tags.copy(),
+        metadata=callbacks.inheritable_metadata.copy(),
+        inheritable_metadata=callbacks.inheritable_metadata.copy(),
+    )
 
 
 def _get_llm(model_name: str | None = None):
@@ -189,7 +226,7 @@ def run_rag_with_trace(
         "auth_context": resolved_auth_context,
     }
     with rag_tracing_context(tags=resolved_tags, metadata=resolved_metadata):
-        with _without_inherited_runnable_config(), trace_span(
+        with _without_inherited_langsmith_parent(), trace_span(
             "rag.request",
             inputs=root_inputs,
             tags=resolved_tags,
